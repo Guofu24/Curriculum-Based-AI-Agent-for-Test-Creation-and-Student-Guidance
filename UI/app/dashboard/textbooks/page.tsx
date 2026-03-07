@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import Link from "next/link"
 import { DashboardHeader } from "@/components/dashboard-header"
 import { Card, CardContent } from "@/components/ui/card"
@@ -34,96 +34,80 @@ import {
   Layers,
   Shield,
   X,
+  Loader2,
 } from "lucide-react"
+import { textbooks as textbooksApi, type TextbookListItem } from "@/lib/api"
 
-type TextbookStatus = "Processed" | "Processing"
-
-interface Textbook {
-  id: string
-  name: string
-  uploadDate: string
-  chaptersDetected: number
-  status: TextbookStatus
-  fileSize: string
-  fileType: string
+function formatFileSize(bytes: number) {
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`
+  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} KB`
+  return `${bytes} B`
 }
 
-const initialTextbooks: Textbook[] = [
-  {
-    id: "1",
-    name: "Data Structures & Algorithms in Java",
-    uploadDate: "Feb 28, 2026",
-    chaptersDetected: 14,
-    status: "Processed",
-    fileSize: "24.5 MB",
-    fileType: "PDF",
-  },
-  {
-    id: "2",
-    name: "Modern Operating Systems (5th Edition)",
-    uploadDate: "Feb 25, 2026",
-    chaptersDetected: 12,
-    status: "Processed",
-    fileSize: "31.2 MB",
-    fileType: "PDF",
-  },
-  {
-    id: "3",
-    name: "Database System Concepts (7th Edition)",
-    uploadDate: "Feb 22, 2026",
-    chaptersDetected: 18,
-    status: "Processed",
-    fileSize: "28.8 MB",
-    fileType: "PDF",
-  },
-  {
-    id: "4",
-    name: "Computer Networks - A Top Down Approach",
-    uploadDate: "Mar 2, 2026",
-    chaptersDetected: 0,
-    status: "Processing",
-    fileSize: "19.3 MB",
-    fileType: "DOCX",
-  },
-]
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleDateString("en-US", {
+    month: "short", day: "numeric", year: "numeric",
+  })
+}
 
 export default function TextbooksPage() {
-  const [textbooks, setTextbooks] = useState<Textbook[]>(initialTextbooks)
+  const [books, setBooks] = useState<TextbookListItem[]>([])
+  const [loading, setLoading] = useState(true)
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [isDragging, setIsDragging] = useState(false)
-  const [detailBook, setDetailBook] = useState<Textbook | null>(null)
+  const [detailBook, setDetailBook] = useState<TextbookListItem | null>(null)
+  const [error, setError] = useState("")
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const simulateUpload = useCallback(() => {
-    setIsUploading(true)
-    setUploadProgress(0)
-    const interval = setInterval(() => {
-      setUploadProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval)
-          setIsUploading(false)
-          setTextbooks((prev) => [
-            {
-              id: String(prev.length + 1),
-              name: "Artificial Intelligence - A Modern Approach",
-              uploadDate: "Mar 4, 2026",
-              chaptersDetected: 0,
-              status: "Processing",
-              fileSize: "22.1 MB",
-              fileType: "PDF",
-            },
-            ...prev,
-          ])
-          return 0
-        }
-        return prev + 8
-      })
-    }, 200)
+  const fetchBooks = useCallback(async () => {
+    try {
+      const data = await textbooksApi.list()
+      setBooks(data)
+    } catch {
+      setError("Failed to load textbooks")
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  const handleDelete = (id: string) => {
-    setTextbooks((prev) => prev.filter((t) => t.id !== id))
-  }
+  useEffect(() => { fetchBooks() }, [fetchBooks])
+
+  const handleUpload = useCallback(async (file: File) => {
+    setIsUploading(true)
+    setUploadProgress(10)
+    setError("")
+    // Simulate progressive progress while the real upload happens
+    const interval = setInterval(() => {
+      setUploadProgress((p) => Math.min(p + 5, 90))
+    }, 300)
+    try {
+      const title = file.name.replace(/\.[^.]+$/, "")
+      await textbooksApi.upload(title, file)
+      setUploadProgress(100)
+      await fetchBooks()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Upload failed")
+    } finally {
+      clearInterval(interval)
+      setIsUploading(false)
+      setUploadProgress(0)
+    }
+  }, [fetchBooks])
+
+  const handleFileSelect = useCallback((files: FileList | null) => {
+    if (!files || files.length === 0) return
+    handleUpload(files[0])
+  }, [handleUpload])
+
+  const handleDelete = useCallback(async (id: string) => {
+    try {
+      await textbooksApi.delete(id)
+      setBooks((prev) => prev.filter((t) => t.id !== id))
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Delete failed")
+    }
+  }, [])
 
   return (
     <>
@@ -145,6 +129,22 @@ export default function TextbooksPage() {
           </Badge>
         </div>
 
+        {error && (
+          <div className="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive flex items-center justify-between">
+            {error}
+            <button onClick={() => setError("")}><X className="h-4 w-4" /></button>
+          </div>
+        )}
+
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pdf,.docx,.doc,.pptx,.ppt"
+          className="hidden"
+          onChange={(e) => handleFileSelect(e.target.files)}
+        />
+
         {/* Upload Area */}
         <div
           className={`relative rounded-2xl border-2 border-dashed p-8 text-center transition-colors ${
@@ -160,7 +160,7 @@ export default function TextbooksPage() {
           onDrop={(e) => {
             e.preventDefault()
             setIsDragging(false)
-            simulateUpload()
+            handleFileSelect(e.dataTransfer.files)
           }}
         >
           {isUploading ? (
@@ -194,7 +194,7 @@ export default function TextbooksPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={simulateUpload}
+                onClick={() => fileInputRef.current?.click()}
               >
                 <Upload className="mr-2 h-3.5 w-3.5" />
                 Browse files
@@ -204,11 +204,15 @@ export default function TextbooksPage() {
         </div>
 
         {/* Textbook Grid */}
-        {textbooks.length === 0 ? (
-          <EmptyState onUpload={simulateUpload} />
+        {loading ? (
+          <div className="flex items-center justify-center py-16">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : books.length === 0 ? (
+          <EmptyState onUpload={() => fileInputRef.current?.click()} />
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {textbooks.map((book) => (
+            {books.map((book) => (
               <TextbookCard
                 key={book.id}
                 book={book}
@@ -223,7 +227,7 @@ export default function TextbooksPage() {
         <Dialog open={!!detailBook} onOpenChange={() => setDetailBook(null)}>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
-              <DialogTitle className="text-lg">{detailBook?.name}</DialogTitle>
+              <DialogTitle className="text-lg">{detailBook?.title}</DialogTitle>
               <DialogDescription>
                 Textbook details and metadata
               </DialogDescription>
@@ -231,10 +235,10 @@ export default function TextbooksPage() {
             {detailBook && (
               <div className="flex flex-col gap-4 pt-2">
                 <div className="grid grid-cols-2 gap-4">
-                  <DetailItem icon={<Calendar className="h-4 w-4" />} label="Upload Date" value={detailBook.uploadDate} />
-                  <DetailItem icon={<FileText className="h-4 w-4" />} label="File Type" value={detailBook.fileType} />
-                  <DetailItem icon={<Layers className="h-4 w-4" />} label="Chapters" value={detailBook.chaptersDetected > 0 ? `${detailBook.chaptersDetected} detected` : "Analyzing..."} />
-                  <DetailItem icon={<CloudUpload className="h-4 w-4" />} label="File Size" value={detailBook.fileSize} />
+                  <DetailItem icon={<Calendar className="h-4 w-4" />} label="Upload Date" value={formatDate(detailBook.created_at)} />
+                  <DetailItem icon={<FileText className="h-4 w-4" />} label="File Type" value={detailBook.file_type.toUpperCase()} />
+                  <DetailItem icon={<Layers className="h-4 w-4" />} label="Chapters" value={detailBook.chapter_count > 0 ? `${detailBook.chapter_count} detected` : "Analyzing..."} />
+                  <DetailItem icon={<CloudUpload className="h-4 w-4" />} label="File Size" value={formatFileSize(detailBook.file_size)} />
                 </div>
                 <div className="flex items-center gap-2 rounded-lg bg-muted/50 p-3">
                   <Shield className="h-4 w-4 text-primary shrink-0" />
@@ -242,7 +246,7 @@ export default function TextbooksPage() {
                     This textbook is stored securely and available for all future exam generations.
                   </p>
                 </div>
-                {detailBook.status === "Processed" && (
+                {detailBook.status.toLowerCase() === "processed" && (
                   <Button asChild className="w-full">
                     <Link href="/dashboard/generate">
                       <Sparkles className="mr-2 h-4 w-4" />
@@ -264,10 +268,13 @@ function TextbookCard({
   onDelete,
   onViewDetails,
 }: {
-  book: Textbook
+  book: TextbookListItem
   onDelete: (id: string) => void
-  onViewDetails: (book: Textbook) => void
+  onViewDetails: (book: TextbookListItem) => void
 }) {
+  const isProcessed = book.status.toLowerCase() === "processed"
+  const isProcessing = book.status.toLowerCase() === "processing"
+
   return (
     <Card className="group relative rounded-2xl shadow-sm transition-shadow hover:shadow-md">
       <CardContent className="p-5">
@@ -290,7 +297,7 @@ function TextbookCard({
                 <Eye className="mr-2 h-4 w-4" />
                 View details
               </DropdownMenuItem>
-              {book.status === "Processed" && (
+              {isProcessed && (
                 <DropdownMenuItem asChild>
                   <Link href="/dashboard/generate">
                     <Sparkles className="mr-2 h-4 w-4" />
@@ -312,37 +319,37 @@ function TextbookCard({
 
         <div className="mt-4">
           <h3 className="text-sm font-semibold text-foreground leading-snug line-clamp-2">
-            {book.name}
+            {book.title}
           </h3>
           <p className="mt-1.5 text-xs text-muted-foreground">
-            {book.fileType} - {book.fileSize}
+            {book.file_type.toUpperCase()} - {formatFileSize(book.file_size)}
           </p>
         </div>
 
         <div className="mt-4 flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Calendar className="h-3 w-3" />
-            {book.uploadDate}
+            {formatDate(book.created_at)}
           </div>
           <Badge
-            variant={book.status === "Processed" ? "secondary" : "outline"}
-            className="text-xs"
+            variant={isProcessed ? "secondary" : "outline"}
+            className="text-xs capitalize"
           >
-            {book.status === "Processing" && (
+            {isProcessing && (
               <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
             )}
             {book.status}
           </Badge>
         </div>
 
-        {book.status === "Processed" && (
+        {isProcessed && (
           <div className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground rounded-lg bg-muted/50 px-3 py-2">
             <Layers className="h-3 w-3 shrink-0" />
-            {book.chaptersDetected} chapters detected
+            {book.chapter_count} chapters detected
           </div>
         )}
 
-        {book.status === "Processing" && (
+        {isProcessing && (
           <div className="mt-3">
             <Progress value={65} className="h-1.5" />
             <p className="mt-1.5 text-xs text-muted-foreground">Analyzing chapters...</p>

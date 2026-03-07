@@ -1,7 +1,8 @@
 "use client"
 
 import { useState } from "react"
-import { useRouter } from "next/navigation"
+import { useAuth } from "@/components/auth-provider"
+import { ApiError } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -13,18 +14,54 @@ import {
   Sparkles,
   ArrowRight,
   Loader2,
+  UserPlus,
 } from "lucide-react"
 
 export default function LoginPage() {
-  const router = useRouter()
+  const { login, register } = useAuth()
+  const [mode, setMode] = useState<"login" | "register">("login")
   const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState("")
 
-  function handleLogin(e: React.FormEvent) {
+  // Login fields
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+
+  // Register fields
+  const [fullName, setFullName] = useState("")
+  const [department, setDepartment] = useState("")
+  const [university, setUniversity] = useState("")
+
+  async function handleLogin(e: React.FormEvent) {
     e.preventDefault()
     setIsLoading(true)
-    setTimeout(() => {
-      router.push("/dashboard")
-    }, 1200)
+    setError("")
+    try {
+      await login(email, password)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Login failed")
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  async function handleRegister(e: React.FormEvent) {
+    e.preventDefault()
+    setIsLoading(true)
+    setError("")
+    try {
+      await register({
+        email,
+        password,
+        full_name: fullName,
+        department: department || undefined,
+        university: university || undefined,
+      })
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Registration failed")
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (
@@ -99,79 +136,171 @@ export default function LoginPage() {
 
           <div className="mb-8">
             <h2 className="text-2xl font-semibold tracking-tight text-foreground">
-              Welcome back
+              {mode === "login" ? "Welcome back" : "Create account"}
             </h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              Sign in to your account to continue
+              {mode === "login"
+                ? "Sign in to your account to continue"
+                : "Register a new account to get started"}
             </p>
           </div>
 
-          <form onSubmit={handleLogin} className="flex flex-col gap-5">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="email" className="text-sm font-medium text-foreground">
-                Email address
-              </Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="lecturer@university.edu"
-                className="h-11"
-                defaultValue="dr.smith@university.edu"
-                required
-              />
+          {error && (
+            <div className="mb-4 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              {error}
             </div>
+          )}
 
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="password" className="text-sm font-medium text-foreground">
-                  Password
+          {mode === "login" ? (
+            <form onSubmit={handleLogin} className="flex flex-col gap-5">
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="email" className="text-sm font-medium text-foreground">
+                  Email address
                 </Label>
-                <button
-                  type="button"
-                  className="text-xs font-medium text-primary hover:text-primary/80 transition-colors"
-                >
-                  Forgot password?
-                </button>
+                <Input
+                  id="email"
+                  type="email"
+                  placeholder="lecturer@university.edu"
+                  className="h-11"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                />
               </div>
-              <Input
-                id="password"
-                type="password"
-                placeholder="Enter your password"
-                className="h-11"
-                defaultValue="password123"
-                required
-              />
-            </div>
 
-            <div className="flex items-center gap-2">
-              <Checkbox id="remember" defaultChecked />
-              <Label htmlFor="remember" className="text-sm text-muted-foreground font-normal cursor-pointer">
-                Remember me for 30 days
-              </Label>
-            </div>
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="password" className="text-sm font-medium text-foreground">
+                    Password
+                  </Label>
+                </div>
+                <Input
+                  id="password"
+                  type="password"
+                  placeholder="Enter your password"
+                  className="h-11"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+              </div>
 
-            <Button
-              type="submit"
-              size="lg"
-              className="h-11 w-full font-medium"
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <>
-                  Sign in
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </>
-              )}
-            </Button>
-          </form>
+              <Button
+                type="submit"
+                size="lg"
+                className="h-11 w-full font-medium"
+                disabled={isLoading}
+              >
+                {isLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    Sign in
+                    <ArrowRight className="ml-2 h-4 w-4" />
+                  </>
+                )}
+              </Button>
+            </form>
+          ) : (
+            <form onSubmit={handleRegister} className="flex flex-col gap-4">
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="reg-name" className="text-sm font-medium">Full name</Label>
+                <Input
+                  id="reg-name"
+                  placeholder="Dr. John Doe"
+                  className="h-11"
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="reg-email" className="text-sm font-medium">Email</Label>
+                <Input
+                  id="reg-email"
+                  type="email"
+                  placeholder="lecturer@university.edu"
+                  className="h-11"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="reg-password" className="text-sm font-medium">Password</Label>
+                <Input
+                  id="reg-password"
+                  type="password"
+                  placeholder="Minimum 6 characters"
+                  className="h-11"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  minLength={6}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="reg-dept" className="text-sm font-medium">Department</Label>
+                  <Input
+                    id="reg-dept"
+                    placeholder="Computer Science"
+                    className="h-11"
+                    value={department}
+                    onChange={(e) => setDepartment(e.target.value)}
+                  />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="reg-uni" className="text-sm font-medium">University</Label>
+                  <Input
+                    id="reg-uni"
+                    placeholder="State University"
+                    className="h-11"
+                    value={university}
+                    onChange={(e) => setUniversity(e.target.value)}
+                  />
+                </div>
+              </div>
+              <Button
+                type="submit"
+                size="lg"
+                className="h-11 w-full font-medium"
+                disabled={isLoading}
+              >
+                {isLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    Create account
+                    <UserPlus className="ml-2 h-4 w-4" />
+                  </>
+                )}
+              </Button>
+            </form>
+          )}
 
           <p className="mt-8 text-center text-xs text-muted-foreground">
-            {"Don't have an account? "}
-            <button className="font-medium text-primary hover:text-primary/80 transition-colors">
-              Contact your administrator
-            </button>
+            {mode === "login" ? (
+              <>
+                {"Don't have an account? "}
+                <button
+                  className="font-medium text-primary hover:text-primary/80 transition-colors"
+                  onClick={() => { setMode("register"); setError("") }}
+                >
+                  Create one
+                </button>
+              </>
+            ) : (
+              <>
+                {"Already have an account? "}
+                <button
+                  className="font-medium text-primary hover:text-primary/80 transition-colors"
+                  onClick={() => { setMode("login"); setError("") }}
+                >
+                  Sign in
+                </button>
+              </>
+            )}
           </p>
         </div>
       </div>

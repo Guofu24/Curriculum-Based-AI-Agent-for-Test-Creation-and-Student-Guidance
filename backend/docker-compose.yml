@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: examai-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: examai
+      POSTGRES_PASSWORD: examai
+      POSTGRES_DB: examai
+    volumes:
+      - examai_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U examai"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  examai_pgdata:

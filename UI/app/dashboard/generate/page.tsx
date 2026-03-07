@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import { DashboardHeader } from "@/components/dashboard-header"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -46,12 +46,14 @@ import {
   Hash,
 } from "lucide-react"
 import { GenerationStepper } from "@/components/generation-stepper"
-
-const textbooks = [
-  { id: "1", name: "Data Structures & Algorithms in Java", chapters: 14 },
-  { id: "2", name: "Modern Operating Systems (5th Edition)", chapters: 12 },
-  { id: "3", name: "Database System Concepts (7th Edition)", chapters: 18 },
-]
+import {
+  textbooks as textbooksApi,
+  generation as generationApi,
+  type TextbookListItem,
+  type Exam,
+  type ExamGenerationRequest,
+  type GenerationStep,
+} from "@/lib/api"
 
 const bloomLevels = [
   "Remember",
@@ -64,6 +66,8 @@ const bloomLevels = [
 
 export default function GenerateExamPage() {
   const router = useRouter()
+  const [books, setBooks] = useState<TextbookListItem[]>([])
+  const [loadingBooks, setLoadingBooks] = useState(true)
   const [selectedTextbook, setSelectedTextbook] = useState("")
   const [selectedChapters, setSelectedChapters] = useState<number[]>([])
   const [prompt, setPrompt] = useState("")
@@ -78,9 +82,19 @@ export default function GenerateExamPage() {
   const [creativityLevel, setCreativityLevel] = useState([30])
   const [bloomLevel, setBloomLevel] = useState("Apply")
   const [isGenerating, setIsGenerating] = useState(false)
+  const [generationSteps, setGenerationSteps] = useState<GenerationStep[]>([])
+  const [generationError, setGenerationError] = useState("")
+  const [generatedExamId, setGeneratedExamId] = useState<string | null>(null)
 
-  const currentTextbook = textbooks.find((t) => t.id === selectedTextbook)
-  const chapterCount = currentTextbook?.chapters || 0
+  // Fetch textbooks
+  useEffect(() => {
+    textbooksApi.list().then((list) => {
+      setBooks(list.filter((b) => b.status.toLowerCase() === "processed"))
+    }).catch(() => {}).finally(() => setLoadingBooks(false))
+  }, [])
+
+  const currentTextbook = books.find((t) => t.id === selectedTextbook)
+  const chapterCount = currentTextbook?.chapter_count || 0
 
   const toggleChapter = (ch: number) => {
     setSelectedChapters((prev) =>
@@ -112,18 +126,88 @@ export default function GenerateExamPage() {
   }
 
   const handleGenerate = () => {
+    if (!selectedTextbook || selectedChapters.length === 0 || totalQuestions === 0) return
     setIsGenerating(true)
+    setGenerationError("")
+    setGeneratedExamId(null)
+
+    const reqData: ExamGenerationRequest = {
+      textbook_id: selectedTextbook,
+      chapters: selectedChapters,
+      prompt: prompt || `Generate exam for chapters ${selectedChapters.join(", ")}`,
+      exam_type: questionType,
+      difficulty: "custom",
+      question_distribution: {
+        mcq: questionType === "essay" ? { easy: 0, medium: 0, hard: 0 } : mcqCounts,
+        essay: questionType === "mcq" ? { easy: 0, medium: 0, hard: 0 } : essayCounts,
+      },
+      num_variants: examCount,
+      gradually_increasing: gradualDifficulty,
+      constraints: {
+        strict_grounding: noHallucination,
+        allow_applied_questions: appliedQuestions,
+        grade_level_scope: gradeLevelScope ? "undergraduate" : undefined,
+        creativity_level: creativityLevel[0] / 100,
+        bloom_levels: [bloomLevel.toLowerCase()],
+      },
+    }
+
+    generationApi.generateStream(
+      reqData,
+      (step) => setGenerationSteps((prev) => {
+        const idx = prev.findIndex((s) => s.step === step.step)
+        if (idx >= 0) {
+          const copy = [...prev]
+          copy[idx] = step
+          return copy
+        }
+        return [...prev, step]
+      }),
+      (exam) => {
+        setGeneratedExamId(exam.id)
+      },
+      (error) => {
+        setGenerationError(error)
+      },
+    )
   }
 
-  const handleGenerationComplete = () => {
-    router.push("/dashboard/exams/1")
-  }
+  const handleGenerationComplete = useCallback(() => {
+    if (generatedExamId) {
+      router.push(`/dashboard/exams/${generatedExamId}`)
+    } else {
+      // fallback if stream sent exam_id in step message
+      const finalStep = generationSteps.find(
+        (s) => s.step === 5 && s.status === "completed" && s.message,
+      )
+      if (finalStep?.message) {
+        router.push(`/dashboard/exams/${finalStep.message}`)
+      } else {
+        router.push("/dashboard/history")
+      }
+    }
+  }, [generatedExamId, generationSteps, router])
 
   if (isGenerating) {
     return (
       <>
         <DashboardHeader title="Generate Exam" />
-        <GenerationStepper onComplete={handleGenerationComplete} />
+        {generationError ? (
+          <div className="flex flex-1 items-center justify-center p-6">
+            <div className="max-w-md text-center">
+              <p className="text-destructive font-medium mb-2">Generation Failed</p>
+              <p className="text-sm text-muted-foreground mb-4">{generationError}</p>
+              <Button onClick={() => { setIsGenerating(false); setGenerationError(""); }}>
+                Try Again
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <GenerationStepper
+            steps={generationSteps}
+            onComplete={handleGenerationComplete}
+          />
+        )}
       </>
     )
   }
@@ -158,14 +242,14 @@ export default function GenerateExamPage() {
                 setSelectedChapters([])
               }}>
                 <SelectTrigger className="h-11">
-                  <SelectValue placeholder="Choose a textbook from your library" />
+                  <SelectValue placeholder={loadingBooks ? "Loading textbooks..." : "Choose a textbook from your library"} />
                 </SelectTrigger>
                 <SelectContent>
-                  {textbooks.map((book) => (
+                  {books.map((book) => (
                     <SelectItem key={book.id} value={book.id}>
                       <div className="flex items-center gap-2">
                         <BookOpen className="h-3.5 w-3.5 text-muted-foreground" />
-                        {book.name}
+                        {book.title}
                       </div>
                     </SelectItem>
                   ))}

@@ -1,68 +1,43 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import { Check, Loader2, BookOpen, Database, Sparkles, ShieldCheck, FileCheck } from "lucide-react"
 import { cn } from "@/lib/utils"
+import type { GenerationStep as SSEStep } from "@/lib/api"
 
-const steps = [
-  {
-    id: 1,
-    label: "Parsing textbook",
-    description: "Extracting content from selected chapters",
-    icon: BookOpen,
-    duration: 2000,
-  },
-  {
-    id: 2,
-    label: "Retrieving knowledge",
-    description: "Building knowledge graph from textbook content",
-    icon: Database,
-    duration: 2500,
-  },
-  {
-    id: 3,
-    label: "Generating questions",
-    description: "AI is crafting exam questions based on your configuration",
-    icon: Sparkles,
-    duration: 3000,
-  },
-  {
-    id: 4,
-    label: "Validating constraints",
-    description: "Checking hallucination, scope, and difficulty alignment",
-    icon: ShieldCheck,
-    duration: 1500,
-  },
-  {
-    id: 5,
-    label: "Finalizing exam",
-    description: "Formatting and organizing the final exam document",
-    icon: FileCheck,
-    duration: 1000,
-  },
+const defaultSteps = [
+  { id: 1, label: "Parsing textbook", description: "Extracting content from selected chapters", icon: BookOpen },
+  { id: 2, label: "Retrieving knowledge", description: "Building knowledge graph from textbook content", icon: Database },
+  { id: 3, label: "Generating questions", description: "AI is crafting exam questions based on your configuration", icon: Sparkles },
+  { id: 4, label: "Validating constraints", description: "Checking hallucination, scope, and difficulty alignment", icon: ShieldCheck },
+  { id: 5, label: "Finalizing exam", description: "Formatting and organizing the final exam document", icon: FileCheck },
 ]
 
 export function GenerationStepper({
+  steps: sseSteps,
   onComplete,
 }: {
+  steps?: SSEStep[]
   onComplete: () => void
 }) {
-  const [currentStep, setCurrentStep] = useState(0)
-  const [completedSteps, setCompletedSteps] = useState<number[]>([])
+  const calledRef = useRef(false)
+
+  // Derive state from SSE steps
+  const stepStatuses = defaultSteps.map((ds) => {
+    const sse = sseSteps?.find((s) => s.step === ds.id)
+    return sse?.status ?? "pending"
+  })
+
+  const completedCount = stepStatuses.filter((s) => s === "completed").length
+  const allDone = completedCount === defaultSteps.length
 
   useEffect(() => {
-    if (currentStep >= steps.length) {
-      const timer = setTimeout(onComplete, 600)
+    if (allDone && !calledRef.current) {
+      calledRef.current = true
+      const timer = setTimeout(onComplete, 800)
       return () => clearTimeout(timer)
     }
-
-    const timer = setTimeout(() => {
-      setCompletedSteps((prev) => [...prev, currentStep])
-      setCurrentStep((prev) => prev + 1)
-    }, steps[currentStep].duration)
-
-    return () => clearTimeout(timer)
-  }, [currentStep, onComplete])
+  }, [allDone, onComplete])
 
   return (
     <div className="flex flex-1 items-center justify-center p-6">
@@ -80,21 +55,23 @@ export function GenerationStepper({
         </div>
 
         <div className="flex flex-col gap-1">
-          {steps.map((step, index) => {
-            const isCompleted = completedSteps.includes(index)
-            const isActive = currentStep === index
-            const isPending = !isCompleted && !isActive
+          {defaultSteps.map((step, index) => {
+            const status = stepStatuses[index]
+            const isCompleted = status === "completed"
+            const isActive = status === "running"
+            const isFailed = status === "failed"
+            const isPending = !isCompleted && !isActive && !isFailed
             const StepIcon = step.icon
 
             return (
               <div key={step.id} className="flex items-start gap-4">
-                {/* Step Indicator */}
                 <div className="flex flex-col items-center">
                   <div
                     className={cn(
                       "flex h-9 w-9 items-center justify-center rounded-xl border-2 transition-all duration-500",
                       isCompleted && "border-primary bg-primary text-primary-foreground",
                       isActive && "border-primary bg-primary/10 text-primary",
+                      isFailed && "border-destructive bg-destructive/10 text-destructive",
                       isPending && "border-border bg-muted text-muted-foreground"
                     )}
                   >
@@ -106,7 +83,7 @@ export function GenerationStepper({
                       <StepIcon className="h-4 w-4" />
                     )}
                   </div>
-                  {index < steps.length - 1 && (
+                  {index < defaultSteps.length - 1 && (
                     <div
                       className={cn(
                         "w-0.5 h-8 transition-colors duration-500",
@@ -116,19 +93,21 @@ export function GenerationStepper({
                   )}
                 </div>
 
-                {/* Step Content */}
                 <div className="flex flex-col gap-0.5 pt-1.5">
                   <span
                     className={cn(
                       "text-sm font-medium transition-colors",
-                      isCompleted && "text-foreground",
-                      isActive && "text-foreground",
+                      (isCompleted || isActive) && "text-foreground",
+                      isFailed && "text-destructive",
                       isPending && "text-muted-foreground"
                     )}
                   >
                     {step.label}
                     {isCompleted && (
                       <span className="ml-2 text-xs text-primary font-normal">Done</span>
+                    )}
+                    {isFailed && (
+                      <span className="ml-2 text-xs text-destructive font-normal">Failed</span>
                     )}
                   </span>
                   <span className="text-xs text-muted-foreground">
@@ -140,18 +119,17 @@ export function GenerationStepper({
           })}
         </div>
 
-        {/* Progress Bar */}
         <div className="mt-8">
           <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
             <div
               className="h-full rounded-full bg-primary transition-all duration-500 ease-out"
               style={{
-                width: `${((completedSteps.length) / steps.length) * 100}%`,
+                width: `${(completedCount / defaultSteps.length) * 100}%`,
               }}
             />
           </div>
           <p className="mt-2 text-center text-xs text-muted-foreground">
-            Step {Math.min(currentStep + 1, steps.length)} of {steps.length}
+            {completedCount} of {defaultSteps.length} steps completed
           </p>
         </div>
       </div>

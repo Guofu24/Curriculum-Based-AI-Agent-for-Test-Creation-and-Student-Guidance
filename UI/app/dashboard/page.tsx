@@ -1,5 +1,6 @@
 "use client"
 
+import { useState, useEffect } from "react"
 import Link from "next/link"
 import { DashboardHeader } from "@/components/dashboard-header"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -12,66 +13,80 @@ import {
   TrendingUp,
   ArrowRight,
   Clock,
+  Loader2,
 } from "lucide-react"
+import { useAuth } from "@/components/auth-provider"
+import {
+  textbooks as textbooksApi,
+  exams as examsApi,
+  type ExamListItem,
+} from "@/lib/api"
 
-const stats = [
-  {
-    title: "Total Textbooks",
-    value: "12",
-    change: "+2 this month",
-    icon: BookOpen,
-  },
-  {
-    title: "Exams Generated",
-    value: "47",
-    change: "+8 this week",
-    icon: FileText,
-  },
-  {
-    title: "Questions Created",
-    value: "1,284",
-    change: "+156 this week",
-    icon: Sparkles,
-  },
-  {
-    title: "Avg. Quality Score",
-    value: "94%",
-    change: "+3% improvement",
-    icon: TrendingUp,
-  },
-]
-
-const recentExams = [
-  {
-    id: "1",
-    title: "Data Structures Midterm",
-    textbook: "Data Structures & Algorithms",
-    chapters: "Ch. 1-5",
-    type: "Mixed",
-    difficulty: "Advanced",
-    date: "2 hours ago",
-  },
-  {
-    id: "2",
-    title: "Operating Systems Quiz",
-    textbook: "Modern Operating Systems",
-    chapters: "Ch. 3",
-    type: "Multiple Choice",
-    difficulty: "Basic",
-    date: "Yesterday",
-  },
-  {
-    id: "3",
-    title: "Database Final Exam",
-    textbook: "Database System Concepts",
-    chapters: "Ch. 1-12",
-    type: "Essay",
-    difficulty: "High Application",
-    date: "3 days ago",
-  },
-]
+function formatDate(iso: string) {
+  const d = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  const diffH = Math.floor(diffMs / 3_600_000)
+  if (diffH < 1) return "Just now"
+  if (diffH < 24) return `${diffH} hours ago`
+  const diffD = Math.floor(diffH / 24)
+  if (diffD === 1) return "Yesterday"
+  if (diffD < 7) return `${diffD} days ago`
+  return d.toLocaleDateString()
+}
 
 export default function DashboardPage() {
+  const { user } = useAuth()
+  const [textbookCount, setTextbookCount] = useState(0)
+  const [examCount, setExamCount] = useState(0)
+  const [totalQuestions, setTotalQuestions] = useState(0)
+  const [recentExams, setRecentExams] = useState<ExamListItem[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const [books, examList] = await Promise.all([
+          textbooksApi.list(),
+          examsApi.list(),
+        ])
+        setTextbookCount(books.length)
+        setExamCount(examList.length)
+        setTotalQuestions(examList.reduce((sum, e) => sum + e.total_questions, 0))
+        setRecentExams(examList.slice(0, 3))
+      } catch {
+        // silently fail — user sees zeros
+      } finally {
+        setLoading(false)
+      }
+    }
+    load()
+  }, [])
+
+  const firstName = user?.full_name?.split(" ")[0] ?? "there"
+
+  const stats = [
+    {
+      title: "Total Textbooks",
+      value: textbookCount.toString(),
+      icon: BookOpen,
+    },
+    {
+      title: "Exams Generated",
+      value: examCount.toString(),
+      icon: FileText,
+    },
+    {
+      title: "Questions Created",
+      value: totalQuestions.toLocaleString(),
+      icon: Sparkles,
+    },
+    {
+      title: "Avg. Quality Score",
+      value: "—",
+      icon: TrendingUp,
+    },
+  ]
   return (
     <>
       <DashboardHeader title="Dashboard" />
@@ -79,7 +94,7 @@ export default function DashboardPage() {
         {/* Welcome */}
         <div>
           <h2 className="text-2xl font-semibold tracking-tight text-foreground">
-            Good morning, Dr. Smith
+            Good morning, {firstName}
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
             {"Here's what's happening with your exams today."}
@@ -99,8 +114,9 @@ export default function DashboardPage() {
                 </div>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-semibold text-foreground">{stat.value}</div>
-                <p className="mt-1 text-xs text-muted-foreground">{stat.change}</p>
+                <div className="text-2xl font-semibold text-foreground">
+                  {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : stat.value}
+                </div>
               </CardContent>
             </Card>
           ))}
@@ -148,35 +164,45 @@ export default function DashboardPage() {
             </CardHeader>
             <CardContent>
               <div className="flex flex-col gap-3">
-                {recentExams.map((exam) => (
-                  <Link
-                    key={exam.id}
-                    href={`/dashboard/exams/${exam.id}`}
-                    className="flex items-center justify-between rounded-xl border p-4 transition-colors hover:bg-muted/50"
-                  >
-                    <div className="flex flex-col gap-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-foreground truncate">
-                          {exam.title}
+                {loading ? (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  </div>
+                ) : recentExams.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-8 text-center">
+                    No exams yet. Generate your first exam!
+                  </p>
+                ) : (
+                  recentExams.map((exam) => (
+                    <Link
+                      key={exam.id}
+                      href={`/dashboard/exams/${exam.id}`}
+                      className="flex items-center justify-between rounded-xl border p-4 transition-colors hover:bg-muted/50"
+                    >
+                      <div className="flex flex-col gap-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-foreground truncate">
+                            {exam.title}
+                          </span>
+                        </div>
+                        <span className="text-xs text-muted-foreground truncate">
+                          {exam.total_questions} questions - Ch. {exam.chapters.join(", ")}
                         </span>
                       </div>
-                      <span className="text-xs text-muted-foreground truncate">
-                        {exam.textbook} - {exam.chapters}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0 ml-4">
-                      <Badge variant="secondary" className="text-xs">
-                        {exam.type}
-                      </Badge>
-                      <Badge variant="outline" className="text-xs">
-                        {exam.difficulty}
-                      </Badge>
-                      <span className="text-xs text-muted-foreground whitespace-nowrap hidden sm:inline">
-                        {exam.date}
-                      </span>
-                    </div>
-                  </Link>
-                ))}
+                      <div className="flex items-center gap-2 shrink-0 ml-4">
+                        <Badge variant="secondary" className="text-xs capitalize">
+                          {exam.exam_type}
+                        </Badge>
+                        <Badge variant="outline" className="text-xs capitalize">
+                          {exam.difficulty}
+                        </Badge>
+                        <span className="text-xs text-muted-foreground whitespace-nowrap hidden sm:inline">
+                          {formatDate(exam.created_at)}
+                        </span>
+                      </div>
+                    </Link>
+                  ))
+                )}
               </div>
             </CardContent>
           </Card>

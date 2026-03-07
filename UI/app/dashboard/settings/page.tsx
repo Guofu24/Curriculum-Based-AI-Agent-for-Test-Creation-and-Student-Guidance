@@ -16,8 +16,10 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Save, Loader2, User, Bell, Globe, Shield } from "lucide-react"
+import { useAuth } from "@/components/auth-provider"
 
 export default function SettingsPage() {
+  const { user } = useAuth()
   const [isSaving, setIsSaving] = useState(false)
 
   const handleSave = () => {
@@ -51,21 +53,21 @@ export default function SettingsPage() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="flex flex-col gap-2">
                 <Label className="text-sm font-medium">Full Name</Label>
-                <Input defaultValue="Dr. Sarah Smith" className="h-10" />
+                <Input defaultValue={user?.full_name ?? ""} className="h-10" />
               </div>
               <div className="flex flex-col gap-2">
                 <Label className="text-sm font-medium">Email</Label>
-                <Input defaultValue="dr.smith@university.edu" className="h-10" />
+                <Input defaultValue={user?.email ?? ""} className="h-10" />
               </div>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="flex flex-col gap-2">
                 <Label className="text-sm font-medium">Department</Label>
-                <Input defaultValue="Computer Science" className="h-10" />
+                <Input defaultValue={user?.department ?? ""} className="h-10" />
               </div>
               <div className="flex flex-col gap-2">
                 <Label className="text-sm font-medium">University</Label>
-                <Input defaultValue="State University" className="h-10" />
+                <Input defaultValue={user?.university ?? ""} className="h-10" />
               </div>
             </div>
           </CardContent>

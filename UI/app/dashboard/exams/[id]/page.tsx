@@ -1,6 +1,7 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
+import { useParams } from "next/navigation"
 import { DashboardHeader } from "@/components/dashboard-header"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -44,115 +45,54 @@ import {
   Check,
   Loader2,
 } from "lucide-react"
-
-interface Question {
-  id: number
-  section: "A" | "B"
-  type: "mcq" | "essay"
-  content: string
-  difficulty: "Basic" | "Advanced" | "High Application"
-  options?: string[]
-  correctAnswer?: string
-}
-
-const mockQuestions: Question[] = [
-  {
-    id: 1,
-    section: "A",
-    type: "mcq",
-    content: "Which of the following data structures uses LIFO (Last In, First Out) ordering?",
-    difficulty: "Basic",
-    options: ["Queue", "Stack", "Linked List", "Binary Tree"],
-    correctAnswer: "Stack",
-  },
-  {
-    id: 2,
-    section: "A",
-    type: "mcq",
-    content: "What is the time complexity of searching for an element in a balanced binary search tree?",
-    difficulty: "Advanced",
-    options: ["O(1)", "O(log n)", "O(n)", "O(n log n)"],
-    correctAnswer: "O(log n)",
-  },
-  {
-    id: 3,
-    section: "A",
-    type: "mcq",
-    content: "In a hash table with chaining, what happens when two keys hash to the same index?",
-    difficulty: "Basic",
-    options: [
-      "The second key overwrites the first",
-      "Both keys are stored in a linked list at that index",
-      "The hash table is resized",
-      "An error is thrown",
-    ],
-    correctAnswer: "Both keys are stored in a linked list at that index",
-  },
-  {
-    id: 4,
-    section: "A",
-    type: "mcq",
-    content: "Which graph traversal algorithm uses a queue as its underlying data structure?",
-    difficulty: "Basic",
-    options: [
-      "Depth-First Search",
-      "Breadth-First Search",
-      "Dijkstra's Algorithm",
-      "Bellman-Ford Algorithm",
-    ],
-    correctAnswer: "Breadth-First Search",
-  },
-  {
-    id: 5,
-    section: "B",
-    type: "essay",
-    content: "Explain the differences between a stack and a queue. Provide real-world examples where each data structure would be the most appropriate choice. Include a discussion of their time complexities for common operations.",
-    difficulty: "Advanced",
-  },
-  {
-    id: 6,
-    section: "B",
-    type: "essay",
-    content: "Design a solution using appropriate data structures for a parking lot management system. Your solution should efficiently handle vehicle entry, exit, and finding available spots. Justify your choice of data structures and analyze the time complexity of each operation.",
-    difficulty: "High Application",
-  },
-  {
-    id: 7,
-    section: "B",
-    type: "essay",
-    content: "Compare and contrast AVL trees and Red-Black trees. Discuss their balancing strategies, worst-case performance guarantees, and situations where one would be preferred over the other in a real-world application.",
-    difficulty: "Advanced",
-  },
-]
+import {
+  exams as examsApi,
+  generation as generationApi,
+  type Exam,
+  type Question as ApiQuestion,
+} from "@/lib/api"
 
 export default function ExamReviewPage() {
-  const [questions, setQuestions] = useState<Question[]>(mockQuestions)
-  const [editingId, setEditingId] = useState<number | null>(null)
+  const params = useParams()
+  const examId = params.id as string
+  const [exam, setExam] = useState<Exam | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [editContent, setEditContent] = useState("")
   const [regenerateModal, setRegenerateModal] = useState<{
     type: "single" | "from"
-    questionId: number
+    questionId: string
   } | null>(null)
   const [regeneratePrompt, setRegeneratePrompt] = useState("")
   const [regenerateFrom, setRegenerateFrom] = useState<string>("current")
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
 
-  const sectionA = questions.filter((q) => q.section === "A")
-  const sectionB = questions.filter((q) => q.section === "B")
+  useEffect(() => {
+    if (!examId) return
+    examsApi.get(examId)
+      .then(setExam)
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [examId])
 
-  const startEdit = (question: Question) => {
+  const questions = exam?.questions ?? []
+  const mcqQuestions = questions.filter((q) => q.question_type === "mcq")
+  const essayQuestions = questions.filter((q) => q.question_type === "essay")
+
+  const startEdit = (question: ApiQuestion) => {
     setEditingId(question.id)
     setEditContent(question.content)
   }
 
   const saveEdit = () => {
-    if (editingId !== null) {
-      setQuestions((prev) =>
-        prev.map((q) =>
+    if (editingId !== null && exam) {
+      setExam({
+        ...exam,
+        questions: exam.questions.map((q) =>
           q.id === editingId ? { ...q, content: editContent } : q
-        )
-      )
+        ),
+      })
       setEditingId(null)
       setEditContent("")
     }
@@ -163,18 +103,55 @@ export default function ExamReviewPage() {
     setEditContent("")
   }
 
-  const handleRegenerate = () => {
+  const handleRegenerate = async () => {
+    if (!regenerateModal || !exam) return
     setIsRegenerating(true)
-    setTimeout(() => {
+    try {
+      const result = await generationApi.partialRegenerate({
+        exam_id: exam.id,
+        edits: [
+          {
+            question_ids: [regenerateModal.questionId],
+            edit_prompt: regeneratePrompt || undefined,
+            edit_type: regenerateModal.type === "single" ? "regenerate" : "regenerate",
+          },
+        ],
+      })
+      setExam(result)
+    } catch {
+      // silently fail
+    } finally {
       setIsRegenerating(false)
       setRegenerateModal(null)
       setRegeneratePrompt("")
-    }, 2000)
+    }
   }
 
   const handleSave = () => {
     setIsSaving(true)
     setTimeout(() => setIsSaving(false), 1500)
+  }
+
+  if (loading) {
+    return (
+      <>
+        <DashboardHeader title="Exam Review" />
+        <div className="flex flex-1 items-center justify-center">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        </div>
+      </>
+    )
+  }
+
+  if (!exam) {
+    return (
+      <>
+        <DashboardHeader title="Exam Review" />
+        <div className="flex flex-1 items-center justify-center">
+          <p className="text-muted-foreground">Exam not found</p>
+        </div>
+      </>
+    )
   }
 
   return (
@@ -185,10 +162,10 @@ export default function ExamReviewPage() {
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h2 className="text-2xl font-semibold tracking-tight text-foreground">
-              Data Structures Midterm
+              {exam.title}
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              7 questions - Chapters 1-5 - Generated just now
+              {exam.total_questions} questions - Chapters {exam.chapters.join(", ")} - {new Date(exam.created_at).toLocaleDateString()}
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -246,54 +223,58 @@ export default function ExamReviewPage() {
         </Card>
 
         {/* Section A: Multiple Choice */}
-        <div className="flex flex-col gap-4">
-          <div className="flex items-center gap-2">
-            <Badge className="bg-primary text-primary-foreground">Section A</Badge>
-            <span className="text-sm font-medium text-foreground">Multiple Choice</span>
-            <span className="text-xs text-muted-foreground">({sectionA.length} questions)</span>
+        {mcqQuestions.length > 0 && (
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center gap-2">
+              <Badge className="bg-primary text-primary-foreground">Section A</Badge>
+              <span className="text-sm font-medium text-foreground">Multiple Choice</span>
+              <span className="text-xs text-muted-foreground">({mcqQuestions.length} questions)</span>
+            </div>
+            {mcqQuestions.map((question, index) => (
+              <QuestionCard
+                key={question.id}
+                question={question}
+                index={index + 1}
+                isEditing={editingId === question.id}
+                editContent={editContent}
+                onEditContent={setEditContent}
+                onStartEdit={() => startEdit(question)}
+                onSaveEdit={saveEdit}
+                onCancelEdit={cancelEdit}
+                onRegenerate={(type) =>
+                  setRegenerateModal({ type, questionId: question.id })
+                }
+              />
+            ))}
           </div>
-          {sectionA.map((question, index) => (
-            <QuestionCard
-              key={question.id}
-              question={question}
-              index={index + 1}
-              isEditing={editingId === question.id}
-              editContent={editContent}
-              onEditContent={setEditContent}
-              onStartEdit={() => startEdit(question)}
-              onSaveEdit={saveEdit}
-              onCancelEdit={cancelEdit}
-              onRegenerate={(type) =>
-                setRegenerateModal({ type, questionId: question.id })
-              }
-            />
-          ))}
-        </div>
+        )}
 
         {/* Section B: Essay */}
-        <div className="flex flex-col gap-4">
-          <div className="flex items-center gap-2">
-            <Badge className="bg-primary text-primary-foreground">Section B</Badge>
-            <span className="text-sm font-medium text-foreground">Essay</span>
-            <span className="text-xs text-muted-foreground">({sectionB.length} questions)</span>
+        {essayQuestions.length > 0 && (
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center gap-2">
+              <Badge className="bg-primary text-primary-foreground">Section B</Badge>
+              <span className="text-sm font-medium text-foreground">Essay</span>
+              <span className="text-xs text-muted-foreground">({essayQuestions.length} questions)</span>
+            </div>
+            {essayQuestions.map((question, index) => (
+              <QuestionCard
+                key={question.id}
+                question={question}
+                index={mcqQuestions.length + index + 1}
+                isEditing={editingId === question.id}
+                editContent={editContent}
+                onEditContent={setEditContent}
+                onStartEdit={() => startEdit(question)}
+                onSaveEdit={saveEdit}
+                onCancelEdit={cancelEdit}
+                onRegenerate={(type) =>
+                  setRegenerateModal({ type, questionId: question.id })
+                }
+              />
+            ))}
           </div>
-          {sectionB.map((question, index) => (
-            <QuestionCard
-              key={question.id}
-              question={question}
-              index={sectionA.length + index + 1}
-              isEditing={editingId === question.id}
-              editContent={editContent}
-              onEditContent={setEditContent}
-              onStartEdit={() => startEdit(question)}
-              onSaveEdit={saveEdit}
-              onCancelEdit={cancelEdit}
-              onRegenerate={(type) =>
-                setRegenerateModal({ type, questionId: question.id })
-              }
-            />
-          ))}
-        </div>
+        )}
 
         {/* Regenerate Modal */}
         <Dialog
@@ -386,7 +367,7 @@ function QuestionCard({
   onCancelEdit,
   onRegenerate,
 }: {
-  question: Question
+  question: ApiQuestion
   index: number
   isEditing: boolean
   editContent: string
@@ -396,10 +377,11 @@ function QuestionCard({
   onCancelEdit: () => void
   onRegenerate: (type: "single" | "from") => void
 }) {
+  const difficultyLabel = question.difficulty_score <= 0.33 ? "Easy" : question.difficulty_score <= 0.66 ? "Medium" : "Hard"
   const difficultyColor = {
-    Basic: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800",
-    Advanced: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800",
-    "High Application": "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950 dark:text-rose-400 dark:border-rose-800",
+    Easy: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800",
+    Medium: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800",
+    Hard: "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950 dark:text-rose-400 dark:border-rose-800",
   }
 
   return (
@@ -411,13 +393,13 @@ function QuestionCard({
               {index}
             </span>
             <Badge variant="outline" className="text-xs">
-              {question.type === "mcq" ? "MCQ" : "Essay"}
+              {question.question_type === "mcq" ? "MCQ" : "Essay"}
             </Badge>
             <Badge
               variant="outline"
-              className={`text-xs ${difficultyColor[question.difficulty]}`}
+              className={`text-xs ${difficultyColor[difficultyLabel]}`}
             >
-              {question.difficulty}
+              {difficultyLabel}
             </Badge>
           </div>
 
@@ -494,16 +476,16 @@ function QuestionCard({
                     <div
                       key={i}
                       className={`flex items-center gap-3 rounded-lg border px-3 py-2 text-sm ${
-                        option === question.correctAnswer
+                        option.text === question.correct_answer
                           ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-400"
                           : "border-border text-foreground"
                       }`}
                     >
                       <span className="flex h-5 w-5 items-center justify-center rounded-full border text-xs font-medium shrink-0">
-                        {String.fromCharCode(65 + i)}
+                        {option.label}
                       </span>
-                      {option}
-                      {option === question.correctAnswer && (
+                      {option.text}
+                      {option.text === question.correct_answer && (
                         <Check className="ml-auto h-3.5 w-3.5 shrink-0" />
                       )}
                     </div>

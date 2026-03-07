@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import Link from "next/link"
 import { DashboardHeader } from "@/components/dashboard-header"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -47,114 +47,40 @@ import {
   X,
   History,
   FileText,
+  Loader2,
 } from "lucide-react"
+import {
+  exams as examsApi,
+  type ExamListItem,
+} from "@/lib/api"
 
-interface ExamRecord {
-  id: string
-  title: string
-  date: string
-  textbook: string
-  chapters: string
-  type: "Multiple Choice" | "Essay" | "Mixed"
-  difficulty: "Basic" | "Advanced" | "High Application" | "Mixed"
-  questions: number
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  })
 }
-
-const allExams: ExamRecord[] = [
-  {
-    id: "1",
-    title: "Data Structures Midterm",
-    date: "Mar 4, 2026",
-    textbook: "Data Structures & Algorithms in Java",
-    chapters: "Ch. 1-5",
-    type: "Mixed",
-    difficulty: "Advanced",
-    questions: 7,
-  },
-  {
-    id: "2",
-    title: "OS Concepts Quiz #3",
-    date: "Mar 3, 2026",
-    textbook: "Modern Operating Systems",
-    chapters: "Ch. 3",
-    type: "Multiple Choice",
-    difficulty: "Basic",
-    questions: 20,
-  },
-  {
-    id: "3",
-    title: "Database Final Exam",
-    date: "Mar 1, 2026",
-    textbook: "Database System Concepts",
-    chapters: "Ch. 1-12",
-    type: "Essay",
-    difficulty: "High Application",
-    questions: 10,
-  },
-  {
-    id: "4",
-    title: "Algorithms Practice Set",
-    date: "Feb 28, 2026",
-    textbook: "Data Structures & Algorithms in Java",
-    chapters: "Ch. 6-10",
-    type: "Mixed",
-    difficulty: "Mixed",
-    questions: 15,
-  },
-  {
-    id: "5",
-    title: "OS Process Management",
-    date: "Feb 25, 2026",
-    textbook: "Modern Operating Systems",
-    chapters: "Ch. 1-2",
-    type: "Multiple Choice",
-    difficulty: "Basic",
-    questions: 25,
-  },
-  {
-    id: "6",
-    title: "SQL & Normalization Quiz",
-    date: "Feb 22, 2026",
-    textbook: "Database System Concepts",
-    chapters: "Ch. 5-7",
-    type: "Mixed",
-    difficulty: "Advanced",
-    questions: 12,
-  },
-  {
-    id: "7",
-    title: "Tree Structures Assessment",
-    date: "Feb 20, 2026",
-    textbook: "Data Structures & Algorithms in Java",
-    chapters: "Ch. 11-14",
-    type: "Essay",
-    difficulty: "Advanced",
-    questions: 8,
-  },
-  {
-    id: "8",
-    title: "OS Security Chapter Test",
-    date: "Feb 18, 2026",
-    textbook: "Modern Operating Systems",
-    chapters: "Ch. 9",
-    type: "Multiple Choice",
-    difficulty: "Basic",
-    questions: 15,
-  },
-]
 
 export default function HistoryPage() {
   const [searchQuery, setSearchQuery] = useState("")
   const [typeFilter, setTypeFilter] = useState<string>("all")
   const [difficultyFilter, setDifficultyFilter] = useState<string>("all")
-  const [deleteDialog, setDeleteDialog] = useState<ExamRecord | null>(null)
-  const [exams, setExams] = useState<ExamRecord[]>(allExams)
+  const [deleteDialog, setDeleteDialog] = useState<ExamListItem | null>(null)
+  const [exams, setExams] = useState<ExamListItem[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    examsApi.list()
+      .then(setExams)
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [])
 
   const filtered = exams.filter((exam) => {
     const matchesSearch =
-      exam.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      exam.textbook.toLowerCase().includes(searchQuery.toLowerCase())
-    const matchesType = typeFilter === "all" || exam.type === typeFilter
+      exam.title.toLowerCase().includes(searchQuery.toLowerCase())
+    const matchesType = typeFilter === "all" || exam.exam_type === typeFilter
     const matchesDifficulty =
       difficultyFilter === "all" || exam.difficulty === difficultyFilter
     return matchesSearch && matchesType && matchesDifficulty
@@ -169,20 +95,25 @@ export default function HistoryPage() {
     setDifficultyFilter("all")
   }
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (deleteDialog) {
-      setExams((prev) => prev.filter((e) => e.id !== deleteDialog.id))
+      try {
+        await examsApi.delete(deleteDialog.id)
+        setExams((prev) => prev.filter((e) => e.id !== deleteDialog.id))
+      } catch {
+        // silently fail
+      }
       setDeleteDialog(null)
     }
   }
 
   const typeBadgeVariant = (type: string) => {
     switch (type) {
-      case "Multiple Choice":
+      case "mcq":
         return "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800"
-      case "Essay":
+      case "essay":
         return "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800"
-      case "Mixed":
+      case "mixed":
         return "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950 dark:text-indigo-400 dark:border-indigo-800"
       default:
         return ""
@@ -191,16 +122,14 @@ export default function HistoryPage() {
 
   const diffBadgeVariant = (diff: string) => {
     switch (diff) {
-      case "Basic":
+      case "basic":
         return "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800"
-      case "Advanced":
+      case "advanced":
         return "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800"
-      case "High Application":
+      case "high_application":
         return "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950 dark:text-rose-400 dark:border-rose-800"
-      case "Mixed":
-        return "bg-muted text-muted-foreground"
       default:
-        return ""
+        return "bg-muted text-muted-foreground"
     }
   }
 
@@ -239,9 +168,9 @@ export default function HistoryPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All Types</SelectItem>
-                    <SelectItem value="Multiple Choice">Multiple Choice</SelectItem>
-                    <SelectItem value="Essay">Essay</SelectItem>
-                    <SelectItem value="Mixed">Mixed</SelectItem>
+                    <SelectItem value="mcq">Multiple Choice</SelectItem>
+                    <SelectItem value="essay">Essay</SelectItem>
+                    <SelectItem value="mixed">Mixed</SelectItem>
                   </SelectContent>
                 </Select>
                 <Select
@@ -254,10 +183,10 @@ export default function HistoryPage() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All Difficulties</SelectItem>
-                    <SelectItem value="Basic">Basic</SelectItem>
-                    <SelectItem value="Advanced">Advanced</SelectItem>
-                    <SelectItem value="High Application">High Application</SelectItem>
-                    <SelectItem value="Mixed">Mixed</SelectItem>
+                    <SelectItem value="basic">Basic</SelectItem>
+                    <SelectItem value="advanced">Advanced</SelectItem>
+                    <SelectItem value="high_application">High Application</SelectItem>
+                    <SelectItem value="custom">Custom</SelectItem>
                   </SelectContent>
                 </Select>
                 {hasFilters && (
@@ -276,7 +205,11 @@ export default function HistoryPage() {
         </Card>
 
         {/* Table */}
-        {filtered.length === 0 ? (
+        {loading ? (
+          <div className="flex justify-center py-16">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed py-16 px-6 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted">
               <History className="h-7 w-7 text-muted-foreground" />
@@ -303,7 +236,6 @@ export default function HistoryPage() {
                   <TableRow className="hover:bg-transparent">
                     <TableHead className="text-xs font-medium">Date</TableHead>
                     <TableHead className="text-xs font-medium">Exam Title</TableHead>
-                    <TableHead className="text-xs font-medium hidden md:table-cell">Textbook</TableHead>
                     <TableHead className="text-xs font-medium hidden lg:table-cell">Chapters</TableHead>
                     <TableHead className="text-xs font-medium">Type</TableHead>
                     <TableHead className="text-xs font-medium hidden sm:table-cell">Difficulty</TableHead>
@@ -316,7 +248,7 @@ export default function HistoryPage() {
                   {filtered.map((exam) => (
                     <TableRow key={exam.id} className="group">
                       <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
-                        {exam.date}
+                        {formatDate(exam.created_at)}
                       </TableCell>
                       <TableCell>
                         <Link
@@ -326,33 +258,28 @@ export default function HistoryPage() {
                           {exam.title}
                         </Link>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          {exam.questions} questions
+                          {exam.total_questions} questions
                         </p>
-                      </TableCell>
-                      <TableCell className="hidden md:table-cell">
-                        <span className="text-sm text-muted-foreground truncate max-w-48 block">
-                          {exam.textbook}
-                        </span>
                       </TableCell>
                       <TableCell className="hidden lg:table-cell">
                         <span className="text-sm text-muted-foreground">
-                          {exam.chapters}
+                          Ch. {exam.chapters.join(", ")}
                         </span>
                       </TableCell>
                       <TableCell>
                         <Badge
                           variant="outline"
-                          className={`text-xs whitespace-nowrap ${typeBadgeVariant(exam.type)}`}
+                          className={`text-xs whitespace-nowrap capitalize ${typeBadgeVariant(exam.exam_type)}`}
                         >
-                          {exam.type}
+                          {exam.exam_type}
                         </Badge>
                       </TableCell>
                       <TableCell className="hidden sm:table-cell">
                         <Badge
                           variant="outline"
-                          className={`text-xs whitespace-nowrap ${diffBadgeVariant(exam.difficulty)}`}
+                          className={`text-xs whitespace-nowrap capitalize ${diffBadgeVariant(exam.difficulty)}`}
                         >
-                          {exam.difficulty}
+                          {exam.difficulty.replace("_", " ")}
                         </Badge>
                       </TableCell>
                       <TableCell className="text-right">

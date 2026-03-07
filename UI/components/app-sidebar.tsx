@@ -33,6 +33,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { useAuth } from "@/components/auth-provider"
 
 const navItems = [
   { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
@@ -47,6 +48,16 @@ const secondaryItems = [
 
 export function AppSidebar() {
   const pathname = usePathname()
+  const { user, logout } = useAuth()
+
+  const initials = user?.full_name
+    ? user.full_name
+        .split(" ")
+        .map((n) => n[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase()
+    : "?"
 
   return (
     <Sidebar collapsible="icon" className="border-r-0">
@@ -119,15 +130,15 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <SidebarMenuButton size="lg" tooltip="Dr. Sarah Smith">
+                <SidebarMenuButton size="lg" tooltip={user?.full_name ?? "User"}>
                   <Avatar className="h-8 w-8 rounded-lg">
                     <AvatarFallback className="rounded-lg bg-primary/10 text-primary text-xs font-semibold">
-                      SS
+                      {initials}
                     </AvatarFallback>
                   </Avatar>
                   <div className="flex flex-col gap-0.5 leading-none">
-                    <span className="text-sm font-medium">Dr. Sarah Smith</span>
-                    <span className="text-xs text-muted-foreground">Computer Science</span>
+                    <span className="text-sm font-medium">{user?.full_name ?? "User"}</span>
+                    <span className="text-xs text-muted-foreground">{user?.department ?? ""}</span>
                   </div>
                   <ChevronsUpDown className="ml-auto h-4 w-4 text-muted-foreground" />
                 </SidebarMenuButton>
@@ -141,12 +152,12 @@ export function AppSidebar() {
                 <div className="flex items-center gap-2 px-2 py-1.5">
                   <Avatar className="h-8 w-8 rounded-lg">
                     <AvatarFallback className="rounded-lg bg-primary/10 text-primary text-xs font-semibold">
-                      SS
+                      {initials}
                     </AvatarFallback>
                   </Avatar>
                   <div className="flex flex-col">
-                    <span className="text-sm font-medium">Dr. Sarah Smith</span>
-                    <span className="text-xs text-muted-foreground">dr.smith@university.edu</span>
+                    <span className="text-sm font-medium">{user?.full_name ?? "User"}</span>
+                    <span className="text-xs text-muted-foreground">{user?.email ?? ""}</span>
                   </div>
                 </div>
                 <DropdownMenuSeparator />
@@ -157,11 +168,9 @@ export function AppSidebar() {
                   </Link>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem asChild>
-                  <Link href="/">
-                    <LogOut className="mr-2 h-4 w-4" />
-                    Sign out
-                  </Link>
+                <DropdownMenuItem onClick={logout}>
+                  <LogOut className="mr-2 h-4 w-4" />
+                  Sign out
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

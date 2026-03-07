@@ -1,0 +1,52 @@
+# =========================================
+# ExamAI Backend - Dependencies
+# =========================================
+
+# --- Core Framework ---
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+python-multipart>=0.0.18
+pydantic>=2.11.1
+pydantic-settings>=2.7.1
+
+# --- Database ---
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+alembic==1.14.1
+psycopg2-binary==2.9.10
+
+# --- Authentication ---
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.2.1
+
+# --- LLM & Agent Framework ---
+langgraph>=0.2.60
+langchain>=0.3.13
+langchain-openai>=0.2.14
+langchain-google-genai>=2.0.0
+langchain-anthropic>=0.3.0
+langchain-community>=0.3.13
+langchain-core>=0.3.34
+langchain-huggingface>=0.1.0
+g4f>=0.3.0
+langchain-groq>=0.2.0
+
+# --- Vector Database & Embeddings ---
+langchain-pinecone==0.2.13
+sentence-transformers>=3.0.0
+
+# --- Document Processing ---
+pypdf==5.1.0
+python-docx==1.1.2
+python-pptx==1.0.2
+unstructured==0.16.12
+
+# --- Search ---
+rank-bm25==0.2.2
+
+# --- Utilities ---
+python-dotenv==1.0.1
+httpx==0.28.1
+tenacity==9.0.0
+tiktoken==0.8.0
