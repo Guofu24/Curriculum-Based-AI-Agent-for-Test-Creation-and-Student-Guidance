@@ -1,238 +1,452 @@
 """
-Document Processor Agent
+Document Processor Agent — Advanced Chunking Pipeline
 
-Responsibilities:
-- Parse uploaded documents (PDF, DOCX, PPTX)
-- Chunk text with overlap for embedding
-- Extract chapter structure and metadata
-- Store embeddings in Pinecone (cloud) and raw text in PostgreSQL
+Uses the `unstructured` library for intelligent document partitioning,
+semantic-aware chunking, and hierarchical chapter/section tracking.
+
+Pipeline:
+  Step 1: Partition PDF → structured elements (Title, NarrativeText, ListItem, ...)
+  Step 2: Clean → remove Header/Footer noise
+  Step 3: Chapter & Hierarchy Tracking → inject chapter/section metadata
+  Step 4: Smart Chunking → chunk_by_title with semantic boundaries
+  Step 5: Output Formatting → clean dicts for storage
+
+Strategy: "fast" (pypdf backend, no Tesseract/Poppler needed).
+To enable hi-res OCR + layout detection, change STRATEGY to "hi_res"
+and install Tesseract + Poppler.
 """
+
 import os
+import re
 import json
 import hashlib
+import logging
 from pathlib import Path
+from typing import Optional
 
 from langchain_core.documents import Document
 
 from config import settings
 
+logger = logging.getLogger(__name__)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Configuration
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Partitioning strategy: "fast" (no system deps) or "hi_res" (needs Tesseract + Poppler)
+STRATEGY = "fast"
+
+# Chunking parameters (tuned for academic textbooks)
+COMBINE_TEXT_UNDER_N_CHARS = 500   # Group short paragraphs together
+MAX_CHARACTERS = 1500              # Hard limit per chunk
+OVERLAP = 150                      # Character overlap for split continuity
+
+# Chapter detection regex (Vietnamese + English)
+CHAPTER_PATTERN = re.compile(
+    r"(?i)^(chương|chapter|phần|part)\s*(\d+)[:\s.\-—]*(.*)$"
+)
+
+# Image output directory (only used with hi_res strategy)
+IMAGE_OUTPUT_DIR = os.path.join(settings.UPLOAD_DIR, "extracted_images")
+
 
 class DocumentProcessorAgent:
-    """Processes textbook documents: parse, chunk, embed, store in Pinecone."""
+    """
+    Processes textbook documents using the `unstructured` library.
 
-    CHUNK_SIZE = 1000  # characters per chunk
-    CHUNK_OVERLAP = 200  # overlap between chunks
+    Pipeline: partition → clean → track hierarchy → chunk → format output.
+    """
 
     def __init__(self, vector_store, db_session=None):
         self.vector_store = vector_store
-        self.db_session = db_session  # SQLAlchemy session for storing chunk text
+        self.db_session = db_session
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Public API (same interface as before — TextbookService unchanged)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def process_document(self, file_path: str, textbook_id: str) -> dict:
         """
         Full document processing pipeline.
         Returns metadata about the processed textbook.
         """
-        # 1. Parse the document
-        raw_documents = await self._parse_document(file_path)
+        logger.info(f"[PROCESSOR] Starting document processing: {file_path}")
 
-        # 2. Extract chapter structure
-        chapters = self._extract_chapters(raw_documents)
+        # Step 1: Partition the document into structured elements
+        elements = self._partition(file_path)
+        logger.info(f"[PROCESSOR] Step 1 — Partitioned into {len(elements)} elements")
 
-        # 3. Chunk the documents
-        chunks = self._chunk_documents(raw_documents, textbook_id)
+        # Step 2: Clean — remove Header/Footer noise
+        elements = self._clean(elements)
+        logger.info(f"[PROCESSOR] Step 2 — After cleaning: {len(elements)} elements")
 
-        # 4. Store in vector DB with embeddings
-        chunk_ids = await self._store_chunks(chunks, textbook_id)
+        # Step 3: Track chapter & section hierarchy
+        elements, chapters = self._track_hierarchy(elements)
+        logger.info(
+            f"[PROCESSOR] Step 3 — Detected {len(chapters)} chapters"
+        )
+
+        # Step 4: Smart chunking with semantic boundaries
+        chunks = self._smart_chunk(elements)
+        logger.info(f"[PROCESSOR] Step 4 — Produced {len(chunks)} chunks")
+
+        # Step 5: Format output and store
+        formatted = self._format_output(chunks, file_path, textbook_id)
+        chunk_ids = await self._store_chunks(formatted, textbook_id)
+        logger.info(f"[PROCESSOR] Step 5 — Stored {len(chunk_ids)} chunks")
 
         return {
             "textbook_id": textbook_id,
             "title": Path(file_path).stem,
-            "total_pages": len(raw_documents),
-            "total_chunks": len(chunks),
+            "total_pages": self._count_pages(elements),
+            "total_chunks": len(formatted),
             "chapters": chapters,
             "chunk_ids": chunk_ids,
         }
 
-    async def _parse_document(self, file_path: str) -> list[Document]:
-        """Parse document based on file type."""
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Step 1: Advanced Partitioning
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _partition(self, file_path: str) -> list:
+        """
+        Partition the document into structured elements using `unstructured`.
+
+        Supports PDF, DOCX, PPTX via automatic format detection.
+        Uses "fast" strategy (pypdf) — no system dependencies needed.
+        Switch to "hi_res" for OCR + layout detection (requires Tesseract + Poppler).
+        """
         ext = Path(file_path).suffix.lower()
 
         if ext == ".pdf":
-            return await self._parse_pdf(file_path)
+            from unstructured.partition.pdf import partition_pdf
+
+            kwargs = {
+                "filename": file_path,
+                "strategy": STRATEGY,
+                "include_page_breaks": True,
+            }
+
+            # hi_res extras: image/table extraction
+            if STRATEGY == "hi_res":
+                os.makedirs(IMAGE_OUTPUT_DIR, exist_ok=True)
+                kwargs.update({
+                    "infer_table_structure": True,
+                    "extract_image_block_types": ["Image", "Table"],
+                    "extract_image_block_output_dir": IMAGE_OUTPUT_DIR,
+                })
+
+            return partition_pdf(**kwargs)
+
         elif ext == ".docx":
-            return await self._parse_docx(file_path)
+            from unstructured.partition.docx import partition_docx
+            return partition_docx(filename=file_path)
+
         elif ext in (".pptx", ".ppt"):
-            return await self._parse_pptx(file_path)
+            from unstructured.partition.pptx import partition_pptx
+            return partition_pptx(filename=file_path)
+
         else:
             raise ValueError(f"Unsupported file type: {ext}")
 
-    async def _parse_pdf(self, file_path: str) -> list[Document]:
-        from pypdf import PdfReader
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Step 2: Cleaning (Noise Reduction)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        reader = PdfReader(file_path)
-        documents = []
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            if text.strip():
-                documents.append(Document(
-                    page_content=text,
-                    metadata={"page": i + 1, "source": file_path}
-                ))
-        return documents
-
-    async def _parse_docx(self, file_path: str) -> list[Document]:
-        from docx import Document as DocxDoc
-
-        doc = DocxDoc(file_path)
-        documents = []
-        current_text = []
-        page_num = 1
-
-        for para in doc.paragraphs:
-            if para.text.strip():
-                current_text.append(para.text)
-            # Approximate page breaks every ~3000 chars
-            combined = "\n".join(current_text)
-            if len(combined) > 3000:
-                documents.append(Document(
-                    page_content=combined,
-                    metadata={"page": page_num, "source": file_path}
-                ))
-                current_text = []
-                page_num += 1
-
-        if current_text:
-            documents.append(Document(
-                page_content="\n".join(current_text),
-                metadata={"page": page_num, "source": file_path}
-            ))
-        return documents
-
-    async def _parse_pptx(self, file_path: str) -> list[Document]:
-        from pptx import Presentation
-
-        prs = Presentation(file_path)
-        documents = []
-        for i, slide in enumerate(prs.slides):
-            texts = []
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    texts.append(shape.text)
-            if texts:
-                documents.append(Document(
-                    page_content="\n".join(texts),
-                    metadata={"page": i + 1, "source": file_path, "slide": i + 1}
-                ))
-        return documents
-
-    def _extract_chapters(self, documents: list[Document]) -> list[dict]:
+    def _clean(self, elements: list) -> list:
         """
-        Heuristic chapter extraction from document structure.
-        Looks for patterns like "Chapter X", "CHAPTER X", "Chương X".
+        Remove Header/Footer elements — these are usually repeating
+        page numbers or document titles that break semantic flow.
+        Also remove PageBreak elements.
         """
-        import re
-        chapters = []
-        chapter_pattern = re.compile(
-            r"(?:chapter|chương|ch\.?)\s*(\d+)[:\s.\-]*(.+)",
-            re.IGNORECASE
-        )
+        from unstructured.documents.elements import Header, Footer, PageBreak
 
-        for doc in documents:
-            for line in doc.page_content.split("\n"):
-                match = chapter_pattern.match(line.strip())
-                if match:
-                    chapter_num = int(match.group(1))
-                    chapter_title = match.group(2).strip()
-                    if not any(c["chapter_number"] == chapter_num for c in chapters):
+        noise_types = (Header, Footer, PageBreak)
+        cleaned = [el for el in elements if not isinstance(el, noise_types)]
+        return cleaned
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Step 3: Chapter & Hierarchy Tracking (CRITICAL)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _track_hierarchy(self, elements: list) -> tuple[list, list[dict]]:
+        """
+        Iterate through elements to:
+        1. Detect chapters via regex (Vietnamese + English patterns).
+        2. Track current section heading for parent context.
+        3. Inject `chapter` and `parent_heading` into element metadata.
+
+        Returns: (enriched_elements, detected_chapters)
+        """
+        from unstructured.documents.elements import Title
+
+        current_chapter: Optional[str] = None
+        current_chapter_num: Optional[int] = None
+        current_heading: Optional[str] = None
+        chapters: list[dict] = []
+        seen_chapter_nums: set[int] = set()
+
+        for element in elements:
+            text = str(element).strip()
+
+            # Check if this element is a chapter heading
+            if isinstance(element, Title):
+                chapter_match = CHAPTER_PATTERN.match(text)
+                if chapter_match:
+                    chapter_num = int(chapter_match.group(2))
+                    chapter_title = chapter_match.group(3).strip() or f"Chapter {chapter_num}"
+                    current_chapter = f"{chapter_match.group(1)} {chapter_num}: {chapter_title}"
+                    current_chapter_num = chapter_num
+
+                    if chapter_num not in seen_chapter_nums:
+                        seen_chapter_nums.add(chapter_num)
+                        page = element.metadata.page_number if hasattr(element.metadata, 'page_number') else None
                         chapters.append({
                             "chapter_number": chapter_num,
                             "title": chapter_title,
-                            "start_page": doc.metadata.get("page", 0),
+                            "start_page": page,
                         })
+                else:
+                    # Not a chapter title, but still a section heading
+                    current_heading = text
 
+            # Inject hierarchy metadata into the element
+            if hasattr(element, 'metadata'):
+                element.metadata.chapter = current_chapter
+                element.metadata.chapter_number = current_chapter_num
+                element.metadata.parent_heading = current_heading
+
+        # Sort chapters and compute end_page
         chapters.sort(key=lambda c: c["chapter_number"])
-
-        # Set end_page for each chapter
         for i, ch in enumerate(chapters):
             if i + 1 < len(chapters):
-                ch["end_page"] = chapters[i + 1]["start_page"] - 1
+                end_start = chapters[i + 1].get("start_page")
+                ch["end_page"] = (end_start - 1) if end_start else None
             else:
-                ch["end_page"] = documents[-1].metadata.get("page", 0) if documents else 0
+                ch["end_page"] = None
 
-        return chapters
+        return elements, chapters
 
-    def _chunk_documents(
-        self, documents: list[Document], textbook_id: str
-    ) -> list[Document]:
-        """Split documents into overlapping chunks with metadata."""
-        chunks = []
-        chunk_idx = 0
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Step 4: Smart Chunking
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        for doc in documents:
-            text = doc.page_content
-            start = 0
-            while start < len(text):
-                end = start + self.CHUNK_SIZE
-                chunk_text = text[start:end]
+    def _smart_chunk(self, elements: list) -> list:
+        """
+        Apply `chunk_by_title` — groups elements under their closest Title,
+        respects semantic boundaries, and avoids cutting mid-sentence.
 
-                if chunk_text.strip():
-                    chunk_id = hashlib.md5(
-                        f"{textbook_id}:{chunk_idx}".encode()
-                    ).hexdigest()
+        Parameters:
+        - combine_text_under_n_chars: group short paragraphs (< 500 chars)
+        - max_characters: hard limit per chunk (1500 chars)
+        - overlap: overlap chars when a block must be split (150 chars)
+        """
+        from unstructured.chunking.title import chunk_by_title
 
-                    chunks.append(Document(
-                        page_content=chunk_text,
-                        metadata={
-                            **doc.metadata,
-                            "textbook_id": textbook_id,
-                            "chunk_id": chunk_id,
-                            "chunk_index": chunk_idx,
-                        }
-                    ))
-                    chunk_idx += 1
-
-                start += self.CHUNK_SIZE - self.CHUNK_OVERLAP
-
+        chunks = chunk_by_title(
+            elements,
+            combine_text_under_n_chars=COMBINE_TEXT_UNDER_N_CHARS,
+            max_characters=MAX_CHARACTERS,
+            overlap=OVERLAP,
+        )
         return chunks
 
-    async def _store_chunks(
-        self, chunks: list[Document], textbook_id: str
-    ) -> list[str]:
-        """Store chunks in Pinecone (vectors) and PostgreSQL (raw text for BM25)."""
-        texts = [c.page_content for c in chunks]
-        metadatas = [c.metadata for c in chunks]
-        ids = [c.metadata["chunk_id"] for c in chunks]
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Step 5: Output Formatting
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        # 1. Store embeddings in Pinecone via LangChain vector store (async to avoid blocking event loop)
+    def _format_output(
+        self, chunks: list, source_file: str, textbook_id: str
+    ) -> list[dict]:
+        """
+        Convert unstructured chunks to clean dictionaries.
+        Drops coordinate/bounding_box metadata to save Vector DB memory.
+
+        Output format:
+        {
+            "chunk_text": str,
+            "chunk_id": str (MD5 hash),
+            "chunk_index": int,
+            "metadata": {
+                "source_file": str,
+                "textbook_id": str,
+                "page_number": int | None,
+                "chapter": str | None,
+                "chapter_number": int | None,
+                "parent_heading": str | None,
+            }
+        }
+        """
+        formatted = []
+
+        for idx, chunk in enumerate(chunks):
+            text = str(chunk).strip()
+            if not text:
+                continue
+
+            # Extract essential metadata (drop coordinates/bounding boxes)
+            meta = chunk.metadata if hasattr(chunk, 'metadata') else None
+
+            page_number = None
+            chapter = None
+            chapter_number = None
+            parent_heading = None
+
+            if meta:
+                page_number = getattr(meta, 'page_number', None)
+                chapter = getattr(meta, 'chapter', None)
+                chapter_number = getattr(meta, 'chapter_number', None)
+                parent_heading = getattr(meta, 'parent_heading', None)
+
+            chunk_id = hashlib.md5(
+                f"{textbook_id}:{idx}".encode()
+            ).hexdigest()
+
+            formatted.append({
+                "chunk_text": text,
+                "chunk_id": chunk_id,
+                "chunk_index": idx,
+                "metadata": {
+                    "source_file": Path(source_file).name,
+                    "textbook_id": textbook_id,
+                    "page_number": page_number,
+                    "chapter": chapter,
+                    "chapter_number": chapter_number,
+                    "parent_heading": parent_heading,
+                },
+            })
+
+        return formatted
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Storage
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def _store_chunks(
+        self, formatted_chunks: list[dict], textbook_id: str
+    ) -> list[str]:
+        """
+        Store chunks in Pinecone (vectors) and PostgreSQL (raw text for BM25).
+        """
+        if not formatted_chunks:
+            return []
+
+        texts = [c["chunk_text"] for c in formatted_chunks]
+        ids = [c["chunk_id"] for c in formatted_chunks]
+
+        # Prepare Pinecone metadata (only essential fields, no large text blobs)
+        pinecone_metadatas = [
+            {
+                "textbook_id": c["metadata"]["textbook_id"],
+                "page": c["metadata"]["page_number"],
+                "chapter": c["metadata"]["chapter"] or "",
+                "chapter_number": c["metadata"]["chapter_number"] or 0,
+                "parent_heading": c["metadata"]["parent_heading"] or "",
+                "chunk_id": c["chunk_id"],
+                "chunk_index": c["chunk_index"],
+            }
+            for c in formatted_chunks
+        ]
+
+        # 1. Store embeddings in Pinecone
         await self.vector_store.aadd_texts(
             texts=texts,
-            metadatas=metadatas,
+            metadatas=pinecone_metadatas,
             ids=ids,
         )
 
-        # 2. Store raw text in PostgreSQL for BM25 keyword search
+        # 2. Store raw text + metadata in PostgreSQL for BM25 keyword search
         if self.db_session is not None:
-            import json
             from models.textbook import TextbookChunk
 
-            for i, chunk in enumerate(chunks):
+            for chunk_data in formatted_chunks:
                 db_chunk = TextbookChunk(
                     textbook_id=textbook_id,
-                    chunk_id=ids[i],
-                    chunk_index=i,
-                    content=texts[i],
-                    page=chunk.metadata.get("page"),
-                    metadata_json=json.dumps(metadatas[i], ensure_ascii=False),
+                    chunk_id=chunk_data["chunk_id"],
+                    chunk_index=chunk_data["chunk_index"],
+                    content=chunk_data["chunk_text"],
+                    page=chunk_data["metadata"]["page_number"],
+                    chapter=chunk_data["metadata"]["chapter"],
+                    parent_heading=chunk_data["metadata"]["parent_heading"],
+                    metadata_json=json.dumps(
+                        chunk_data["metadata"], ensure_ascii=False
+                    ),
                 )
                 self.db_session.add(db_chunk)
 
         return ids
 
-    def _assign_chapter_to_chunk(
-        self, page: int, chapters: list[dict]
-    ) -> int:
-        """Determine which chapter a page belongs to."""
-        for ch in reversed(chapters):
-            if page >= ch.get("start_page", 0):
-                return ch["chapter_number"]
-        return 1  # default to chapter 1
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Helpers
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _count_pages(self, elements: list) -> int:
+        """Count unique pages from element metadata."""
+        pages = set()
+        for el in elements:
+            if hasattr(el, 'metadata') and hasattr(el.metadata, 'page_number'):
+                if el.metadata.page_number is not None:
+                    pages.add(el.metadata.page_number)
+        return len(pages) or 1
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# __main__ — Test the pipeline on a sample PDF
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+if __name__ == "__main__":
+    import sys
+    import asyncio
+
+    if len(sys.argv) < 2:
+        print("Usage: python -m agents.document_processor <path-to-pdf>")
+        sys.exit(1)
+
+    pdf_path = sys.argv[1]
+    if not os.path.exists(pdf_path):
+        print(f"File not found: {pdf_path}")
+        sys.exit(1)
+
+    print(f"Processing: {pdf_path}")
+    print(f"Strategy: {STRATEGY}")
+    print("=" * 60)
+
+    # Create a lightweight processor (no vector store / DB for testing)
+    class FakeVectorStore:
+        async def aadd_texts(self, **kwargs):
+            pass
+
+    processor = DocumentProcessorAgent(vector_store=FakeVectorStore())
+
+    # Run the pipeline (steps 1-4 only, skip storage)
+    elements = processor._partition(pdf_path)
+    print(f"\n[Step 1] Partitioned into {len(elements)} elements")
+
+    # Show element type distribution
+    from collections import Counter
+    type_counts = Counter(type(el).__name__ for el in elements)
+    for t, c in type_counts.most_common():
+        print(f"  {t}: {c}")
+
+    elements = processor._clean(elements)
+    print(f"\n[Step 2] After cleaning: {len(elements)} elements")
+
+    elements, chapters = processor._track_hierarchy(elements)
+    print(f"\n[Step 3] Detected {len(chapters)} chapters:")
+    for ch in chapters:
+        print(f"  Chapter {ch['chapter_number']}: {ch['title']} (pages {ch.get('start_page')}–{ch.get('end_page')})")
+
+    chunks = processor._smart_chunk(elements)
+    print(f"\n[Step 4] Produced {len(chunks)} chunks")
+
+    formatted = processor._format_output(chunks, pdf_path, "test-textbook-id")
+    print(f"\n[Step 5] Formatted {len(formatted)} chunks")
+
+    # Print first 3 chunks as JSON
+    print("\n" + "=" * 60)
+    print("FIRST 3 CHUNKS (JSON):")
+    print("=" * 60)
+    for chunk_data in formatted[:3]:
+        print(json.dumps(chunk_data, indent=2, ensure_ascii=False))
+        print("-" * 40)

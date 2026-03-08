@@ -72,6 +72,8 @@ class TextbookChunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     page: Mapped[int] = mapped_column(Integer, nullable=True)
+    chapter: Mapped[str] = mapped_column(String(500), nullable=True)       # e.g. "Chương 3: Cấu trúc dữ liệu"
+    parent_heading: Mapped[str] = mapped_column(String(500), nullable=True)  # immediate section title
     metadata_json: Mapped[str] = mapped_column(Text, nullable=True)  # JSON extra metadata
 
     textbook = relationship("Textbook", back_populates="chunks")

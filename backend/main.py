@@ -37,6 +37,21 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.APP_NAME}...")
     await init_db()
     logger.info("Database tables created.")
+
+    # Pre-load embedding model + Pinecone client at startup
+    # This avoids 60+ second delay on the first upload request
+    # (sentence-transformers imports torch/tensorflow which is very slow)
+    try:
+        from services.rag_service import RAGService
+        logger.info("Pre-loading RAG service (embedding model + Pinecone)...")
+        rag = RAGService.get_instance()
+        rag._get_embeddings()    # Force load embedding model now
+        rag._get_index()         # Force connect to Pinecone now
+        logger.info("RAG service pre-loaded successfully.")
+    except Exception as e:
+        logger.warning(f"Failed to pre-load RAG service: {e}")
+        logger.warning("RAG will be loaded lazily on first request.")
+
     yield
     logger.info(f"Shutting down {settings.APP_NAME}...")
 
