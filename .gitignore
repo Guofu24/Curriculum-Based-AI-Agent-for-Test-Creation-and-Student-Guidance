@@ -1,2 +1,83 @@
+# =========================================
+# ExamAI Project — .gitignore
+# =========================================
+
+# ─── Environment & Secrets ──────────────────
 .env
+.env.local
+.env.*.local
 backend/.env
+backend/.env.local
+
+# ─── Python ─────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.whl
+
+# ─── Virtual Environments ───────────────────
+venv/
+.venv/
+env/
+.conda/
+
+# ─── Node.js / Next.js ─────────────────────
+node_modules/
+UI/node_modules/
+UI/.next/
+UI/out/
+UI/.turbo/
+.pnp
+.pnp.js
+.pnp.cjs
+
+# ─── IDE & Editors ─────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ─── OS Files ──────────────────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ─── Data & Uploads ────────────────────────
+backend/data/uploads/
+*.pdf
+*.docx
+*.pptx
+
+# ─── Database ──────────────────────────────
+*.db
+*.sqlite3
+
+# ─── Logs ──────────────────────────────────
+*.log
+logs/
+
+# ─── Testing & Coverage ───────────────────
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# ─── Docker ────────────────────────────────
+docker-compose.override.yml
+
+# ─── Misc ──────────────────────────────────
+*.bak
+*.tmp
+*.temp
+.cache/
