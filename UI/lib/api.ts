@@ -24,10 +24,19 @@ async function request<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    const message =
-      body.detail ||
-      (typeof body.detail === "object" ? JSON.stringify(body.detail) : null) ||
-      res.statusText;
+    let message: string;
+    if (Array.isArray(body.detail)) {
+      // Pydantic 422 validation errors — extract readable messages
+      message = body.detail
+        .map((err: { msg?: string; loc?: string[] }) => {
+          const field = err.loc?.slice(-1)[0] || "field";
+          const msg = err.msg?.replace(/^Value error, /, "") || "invalid";
+          return `${field}: ${msg}`;
+        })
+        .join("; ");
+    } else {
+      message = body.detail || res.statusText;
+    }
     throw new ApiError(res.status, message);
   }
 
@@ -51,11 +60,14 @@ export interface User {
   full_name: string;
   department?: string;
   university?: string;
+  is_email_verified?: boolean;
 }
 
 export interface TokenResponse {
   access_token: string;
+  refresh_token: string;
   token_type: string;
+  expires_in: number;
 }
 
 export interface Chapter {
@@ -195,6 +207,18 @@ export const auth = {
     return request<User>("/auth/register", {
       method: "POST",
       body: JSON.stringify(data),
+    });
+  },
+  logout(refreshToken: string) {
+    return request<{ message: string }>("/auth/logout", {
+      method: "POST",
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+  },
+  refreshToken(refreshToken: string) {
+    return request<{ access_token: string; token_type: string; expires_in: number }>("/auth/refresh-token", {
+      method: "POST",
+      body: JSON.stringify({ refresh_token: refreshToken }),
     });
   },
   me() {

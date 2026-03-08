@@ -21,8 +21,8 @@ interface AuthContextValue {
     full_name: string;
     department?: string;
     university?: string;
-  }) => Promise<void>;
-  logout: () => void;
+  }) => Promise<string>; // Returns message (e.g. "check email")
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -43,7 +43,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     authApi
       .me()
       .then(setUser)
-      .catch(() => localStorage.removeItem("token"))
+      .catch(() => {
+        localStorage.removeItem("token");
+        localStorage.removeItem("refresh_token");
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -60,6 +63,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (email: string, password: string) => {
       const res = await authApi.login(email, password);
       localStorage.setItem("token", res.access_token);
+      localStorage.setItem("refresh_token", res.refresh_token);
       const me = await authApi.me();
       setUser(me);
       router.push("/dashboard");
@@ -74,20 +78,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       full_name: string;
       department?: string;
       university?: string;
-    }) => {
-      await authApi.register(data);
-      // Auto-login after register
-      const res = await authApi.login(data.email, data.password);
-      localStorage.setItem("token", res.access_token);
-      const me = await authApi.me();
-      setUser(me);
-      router.push("/dashboard");
+    }): Promise<string> => {
+      const user = await authApi.register(data);
+
+      if (user.is_email_verified) {
+        // Development mode: auto-verified → auto-login
+        const res = await authApi.login(data.email, data.password);
+        localStorage.setItem("token", res.access_token);
+        localStorage.setItem("refresh_token", res.refresh_token);
+        const me = await authApi.me();
+        setUser(me);
+        router.push("/dashboard");
+        return "Đăng ký thành công!";
+      }
+
+      // Production mode: cần verify email trước
+      return "Đăng ký thành công! Vui lòng kiểm tra email để xác thực tài khoản trước khi đăng nhập.";
     },
     [router],
   );
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
+    // Call backend logout to blacklist tokens
+    const refreshToken = localStorage.getItem("refresh_token");
+    if (refreshToken) {
+      try {
+        await authApi.logout(refreshToken);
+      } catch {
+        // Even if backend logout fails, still clear client state
+      }
+    }
     localStorage.removeItem("token");
+    localStorage.removeItem("refresh_token");
     setUser(null);
     router.push("/");
   }, [router]);

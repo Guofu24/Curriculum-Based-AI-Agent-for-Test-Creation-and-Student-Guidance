@@ -47,9 +47,22 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
-    # Auth
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    # Auth — JWT tokens
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15              # Short-lived access token (15 phút)
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7                 # Long-lived refresh token (7 ngày)
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24    # Email verification link TTL
     ALGORITHM: str = "HS256"
+
+    # Rate limiting — chống brute-force login
+    LOGIN_RATE_LIMIT_REQUESTS: int = 5                 # Số request tối đa
+    LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = 60          # Trong khoảng thời gian (giây)
+
+    # SMTP (stub — log ra console nếu chưa cấu hình)
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SMTP_USER: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    SMTP_FROM_EMAIL: str = "noreply@examai.local"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

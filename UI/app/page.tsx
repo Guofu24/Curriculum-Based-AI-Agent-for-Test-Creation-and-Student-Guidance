@@ -31,11 +31,13 @@ export default function LoginPage() {
   const [fullName, setFullName] = useState("")
   const [department, setDepartment] = useState("")
   const [university, setUniversity] = useState("")
+  const [successMessage, setSuccessMessage] = useState("")
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault()
     setIsLoading(true)
     setError("")
+    setSuccessMessage("")
     try {
       await login(email, password)
     } catch (err) {
@@ -49,14 +51,18 @@ export default function LoginPage() {
     e.preventDefault()
     setIsLoading(true)
     setError("")
+    setSuccessMessage("")
     try {
-      await register({
+      const message = await register({
         email,
         password,
         full_name: fullName,
         department: department || undefined,
         university: university || undefined,
       })
+      // Show success message and switch to login mode
+      setSuccessMessage(message)
+      setMode("login")
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Registration failed")
     } finally {
@@ -145,6 +151,12 @@ export default function LoginPage() {
             </p>
           </div>
 
+          {successMessage && (
+            <div className="mb-4 rounded-lg bg-green-500/10 px-4 py-3 text-sm text-green-600 dark:text-green-400">
+              {successMessage}
+            </div>
+          )}
+
           {error && (
             <div className="mb-4 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
               {error}
@@ -231,12 +243,12 @@ export default function LoginPage() {
                 <Input
                   id="reg-password"
                   type="password"
-                  placeholder="Minimum 6 characters"
+                  placeholder="Minimum 8 characters"
                   className="h-11"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
-                  minLength={6}
+                  minLength={8}
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -285,7 +297,7 @@ export default function LoginPage() {
                 {"Don't have an account? "}
                 <button
                   className="font-medium text-primary hover:text-primary/80 transition-colors"
-                  onClick={() => { setMode("register"); setError("") }}
+                  onClick={() => { setMode("register"); setError(""); setSuccessMessage("") }}
                 >
                   Create one
                 </button>
@@ -295,7 +307,7 @@ export default function LoginPage() {
                 {"Already have an account? "}
                 <button
                   className="font-medium text-primary hover:text-primary/80 transition-colors"
-                  onClick={() => { setMode("login"); setError("") }}
+                  onClick={() => { setMode("login"); setError(""); setSuccessMessage("") }}
                 >
                   Sign in
                 </button>
