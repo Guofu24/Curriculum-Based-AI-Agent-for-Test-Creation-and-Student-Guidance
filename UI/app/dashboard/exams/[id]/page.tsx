@@ -165,7 +165,7 @@ export default function ExamReviewPage() {
               {exam.title}
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              {exam.total_questions} questions - Chapters {exam.chapters.join(", ")} - {new Date(exam.created_at).toLocaleDateString()}
+              {exam.total_questions} questions - {exam.chapters.length > 0 ? `Chapters ${exam.chapters.join(", ")}` : "All chapters"} - {new Date(exam.created_at).toLocaleDateString()}
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">

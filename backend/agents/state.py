@@ -60,6 +60,18 @@ class RetrievedContext:
     combined_text: str = ""
 
 
+# --- Chunk assignment for micro-prompting ---
+
+@dataclass
+class ChunkAssignment:
+    """Maps a single chunk to its question generation assignments.
+    Used by micro-prompting: each chunk generates 1-2 questions."""
+    chunk_id: str
+    chunk_text: str
+    chapter: int  # 0 = no chapter
+    assignments: list[dict] = field(default_factory=list)  # [{difficulty, bloom_level, question_type}]
+
+
 # --- LangGraph Agent State ---
 
 class AgentState(TypedDict):
@@ -102,6 +114,10 @@ class AgentState(TypedDict):
     step_progress: float  # 0.0 to 1.0
     error: Optional[str]
 
+    # --- Micro-prompting (chunk-level question generation) ---
+    chunk_assignments: list[ChunkAssignment]
+    original_quota: dict  # {easy: N, medium: N, hard: N} — original target before over-generation
+
     # --- Partial regeneration (Reviewer) ---
     edit_requests: Optional[list[dict]]  # [{question_ids, prompt, range_start, range_end}]
     is_partial_edit: bool
@@ -112,4 +128,6 @@ class AgentState(TypedDict):
     _question_generator: Optional[Any]
     _validator: Optional[Any]
     _reviewer: Optional[Any]
+    _pruning_agent: Optional[Any]
+    _db_session: Optional[Any]
     _retry_attempted: Optional[bool]

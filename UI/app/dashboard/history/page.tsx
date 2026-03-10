@@ -263,7 +263,7 @@ export default function HistoryPage() {
                       </TableCell>
                       <TableCell className="hidden lg:table-cell">
                         <span className="text-sm text-muted-foreground">
-                          Ch. {exam.chapters.join(", ")}
+                          {exam.chapters.length > 0 ? `Ch. ${exam.chapters.join(", ")}` : "All"}
                         </span>
                       </TableCell>
                       <TableCell>

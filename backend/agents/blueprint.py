@@ -1,73 +1,54 @@
 """
-Blueprint Agent
+Blueprint Agent — Deterministic Quota Allocation
 
-Responsibilities:
-- Create structured exam blueprint from user configuration
-- Map questions to Bloom's taxonomy levels
-- Distribute difficulty across the exam
-- Plan which chapters/topics each question should cover
+Replaces LLM-based blueprint creation with a pure-Python algorithm that:
+1. Maps difficulty levels to Bloom's Taxonomy
+2. Distributes question quotas across chapters (proportional to chunk count)
+3. Over-generates by ~30% to allow pruning of low-quality results
+4. Assigns specific chunks to question slots for micro-prompting
+
+This eliminates one LLM call and ensures predictable, token-efficient behavior.
 """
-import json
-import re
+import math
+import random
 import logging
 
-from langchain_core.messages import SystemMessage, HumanMessage
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
-from agents.state import ExamBlueprint, QuestionSlot
+from agents.state import ExamBlueprint, QuestionSlot, ChunkAssignment
+from models.textbook import TextbookChunk
 
 
-BLOOM_DIFFICULTY_MAP = {
-    "remember": 0.1,
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Bloom's Taxonomy ↔ Difficulty mapping
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DIFFICULTY_TO_BLOOM = {
+    "easy": ["remember", "understand"],
+    "medium": ["apply", "analyze"],
+    "hard": ["evaluate", "create"],
+}
+
+BLOOM_DIFFICULTY_SCORE = {
+    "remember": 0.15,
     "understand": 0.25,
-    "apply": 0.5,
-    "analyze": 0.65,
-    "evaluate": 0.8,
+    "apply": 0.45,
+    "analyze": 0.60,
+    "evaluate": 0.80,
     "create": 0.95,
 }
 
-BLUEPRINT_SYSTEM_PROMPT = """You are an expert exam blueprint planner. Your job is to create a structured plan for an exam.
-
-Given the user's requirements (chapters, question types, difficulty distribution, Bloom's taxonomy levels), 
-produce a JSON blueprint that specifies each question slot.
-
-Each slot must have:
-- slot_number: sequential number starting from 1
-- question_type: "mcq" or "essay"
-- bloom_level: one of "remember", "understand", "apply", "analyze", "evaluate", "create"
-- difficulty_score: 0.0 (easiest) to 1.0 (hardest)
-- target_chapter: which chapter this question should test
-- target_topics: list of 1-3 specific topics/concepts from that chapter
-
-Rules:
-1. Match the requested difficulty distribution exactly
-2. Spread questions across requested chapters evenly unless told otherwise
-3. If "gradually_increasing" is true, order slots from lowest to highest difficulty
-4. Map difficulty levels: easy=0.1-0.3, medium=0.4-0.6, hard=0.7-1.0
-5. Ensure Bloom's taxonomy levels align with difficulty (remember→easy, create→hard)
-
-Respond ONLY with valid JSON in this format:
-{
-  "title": "exam title",
-  "total_questions": N,
-  "slots": [
-    {
-      "slot_number": 1,
-      "question_type": "mcq",
-      "bloom_level": "remember",
-      "difficulty_score": 0.2,
-      "target_chapter": 1,
-      "target_topics": ["topic1", "topic2"]
-    }
-  ]
-}"""
+OVERGENERATION_FACTOR = 1.3  # Generate 30% more than needed
 
 
 class BlueprintAgent:
-    """Plans the structural blueprint of an exam before question generation."""
+    """Plans the structural blueprint of an exam using deterministic allocation."""
 
-    def __init__(self, llm):
+    def __init__(self, llm=None):
+        # LLM is no longer needed for blueprint creation, kept for API compat
         self.llm = llm
 
     async def create_blueprint(
@@ -81,150 +62,62 @@ class BlueprintAgent:
         constraints: dict,
         textbook_metadata: dict,
     ) -> ExamBlueprint:
-        """Create an exam blueprint based on user configuration."""
+        """
+        Create an exam blueprint deterministically (no LLM call).
 
-        # Build the request for the LLM
-        user_message = self._build_request(
-            prompt=prompt,
-            exam_type=exam_type,
-            difficulty=difficulty,
-            chapters=chapters,
-            question_distribution=question_distribution,
-            gradually_increasing=gradually_increasing,
-            constraints=constraints,
-            textbook_metadata=textbook_metadata,
-        )
-
-        messages = [
-            SystemMessage(content=BLUEPRINT_SYSTEM_PROMPT),
-            HumanMessage(content=user_message),
-        ]
-
-        response = await self.llm.ainvoke(messages)
-
-        # Parse the JSON response
-        blueprint_data = self._parse_blueprint(response.content)
-
-        return self._build_blueprint(blueprint_data)
-
-    def _build_request(
-        self,
-        prompt: str,
-        exam_type: str,
-        difficulty: str,
-        chapters: list[int],
-        question_distribution: dict,
-        gradually_increasing: bool,
-        constraints: dict,
-        textbook_metadata: dict,
-    ) -> str:
-        """Build the user message for blueprint generation."""
-
-        # Calculate total questions
+        Uses Bloom's Taxonomy mapping + proportional chapter distribution
+        + 30% over-generation.
+        """
+        # 1. Compute original quota per difficulty
         mcq_dist = question_distribution.get("mcq", {})
         essay_dist = question_distribution.get("essay", {})
-        total_mcq = sum(mcq_dist.values()) if isinstance(mcq_dist, dict) else 0
-        total_essay = sum(essay_dist.values()) if isinstance(essay_dist, dict) else 0
 
-        chapter_info = ""
-        if textbook_metadata and textbook_metadata.get("chapters"):
-            relevant = [
-                ch for ch in textbook_metadata["chapters"]
-                if ch["chapter_number"] in chapters
-            ]
-            chapter_info = "\n".join(
-                f"- Chapter {ch['chapter_number']}: {ch.get('title', 'N/A')}"
-                for ch in relevant
-            )
-
-        bloom_levels = constraints.get("bloom_levels", ["remember", "understand", "apply", "analyze"])
-
-        return f"""Create an exam blueprint with these requirements:
-
-User prompt: {prompt}
-
-Exam type: {exam_type}
-Overall difficulty: {difficulty}
-Chapters to cover: {chapters}
-Gradually increasing difficulty: {gradually_increasing}
-
-Question distribution:
-- MCQ: easy={mcq_dist.get('easy', 0)}, medium={mcq_dist.get('medium', 0)}, hard={mcq_dist.get('hard', 0)} (total: {total_mcq})
-- Essay: easy={essay_dist.get('easy', 0)}, medium={essay_dist.get('medium', 0)}, hard={essay_dist.get('hard', 0)} (total: {total_essay})
-
-Allowed Bloom's taxonomy levels: {bloom_levels}
-
-Available chapters:
-{chapter_info}
-
-Constraints:
-- Strict grounding (textbook only): {constraints.get('strict_grounding', True)}
-- Allow applied questions: {constraints.get('allow_applied_questions', True)}
-- Creativity level: {constraints.get('creativity_level', 0.5)}
-"""
-
-    def _parse_blueprint(self, response_text: str) -> dict:
-        """Parse LLM JSON response, handling markdown code blocks and extra text."""
-        text = response_text.strip()
-        logger.debug(f"Blueprint LLM raw response (first 500 chars): {text[:500]}")
-
-        if not text:
-            logger.warning("Blueprint LLM returned empty response, using fallback")
-            return self._fallback_blueprint()
-
-        # 1. Try extracting JSON from ```json ... ``` or ``` ... ``` blocks
-        code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-        if code_block:
-            text = code_block.group(1)
-
-        # 2. Try extracting the outermost {...} block (handles prefix/suffix text)
-        if not text.startswith("{"):
-            brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-            if brace_match:
-                text = brace_match.group(0)
-
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Blueprint JSON parse failed: {e}. Raw: {text[:300]}")
-            return self._fallback_blueprint()
-
-    def _fallback_blueprint(self) -> dict:
-        """Return a minimal valid blueprint when LLM output cannot be parsed."""
-        return {
-            "title": "Generated Exam",
-            "total_questions": 5,
-            "slots": [
-                {
-                    "slot_number": i + 1,
-                    "question_type": "mcq",
-                    "bloom_level": "understand",
-                    "difficulty_score": 0.4,
-                    "target_chapter": 1,
-                    "target_topics": ["general concept"],
-                }
-                for i in range(5)
-            ],
+        original_quota = {
+            "easy": mcq_dist.get("easy", 0) + essay_dist.get("easy", 0),
+            "medium": mcq_dist.get("medium", 0) + essay_dist.get("medium", 0),
+            "hard": mcq_dist.get("hard", 0) + essay_dist.get("hard", 0),
         }
 
-    def _build_blueprint(self, data: dict) -> ExamBlueprint:
-        """Convert parsed JSON to ExamBlueprint dataclass."""
-        slots = []
-        for slot_data in data.get("slots", []):
-            slots.append(QuestionSlot(
-                slot_number=slot_data["slot_number"],
-                question_type=slot_data["question_type"],
-                bloom_level=slot_data["bloom_level"],
-                difficulty_score=slot_data["difficulty_score"],
-                target_chapter=slot_data["target_chapter"],
-                target_topics=slot_data.get("target_topics", []),
-            ))
+        # 2. Over-generate by 30%
+        over_quota = {
+            diff: math.ceil(count * OVERGENERATION_FACTOR)
+            for diff, count in original_quota.items()
+        }
 
-        # Compute distributions
+        # 3. Get chapter info for distribution
+        available_chapters = chapters if chapters else []
+        if not available_chapters and textbook_metadata.get("chapters"):
+            available_chapters = [
+                ch["chapter_number"] for ch in textbook_metadata["chapters"]
+            ]
+
+        # 4. Distribute across chapters
+        chapter_quotas = self._distribute_across_chapters(
+            over_quota, available_chapters, textbook_metadata
+        )
+
+        # 5. Build blueprint slots
+        slots = self._build_slots(
+            chapter_quotas=chapter_quotas,
+            exam_type=exam_type,
+            mcq_dist=mcq_dist,
+            essay_dist=essay_dist,
+            constraints=constraints,
+            gradually_increasing=gradually_increasing,
+        )
+
+        # 6. Sort if gradually increasing
+        if gradually_increasing:
+            slots.sort(key=lambda s: s.difficulty_score)
+
+        # Re-number slots
+        for i, slot in enumerate(slots):
+            slot.slot_number = i + 1
+
+        # 7. Compute distributions
         difficulty_dist = {}
         bloom_dist = {}
         for slot in slots:
-            # Difficulty buckets
             if slot.difficulty_score <= 0.3:
                 bucket = "easy"
             elif slot.difficulty_score <= 0.6:
@@ -232,14 +125,267 @@ Constraints:
             else:
                 bucket = "hard"
             difficulty_dist[bucket] = difficulty_dist.get(bucket, 0) + 1
-
-            # Bloom distribution
             bloom_dist[slot.bloom_level] = bloom_dist.get(slot.bloom_level, 0) + 1
 
-        return ExamBlueprint(
-            title=data.get("title", "Untitled Exam"),
-            total_questions=data.get("total_questions", len(slots)),
+        title = f"Exam - {textbook_metadata.get('title', 'Untitled')}"
+
+        blueprint = ExamBlueprint(
+            title=title,
+            total_questions=len(slots),
             slots=slots,
             difficulty_distribution=difficulty_dist,
             bloom_distribution=bloom_dist,
         )
+
+        logger.info(
+            f"Deterministic blueprint created: {len(slots)} slots "
+            f"(original={sum(original_quota.values())}, "
+            f"over-gen={sum(over_quota.values())}), "
+            f"difficulty={difficulty_dist}, bloom={bloom_dist}"
+        )
+
+        return blueprint, original_quota
+
+    def _distribute_across_chapters(
+        self,
+        over_quota: dict,
+        chapters: list[int],
+        textbook_metadata: dict,
+    ) -> dict:
+        """
+        Distribute question quota across chapters.
+
+        Returns: {chapter_number: {easy: N, medium: N, hard: N}}
+        If no chapters, uses chapter=0 for the whole textbook.
+        """
+        if not chapters:
+            return {0: dict(over_quota)}
+
+        num_chapters = len(chapters)
+
+        # Distribute each difficulty level across chapters
+        chapter_quotas = {ch: {"easy": 0, "medium": 0, "hard": 0} for ch in chapters}
+
+        for diff, total in over_quota.items():
+            if total == 0:
+                continue
+
+            # Base allocation: divide evenly
+            base = total // num_chapters
+            remainder = total % num_chapters
+
+            # Distribute base to each chapter
+            for ch in chapters:
+                chapter_quotas[ch][diff] = base
+
+            # Distribute remainder round-robin
+            shuffled = list(chapters)
+            random.shuffle(shuffled)
+            for i in range(remainder):
+                chapter_quotas[shuffled[i]][diff] += 1
+
+        return chapter_quotas
+
+    def _build_slots(
+        self,
+        chapter_quotas: dict,
+        exam_type: str,
+        mcq_dist: dict,
+        essay_dist: dict,
+        constraints: dict,
+        gradually_increasing: bool,
+    ) -> list[QuestionSlot]:
+        """Build QuestionSlot list from chapter quotas."""
+
+        allowed_blooms = constraints.get(
+            "bloom_levels", ["remember", "understand", "apply", "analyze"]
+        )
+        slots = []
+        slot_num = 1
+
+        # Determine question type split
+        total_mcq = sum(mcq_dist.values()) if isinstance(mcq_dist, dict) else 0
+        total_essay = sum(essay_dist.values()) if isinstance(essay_dist, dict) else 0
+        total = total_mcq + total_essay
+
+        for chapter, quotas in chapter_quotas.items():
+            for diff_level, count in quotas.items():
+                for _ in range(count):
+                    # Pick bloom level
+                    bloom_pool = [
+                        b for b in DIFFICULTY_TO_BLOOM[diff_level]
+                        if b in allowed_blooms
+                    ]
+                    if not bloom_pool:
+                        bloom_pool = DIFFICULTY_TO_BLOOM[diff_level]
+                    bloom = random.choice(bloom_pool)
+
+                    # Determine question type
+                    if exam_type == "mcq":
+                        q_type = "mcq"
+                    elif exam_type == "essay":
+                        q_type = "essay"
+                    else:
+                        # Mixed: proportional
+                        if total > 0:
+                            q_type = "mcq" if random.random() < (total_mcq / total) else "essay"
+                        else:
+                            q_type = "mcq"
+
+                    slots.append(QuestionSlot(
+                        slot_number=slot_num,
+                        question_type=q_type,
+                        bloom_level=bloom,
+                        difficulty_score=BLOOM_DIFFICULTY_SCORE.get(bloom, 0.5),
+                        target_chapter=chapter,
+                        target_topics=[],
+                    ))
+                    slot_num += 1
+
+        return slots
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Chunk Assignment — map chunks to question generation tasks
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def assign_chunks_to_slots(
+    blueprint: ExamBlueprint,
+    textbook_id: str,
+    db_session: AsyncSession,
+) -> list[ChunkAssignment]:
+    """
+    For each chapter in the blueprint, randomly select chunks from the DB
+    and assign 1-2 question generation tasks to each chunk.
+
+    This is the core of the micro-prompting strategy: each LLM call gets
+    only ONE chunk of text (~500-1500 chars) and generates 1-2 questions.
+
+    Returns: list of ChunkAssignment objects ready for parallel LLM calls.
+    """
+    # Group slots by chapter
+    chapter_slots: dict[int, list[QuestionSlot]] = {}
+    for slot in blueprint.slots:
+        ch = slot.target_chapter
+        chapter_slots.setdefault(ch, []).append(slot)
+
+    assignments = []
+
+    for chapter, slots in chapter_slots.items():
+        # Query chunks for this chapter from PostgreSQL
+        chunks = await _get_chapter_chunks(textbook_id, chapter, db_session)
+
+        if not chunks:
+            logger.warning(
+                f"No chunks found for chapter {chapter}, textbook {textbook_id}. "
+                f"Skipping {len(slots)} slots."
+            )
+            continue
+
+        # Shuffle chunks for random selection
+        random.shuffle(chunks)
+
+        # Distribute slots across chunks (max 2 per chunk)
+        MAX_PER_CHUNK = 2
+        chunk_idx = 0
+        chunk_assignment_map: dict[str, ChunkAssignment] = {}
+
+        for slot in slots:
+            # Find a chunk that hasn't reached max assignments
+            attempts = 0
+            while attempts < len(chunks):
+                chunk = chunks[chunk_idx % len(chunks)]
+                chunk_key = chunk["chunk_id"]
+
+                if chunk_key not in chunk_assignment_map:
+                    chunk_assignment_map[chunk_key] = ChunkAssignment(
+                        chunk_id=chunk["chunk_id"],
+                        chunk_text=chunk["content"],
+                        chapter=chapter,
+                        assignments=[],
+                    )
+
+                ca = chunk_assignment_map[chunk_key]
+                if len(ca.assignments) < MAX_PER_CHUNK:
+                    ca.assignments.append({
+                        "difficulty": _score_to_difficulty(slot.difficulty_score),
+                        "bloom_level": slot.bloom_level,
+                        "question_type": slot.question_type,
+                        "slot_number": slot.slot_number,
+                    })
+                    chunk_idx = (chunk_idx + 1) % len(chunks)
+                    break
+
+                chunk_idx = (chunk_idx + 1) % len(chunks)
+                attempts += 1
+            else:
+                # All chunks at max capacity, expand to existing one
+                chunk = chunks[chunk_idx % len(chunks)]
+                chunk_key = chunk["chunk_id"]
+                if chunk_key not in chunk_assignment_map:
+                    chunk_assignment_map[chunk_key] = ChunkAssignment(
+                        chunk_id=chunk["chunk_id"],
+                        chunk_text=chunk["content"],
+                        chapter=chapter,
+                        assignments=[],
+                    )
+                chunk_assignment_map[chunk_key].assignments.append({
+                    "difficulty": _score_to_difficulty(slot.difficulty_score),
+                    "bloom_level": slot.bloom_level,
+                    "question_type": slot.question_type,
+                    "slot_number": slot.slot_number,
+                })
+
+        assignments.extend(chunk_assignment_map.values())
+
+    logger.info(
+        f"Chunk assignment complete: {len(assignments)} chunks assigned, "
+        f"total question tasks: {sum(len(a.assignments) for a in assignments)}"
+    )
+
+    return assignments
+
+
+async def _get_chapter_chunks(
+    textbook_id: str,
+    chapter: int,
+    db_session: AsyncSession,
+) -> list[dict]:
+    """Get chunks from PostgreSQL for a specific chapter."""
+    import json as _json
+
+    query = select(TextbookChunk).where(
+        TextbookChunk.textbook_id == textbook_id
+    )
+
+    # Filter by chapter if specified (chapter > 0)
+    if chapter > 0:
+        # Match chapter number in the 'chapter' field
+        # Chapter field stores values like "Chương 3: ..." or "Chapter 3: ..."
+        query = query.where(
+            TextbookChunk.chapter.ilike(f"%{chapter}%")
+        )
+
+    result = await db_session.execute(query)
+    rows = list(result.scalars().all())
+
+    return [
+        {
+            "chunk_id": r.chunk_id,
+            "content": r.content,
+            "page": r.page,
+            "chapter": r.chapter,
+            "parent_heading": r.parent_heading,
+        }
+        for r in rows
+    ]
+
+
+def _score_to_difficulty(score: float) -> str:
+    """Convert difficulty score to difficulty label."""
+    if score <= 0.3:
+        return "easy"
+    elif score <= 0.6:
+        return "medium"
+    else:
+        return "hard"

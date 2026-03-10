@@ -1,5 +1,10 @@
+import os
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
 from typing import Optional
+
+_BASE_DIR = Path(__file__).resolve().parent
 
 
 class Settings(BaseSettings):
@@ -40,8 +45,12 @@ class Settings(BaseSettings):
     PINECONE_CLOUD: str = "aws"
     PINECONE_REGION: str = "us-east-1"
 
+    # Rate limiting — LLM API (Groq free tier: 12K TPM)
+    LLM_REQUEST_DELAY: float = 6.0  # Seconds between LLM calls
+    MAX_CHUNK_CHARS: int = 1200      # Max chars per chunk sent to LLM
+
     # File Storage
-    UPLOAD_DIR: str = "./data/uploads"
+    UPLOAD_DIR: str = str(_BASE_DIR / "data" / "uploads")
     MAX_UPLOAD_SIZE_MB: int = 100
 
     # CORS

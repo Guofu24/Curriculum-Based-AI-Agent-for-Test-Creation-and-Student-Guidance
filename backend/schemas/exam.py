@@ -26,7 +26,7 @@ class AdvancedConstraints(BaseModel):
 
 class ExamGenerationRequest(BaseModel):
     textbook_id: str
-    chapters: list[int]  # chapter numbers
+    chapters: list[int] = []  # chapter numbers (empty = use entire textbook)
     prompt: str  # e.g. "Generate midterm exam for chapters 1-3"
     exam_type: str  # mcq, essay, mixed
     difficulty: str  # basic, advanced, application, high_application, custom
@@ -68,7 +68,7 @@ class ExamResponse(BaseModel):
     exam_type: str
     difficulty: str
     status: str
-    chapters: list[int]
+    chapters: list[int] = []
     variant_number: int
     total_questions: int
     quality_score: Optional[float] = None
@@ -85,7 +85,7 @@ class ExamListResponse(BaseModel):
     exam_type: str
     difficulty: str
     status: str
-    chapters: list[int]
+    chapters: list[int] = []
     total_questions: int
     quality_score: Optional[float] = None
     created_at: datetime

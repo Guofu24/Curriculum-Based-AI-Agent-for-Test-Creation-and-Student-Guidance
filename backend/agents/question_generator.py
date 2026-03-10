@@ -1,8 +1,11 @@
 """
-Question Generator Agent
+Question Generator Agent — Micro-Prompting
 
 Responsibilities:
-- Generate exam questions from blueprint slots + retrieved context
+- Generate exam questions from blueprint slots + retrieved context (legacy)
+- NEW: Generate questions from individual chunks (micro-prompting)
+  Each LLM call receives only ONE chunk (~500-1500 chars) and produces 1-2 questions
+  This keeps input+output tokens minimal, avoiding token overflow
 - Support MCQ and Essay question types
 - Ground all content in retrieved textbook material
 - Produce structured JSON output per question
@@ -11,13 +14,20 @@ Responsibilities:
 import json
 import re
 import logging
+import asyncio
+import time
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
 
-from agents.state import GeneratedQuestion, QuestionSlot, RetrievedContext
+from config import settings
+from agents.state import GeneratedQuestion, QuestionSlot, RetrievedContext, ChunkAssignment
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# System prompts — legacy (per-slot generation)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 MCQ_SYSTEM_PROMPT = """You are an expert exam question writer. Generate a multiple-choice question based on the provided textbook context.
 
@@ -88,11 +98,228 @@ that requires applying the concepts from the context. The scenario should:
 - Test the student's ability to transfer textbook knowledge to new situations"""
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Micro-prompting system prompt — Bloom's Taxonomy integrated
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MICRO_PROMPT_SYSTEM = """Đóng vai trò là một chuyên gia ra đề thi. Bạn sẽ nhận được MỘT đoạn văn bản ngắn từ sách giáo khoa và yêu cầu sinh câu hỏi.
+
+QUY TẮC TUYỆT ĐỐI:
+1. Chỉ dựa DUY NHẤT vào đoạn văn bản được cung cấp
+2. KHÔNG thêm thông tin ngoài đoạn văn bản
+3. Mỗi câu hỏi phải có đáp án đúng và giải thích
+
+CÁC MỨC ĐỘ BLOOM:
+- Dễ (Easy) = Nhớ (Remember) & Hiểu (Understand): Hỏi về định nghĩa, khái niệm, liệt kê, giải thích ý nghĩa
+- Trung bình (Medium) = Vận dụng (Apply) & Phân tích (Analyze): Hỏi cách giải quyết vấn đề, so sánh, phân loại, tìm mối quan hệ
+- Khó (Hard) = Đánh giá (Evaluate) & Sáng tạo (Create): Nhận định ưu/nhược điểm, thiết kế giải pháp mới, phản biện
+
+ĐỊNH DẠNG TRẢ VỀ — JSON array:
+[
+  {
+    "question_type": "mcq" hoặc "essay",
+    "difficulty": "easy" / "medium" / "hard",
+    "bloom_level": "remember" / "understand" / "apply" / "analyze" / "evaluate" / "create",
+    "content": "Nội dung câu hỏi",
+    "options": [{"label": "A", "text": "..."}, {"label": "B", "text": "..."}, {"label": "C", "text": "..."}, {"label": "D", "text": "..."}],
+    "correct_answer": "A (cho MCQ) hoặc câu trả lời mẫu (cho essay)",
+    "explanation": "Giải thích ngắn gọn"
+  }
+]
+
+Lưu ý: Nếu question_type là "essay" thì KHÔNG cần trường "options".
+Chỉ trả về JSON, không thêm text nào khác."""
+
+
 class QuestionGeneratorAgent:
     """Generates exam questions grounded in retrieved textbook content."""
 
     def __init__(self, llm):
         self.llm = llm
+
+    # ─── Micro-prompting: generate from a single chunk ──────────────
+
+    async def generate_from_chunk(
+        self,
+        chunk_assignment: ChunkAssignment,
+        constraints: dict,
+    ) -> list[GeneratedQuestion]:
+        """
+        Generate questions from a single chunk using micro-prompting.
+
+        Each LLM call receives only ONE chunk of text and generates 1-2 questions.
+        Includes retry with exponential backoff for rate limit errors (429).
+        """
+        assignments = chunk_assignment.assignments
+        if not assignments:
+            return []
+
+        # Truncate chunk text to keep token usage low
+        max_chars = settings.MAX_CHUNK_CHARS
+        chunk_text = chunk_assignment.chunk_text
+        if len(chunk_text) > max_chars:
+            chunk_text = chunk_text[:max_chars] + "..."
+            logger.debug(
+                f"Chunk {chunk_assignment.chunk_id} truncated: "
+                f"{len(chunk_assignment.chunk_text)} -> {max_chars} chars"
+            )
+
+        # Build the micro-prompt
+        task_descriptions = []
+        for a in assignments:
+            diff = a["difficulty"]
+            q_type = a["question_type"]
+
+            if diff == "easy":
+                bloom_desc = "kiểm tra mức độ ghi nhớ/hiểu: định nghĩa, khái niệm, liệt kê"
+            elif diff == "medium":
+                bloom_desc = "kiểm tra mức độ vận dụng/phân tích: giải quyết vấn đề, so sánh, phân loại"
+            else:
+                bloom_desc = "kiểm tra mức độ đánh giá/sáng tạo: nhận định ưu/nhược, thiết kế giải pháp"
+
+            type_desc = "trắc nghiệm (MCQ, 4 lựa chọn A-D)" if q_type == "mcq" else "tự luận (essay)"
+            task_descriptions.append(
+                f"- 1 câu hỏi {type_desc}, mức độ {diff.upper()} ({bloom_desc})"
+            )
+
+        task_list = "\n".join(task_descriptions)
+
+        user_message = f"""Dựa duy nhất vào đoạn văn bản dưới đây, hãy sinh ra chính xác {len(assignments)} câu hỏi:
+
+{task_list}
+
+=== ĐOẠN VĂN BẢN ===
+
+{chunk_text}
+
+=== HẾT VĂN BẢN ===
+
+Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
+
+        # Add strict grounding if enabled
+        extra = ""
+        if constraints.get("strict_grounding", True):
+            extra = (
+                "\n\nLƯU Ý QUAN TRỌNG: Bạn đang ở chế độ STRICT GROUNDING. "
+                "Mọi thông tin trong câu hỏi PHẢI có trong đoạn văn bản trên. "
+                "KHÔNG sử dụng kiến thức bên ngoài."
+            )
+
+        messages = [
+            SystemMessage(content=MICRO_PROMPT_SYSTEM + extra),
+            HumanMessage(content=user_message),
+        ]
+
+        # Retry with exponential backoff on rate limit errors
+        questions_data = await self._invoke_with_retry(messages, chunk_assignment.chunk_id)
+
+        # Convert to GeneratedQuestion objects
+        generated = []
+        for i, q_data in enumerate(questions_data):
+            if i >= len(assignments):
+                break
+
+            a = assignments[i]
+            options = q_data.get("options") if q_data.get("question_type", a["question_type"]) == "mcq" else None
+
+            generated.append(GeneratedQuestion(
+                slot_number=a.get("slot_number", 0),
+                question_type=q_data.get("question_type", a["question_type"]),
+                bloom_level=q_data.get("bloom_level", a["bloom_level"]),
+                difficulty_score=self._difficulty_to_score(
+                    q_data.get("difficulty", a["difficulty"])
+                ),
+                content=q_data.get("content", ""),
+                options=options,
+                correct_answer=q_data.get("correct_answer", ""),
+                explanation=q_data.get("explanation", ""),
+                source_chunks=[chunk_assignment.chunk_id],
+                source_texts=[chunk_assignment.chunk_text[:500]],
+            ))
+
+        logger.debug(
+            f"Chunk {chunk_assignment.chunk_id}: generated {len(generated)}/{len(assignments)} questions"
+        )
+
+        return generated
+
+    async def _invoke_with_retry(
+        self,
+        messages: list,
+        chunk_id: str,
+        max_retries: int = 4,
+    ) -> list[dict]:
+        """Invoke LLM with exponential backoff on rate limit (429) errors."""
+        for attempt in range(max_retries):
+            try:
+                response = await self.llm.ainvoke(messages)
+                return self._parse_array_response(response.content)
+            except Exception as e:
+                error_str = str(e)
+                is_rate_limit = "429" in error_str or "rate" in error_str.lower()
+
+                if is_rate_limit and attempt < max_retries - 1:
+                    # Exponential backoff: 8s, 16s, 32s, 64s
+                    wait = 8 * (2 ** attempt)
+                    logger.warning(
+                        f"Rate limit hit for chunk {chunk_id}, "
+                        f"retry {attempt + 1}/{max_retries} in {wait}s"
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(
+                        f"Micro-prompting failed for chunk {chunk_id} "
+                        f"(attempt {attempt + 1}): {e}"
+                    )
+                    return []
+        return []
+
+    async def generate_from_chunks_parallel(
+        self,
+        chunk_assignments: list[ChunkAssignment],
+        constraints: dict,
+        max_concurrency: int = 1,
+    ) -> list[GeneratedQuestion]:
+        """
+        Generate questions from chunks sequentially with rate-limit delays.
+
+        Processes one chunk at a time with a configurable delay between calls
+        to stay within API rate limits (e.g., Groq free tier: 12K TPM).
+        """
+        delay = settings.LLM_REQUEST_DELAY
+        all_questions = []
+
+        logger.info(
+            f"Starting sequential generation: {len(chunk_assignments)} chunks, "
+            f"delay={delay}s between calls"
+        )
+
+        for idx, ca in enumerate(chunk_assignments):
+            logger.info(
+                f"Generating chunk {idx + 1}/{len(chunk_assignments)} "
+                f"(chunk_id={ca.chunk_id[:16]}..., "
+                f"tasks={len(ca.assignments)})"
+            )
+
+            try:
+                questions = await self.generate_from_chunk(ca, constraints)
+                all_questions.extend(questions)
+            except Exception as e:
+                logger.error(f"Chunk generation error: {e}")
+
+            # Wait between requests to respect rate limits
+            if idx < len(chunk_assignments) - 1:
+                logger.debug(f"Rate-limit delay: waiting {delay}s...")
+                await asyncio.sleep(delay)
+
+        logger.info(
+            f"Sequential generation complete: {len(all_questions)} questions "
+            f"from {len(chunk_assignments)} chunks"
+        )
+
+        return all_questions
+
+    # ─── Legacy: generate from blueprint slot + context ────────────
 
     async def generate_questions(
         self,
@@ -177,6 +404,8 @@ Generate the question now."""
             source_texts=[c["text"] for c in context.chunks],
         )
 
+    # ─── Response parsing ──────────────────────────────────────────
+
     def _parse_response(self, response_text: str) -> dict:
         """Parse LLM JSON response, handling markdown and extra text."""
         text = response_text.strip()
@@ -199,6 +428,48 @@ Generate the question now."""
         except json.JSONDecodeError as e:
             logger.warning(f"QuestionGen JSON parse failed: {e}. Raw: {text[:200]}")
             return {}
+
+    def _parse_array_response(self, response_text: str) -> list[dict]:
+        """Parse LLM JSON array response (for micro-prompting)."""
+        text = response_text.strip()
+        logger.debug(f"MicroPrompt LLM raw (first 300): {text[:300]}")
+
+        if not text:
+            return []
+
+        # Extract from ```json ... ``` block (array)
+        code_block = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
+        if code_block:
+            text = code_block.group(1)
+        elif not text.startswith("["):
+            # Try to find array
+            bracket_match = re.search(r"\[.*\]", text, re.DOTALL)
+            if bracket_match:
+                text = bracket_match.group(0)
+            else:
+                # Maybe it's a single object, wrap in array
+                brace_match = re.search(r"\{.*\}", text, re.DOTALL)
+                if brace_match:
+                    text = f"[{brace_match.group(0)}]"
+
+        try:
+            result = json.loads(text)
+            if isinstance(result, dict):
+                return [result]
+            return result if isinstance(result, list) else []
+        except json.JSONDecodeError as e:
+            logger.warning(f"MicroPrompt JSON parse failed: {e}. Raw: {text[:200]}")
+            return []
+
+    def _difficulty_to_score(self, difficulty: str) -> float:
+        """Convert difficulty label to score."""
+        return {
+            "easy": 0.2,
+            "medium": 0.5,
+            "hard": 0.85,
+        }.get(difficulty, 0.5)
+
+    # ─── Legacy: regenerate single ─────────────────────────────────
 
     async def regenerate_single(
         self,

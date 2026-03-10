@@ -21,6 +21,7 @@ from agents.blueprint import BlueprintAgent
 from agents.question_generator import QuestionGeneratorAgent
 from agents.validator import ValidatorAgent
 from agents.reviewer import ReviewerAgent
+from agents.pruning import PruningAgent
 from services.rag_service import RAGService
 from services.textbook_service import TextbookService
 
@@ -92,10 +93,11 @@ class ExamService:
 
         # Initialize agents
         retrieval_agent = RetrievalAgent(vector_store, db_session=self.db)
-        blueprint_agent = BlueprintAgent(llm)
+        blueprint_agent = BlueprintAgent()  # No LLM needed for deterministic blueprint
         question_generator = QuestionGeneratorAgent(llm)
-        validator = ValidatorAgent(llm)
+        validator = ValidatorAgent()  # Rule-based, no LLM needed
         reviewer = ReviewerAgent(question_generator, retrieval_agent)
+        pruning_agent = PruningAgent()
 
         # Get textbook metadata
         textbook_svc = TextbookService(self.db)
@@ -143,6 +145,10 @@ class ExamService:
             "current_step": "parsing",
             "step_progress": 0.0,
             "error": None,
+            # Micro-prompting fields
+            "chunk_assignments": [],
+            "original_quota": {},
+            # Partial edit fields
             "edit_requests": None,
             "is_partial_edit": False,
             # Inject agent instances (not serialized, used by nodes)
@@ -151,6 +157,8 @@ class ExamService:
             "_question_generator": question_generator,
             "_validator": validator,
             "_reviewer": reviewer,
+            "_pruning_agent": pruning_agent,
+            "_db_session": self.db,
             "_retry_attempted": False,
         }
 
@@ -215,7 +223,7 @@ class ExamService:
 
         retrieval_agent = RetrievalAgent(vector_store, db_session=self.db)
         question_generator = QuestionGeneratorAgent(llm)
-        validator = ValidatorAgent(llm)
+        validator = ValidatorAgent()  # Rule-based, no LLM needed
         reviewer = ReviewerAgent(question_generator, retrieval_agent)
 
         # Convert existing DB questions to GeneratedQuestion objects
@@ -270,6 +278,10 @@ class ExamService:
             "current_step": "editing",
             "step_progress": 0.0,
             "error": None,
+            # Micro-prompting fields (not used for partial edit)
+            "chunk_assignments": [],
+            "original_quota": {},
+            # Partial edit fields
             "edit_requests": edit_requests,
             "is_partial_edit": True,
             "_retrieval_agent": retrieval_agent,
@@ -277,6 +289,8 @@ class ExamService:
             "_question_generator": question_generator,
             "_validator": validator,
             "_reviewer": reviewer,
+            "_pruning_agent": PruningAgent(),
+            "_db_session": self.db,
             "_retry_attempted": False,
         }
 

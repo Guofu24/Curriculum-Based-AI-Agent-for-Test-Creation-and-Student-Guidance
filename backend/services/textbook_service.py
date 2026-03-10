@@ -34,9 +34,12 @@ class TextbookService:
         """Upload and process a textbook file."""
         # 1. Save file to disk
         textbook_id = str(uuid.uuid4())
-        upload_dir = Path(settings.UPLOAD_DIR) / user_id
+        upload_dir = Path(settings.UPLOAD_DIR).resolve() / user_id
         upload_dir.mkdir(parents=True, exist_ok=True)
-        file_path = upload_dir / f"{textbook_id}_{file_name}"
+        # Use only UUID + extension for the on-disk name to stay within
+        # Windows MAX_PATH (260 chars). The original name is kept in the DB.
+        ext = Path(file_name).suffix  # e.g. ".pdf"
+        file_path = upload_dir / f"{textbook_id}{ext}"
         file_path.write_bytes(file_content)
 
         # 2. Create DB record

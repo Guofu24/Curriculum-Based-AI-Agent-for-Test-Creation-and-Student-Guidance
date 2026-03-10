@@ -126,15 +126,18 @@ export default function GenerateExamPage() {
   }
 
   const handleGenerate = () => {
-    if (!selectedTextbook || selectedChapters.length === 0 || totalQuestions === 0) return
+    if (!selectedTextbook || totalQuestions === 0) return
+    if (chapterCount > 0 && selectedChapters.length === 0) return
     setIsGenerating(true)
     setGenerationError("")
     setGeneratedExamId(null)
 
     const reqData: ExamGenerationRequest = {
       textbook_id: selectedTextbook,
-      chapters: selectedChapters,
-      prompt: prompt || `Generate exam for chapters ${selectedChapters.join(", ")}`,
+      chapters: chapterCount > 0 ? selectedChapters : [],
+      prompt: prompt || (chapterCount > 0
+        ? `Generate exam for chapters ${selectedChapters.join(", ")}`
+        : `Generate exam covering the entire textbook`),
       exam_type: questionType,
       difficulty: "custom",
       question_distribution: {
@@ -257,7 +260,7 @@ export default function GenerateExamPage() {
               </Select>
             </div>
 
-            {currentTextbook && (
+            {currentTextbook && chapterCount > 0 && (
               <div className="flex flex-col gap-3">
                 <div className="flex items-center justify-between">
                   <Label className="text-sm font-medium">Select Chapters</Label>
@@ -294,6 +297,17 @@ export default function GenerateExamPage() {
                     {selectedChapters.length} of {chapterCount} chapters selected
                   </p>
                 )}
+              </div>
+            )}
+
+            {currentTextbook && chapterCount === 0 && (
+              <div className="rounded-xl border border-dashed border-primary/30 bg-primary/5 p-4">
+                <p className="text-sm font-medium text-foreground">
+                  No chapters detected
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The entire textbook content will be used for exam generation.
+                </p>
               </div>
             )}
           </CardContent>
@@ -664,7 +678,7 @@ export default function GenerateExamPage() {
             size="lg"
             className="px-8"
             onClick={handleGenerate}
-            disabled={!selectedTextbook || selectedChapters.length === 0 || totalQuestions === 0}
+            disabled={!selectedTextbook || (chapterCount > 0 && selectedChapters.length === 0) || totalQuestions === 0}
           >
             <Sparkles className="mr-2 h-4 w-4" />
             Generate Exam

@@ -115,7 +115,8 @@ class RetrievalAgent:
         parts = []
         if slot.target_topics:
             parts.append(" ".join(slot.target_topics))
-        parts.append(f"chapter {slot.target_chapter}")
+        if slot.target_chapter and slot.target_chapter > 0:
+            parts.append(f"chapter {slot.target_chapter}")
         parts.append(f"{slot.bloom_level} level question")
         return " ".join(parts)
 

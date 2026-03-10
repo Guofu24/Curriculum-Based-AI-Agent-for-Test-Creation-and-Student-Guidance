@@ -186,7 +186,7 @@ export default function DashboardPage() {
                           </span>
                         </div>
                         <span className="text-xs text-muted-foreground truncate">
-                          {exam.total_questions} questions - Ch. {exam.chapters.join(", ")}
+                          {exam.total_questions} questions - {exam.chapters.length > 0 ? `Ch. ${exam.chapters.join(", ")}` : "All chapters"}
                         </span>
                       </div>
                       <div className="flex items-center gap-2 shrink-0 ml-4">
