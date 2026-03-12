@@ -232,6 +232,9 @@ class BlueprintAgent:
                         else:
                             q_type = "mcq"
 
+                    # Determine chunk mode: easy → single, medium/hard → multi
+                    chunk_mode = "single" if diff_level == "easy" else "multi"
+
                     slots.append(QuestionSlot(
                         slot_number=slot_num,
                         question_type=q_type,
@@ -239,6 +242,7 @@ class BlueprintAgent:
                         difficulty_score=BLOOM_DIFFICULTY_SCORE.get(bloom, 0.5),
                         target_chapter=chapter,
                         target_topics=[],
+                        chunk_mode=chunk_mode,
                     ))
                     slot_num += 1
 
@@ -255,13 +259,16 @@ async def assign_chunks_to_slots(
     db_session: AsyncSession,
 ) -> list[ChunkAssignment]:
     """
-    For each chapter in the blueprint, randomly select chunks from the DB
-    and assign 1-2 question generation tasks to each chunk.
+    For each chapter in the blueprint, select chunks from the DB and create
+    ChunkAssignment objects for question generation.
 
-    This is the core of the micro-prompting strategy: each LLM call gets
-    only ONE chunk of text (~500-1500 chars) and generates 1-2 questions.
+    Chunk mode handling (Phase 3):
+    - **single** (easy): 1 chunk → 1-2 question tasks  (same as before)
+    - **multi** (medium/hard): 1 primary chunk + 1-2 adjacent chunks →
+      1 synthesis question per bundle.  Gives the LLM cross-chunk context
+      so it can write questions that require combining information.
 
-    Returns: list of ChunkAssignment objects ready for parallel LLM calls.
+    Returns: list of ChunkAssignment objects ready for sequential LLM calls.
     """
     # Group slots by chapter
     chapter_slots: dict[int, list[QuestionSlot]] = {}
@@ -269,7 +276,7 @@ async def assign_chunks_to_slots(
         ch = slot.target_chapter
         chapter_slots.setdefault(ch, []).append(slot)
 
-    assignments = []
+    assignments: list[ChunkAssignment] = []
 
     for chapter, slots in chapter_slots.items():
         # Query chunks for this chapter from PostgreSQL
@@ -282,66 +289,168 @@ async def assign_chunks_to_slots(
             )
             continue
 
-        # Shuffle chunks for random selection
-        random.shuffle(chunks)
+        # Split slots by chunk_mode
+        single_slots = [s for s in slots if s.chunk_mode == "single"]
+        multi_slots = [s for s in slots if s.chunk_mode == "multi"]
 
-        # Distribute slots across chunks (max 2 per chunk)
-        MAX_PER_CHUNK = 2
-        chunk_idx = 0
-        chunk_assignment_map: dict[str, ChunkAssignment] = {}
+        # ── Single-chunk assignments (easy) ─────────────────────────
+        if single_slots:
+            single_assignments = _assign_single_chunk_slots(
+                single_slots, chunks, chapter,
+            )
+            assignments.extend(single_assignments)
 
-        for slot in slots:
-            # Find a chunk that hasn't reached max assignments
-            attempts = 0
-            while attempts < len(chunks):
-                chunk = chunks[chunk_idx % len(chunks)]
-                chunk_key = chunk["chunk_id"]
+        # ── Multi-chunk bundle assignments (medium/hard) ────────────
+        if multi_slots:
+            multi_assignments = _assign_multi_chunk_slots(
+                multi_slots, chunks, chapter,
+            )
+            assignments.extend(multi_assignments)
 
-                if chunk_key not in chunk_assignment_map:
-                    chunk_assignment_map[chunk_key] = ChunkAssignment(
-                        chunk_id=chunk["chunk_id"],
-                        chunk_text=chunk["content"],
-                        chapter=chapter,
-                        assignments=[],
-                    )
+    total_tasks = sum(len(a.assignments) for a in assignments)
+    multi_count = sum(1 for a in assignments if a.context_chunks)
+    logger.info(
+        f"Chunk assignment complete: {len(assignments)} assignments "
+        f"({multi_count} multi-chunk bundles), "
+        f"total question tasks: {total_tasks}"
+    )
 
-                ca = chunk_assignment_map[chunk_key]
-                if len(ca.assignments) < MAX_PER_CHUNK:
-                    ca.assignments.append({
-                        "difficulty": _score_to_difficulty(slot.difficulty_score),
-                        "bloom_level": slot.bloom_level,
-                        "question_type": slot.question_type,
-                        "slot_number": slot.slot_number,
-                    })
-                    chunk_idx = (chunk_idx + 1) % len(chunks)
-                    break
+    return assignments
 
-                chunk_idx = (chunk_idx + 1) % len(chunks)
-                attempts += 1
-            else:
-                # All chunks at max capacity, expand to existing one
-                chunk = chunks[chunk_idx % len(chunks)]
-                chunk_key = chunk["chunk_id"]
-                if chunk_key not in chunk_assignment_map:
-                    chunk_assignment_map[chunk_key] = ChunkAssignment(
-                        chunk_id=chunk["chunk_id"],
-                        chunk_text=chunk["content"],
-                        chapter=chapter,
-                        assignments=[],
-                    )
-                chunk_assignment_map[chunk_key].assignments.append({
+
+def _assign_single_chunk_slots(
+    slots: list[QuestionSlot],
+    chunks: list[dict],
+    chapter: int,
+) -> list[ChunkAssignment]:
+    """Assign single-chunk slots — max 2 tasks per chunk (original logic)."""
+    shuffled = list(chunks)
+    random.shuffle(shuffled)
+
+    MAX_PER_CHUNK = 2
+    chunk_idx = 0
+    chunk_assignment_map: dict[str, ChunkAssignment] = {}
+
+    for slot in slots:
+        attempts = 0
+        while attempts < len(shuffled):
+            chunk = shuffled[chunk_idx % len(shuffled)]
+            chunk_key = chunk["chunk_id"]
+
+            if chunk_key not in chunk_assignment_map:
+                chunk_assignment_map[chunk_key] = ChunkAssignment(
+                    chunk_id=chunk["chunk_id"],
+                    chunk_text=chunk["content"],
+                    chapter=chapter,
+                    assignments=[],
+                )
+
+            ca = chunk_assignment_map[chunk_key]
+            if len(ca.assignments) < MAX_PER_CHUNK:
+                ca.assignments.append({
                     "difficulty": _score_to_difficulty(slot.difficulty_score),
                     "bloom_level": slot.bloom_level,
                     "question_type": slot.question_type,
                     "slot_number": slot.slot_number,
                 })
+                chunk_idx = (chunk_idx + 1) % len(shuffled)
+                break
 
-        assignments.extend(chunk_assignment_map.values())
+            chunk_idx = (chunk_idx + 1) % len(shuffled)
+            attempts += 1
+        else:
+            # All chunks at max capacity, overflow to current chunk
+            chunk = shuffled[chunk_idx % len(shuffled)]
+            chunk_key = chunk["chunk_id"]
+            if chunk_key not in chunk_assignment_map:
+                chunk_assignment_map[chunk_key] = ChunkAssignment(
+                    chunk_id=chunk["chunk_id"],
+                    chunk_text=chunk["content"],
+                    chapter=chapter,
+                    assignments=[],
+                )
+            chunk_assignment_map[chunk_key].assignments.append({
+                "difficulty": _score_to_difficulty(slot.difficulty_score),
+                "bloom_level": slot.bloom_level,
+                "question_type": slot.question_type,
+                "slot_number": slot.slot_number,
+            })
 
-    logger.info(
-        f"Chunk assignment complete: {len(assignments)} chunks assigned, "
-        f"total question tasks: {sum(len(a.assignments) for a in assignments)}"
-    )
+    return list(chunk_assignment_map.values())
+
+
+# Number of extra context chunks for multi-chunk mode
+MULTI_CHUNK_EXTRA = 2
+
+
+def _assign_multi_chunk_slots(
+    slots: list[QuestionSlot],
+    chunks: list[dict],
+    chapter: int,
+) -> list[ChunkAssignment]:
+    """
+    Assign multi-chunk slots — each slot gets its own ChunkAssignment
+    with a primary chunk + 1-2 adjacent context chunks for synthesis.
+
+    Adjacent chunks are preferred because they are topically coherent
+    (no embedding calls needed).
+    """
+    assignments: list[ChunkAssignment] = []
+
+    # Build index for adjacency lookup
+    chunk_list = list(chunks)  # preserve DB order (page / position)
+    num_chunks = len(chunk_list)
+
+    if num_chunks == 0:
+        return []
+
+    # Rotate starting index so different slots get different primary chunks
+    start_idx = 0
+
+    for slot in slots:
+        primary_idx = start_idx % num_chunks
+        primary = chunk_list[primary_idx]
+
+        # Gather adjacent chunks (before + after primary)
+        extra: list[dict] = []
+        for offset in range(1, MULTI_CHUNK_EXTRA + 1):
+            # After primary
+            after_idx = primary_idx + offset
+            if after_idx < num_chunks:
+                c = chunk_list[after_idx]
+                extra.append({
+                    "chunk_id": c["chunk_id"],
+                    "chunk_text": c["content"],
+                })
+            # Before primary (fallback if we ran out of "after" chunks)
+            if len(extra) >= MULTI_CHUNK_EXTRA:
+                break
+            before_idx = primary_idx - offset
+            if before_idx >= 0:
+                c = chunk_list[before_idx]
+                extra.append({
+                    "chunk_id": c["chunk_id"],
+                    "chunk_text": c["content"],
+                })
+            if len(extra) >= MULTI_CHUNK_EXTRA:
+                break
+
+        ca = ChunkAssignment(
+            chunk_id=primary["chunk_id"],
+            chunk_text=primary["content"],
+            chapter=chapter,
+            assignments=[{
+                "difficulty": _score_to_difficulty(slot.difficulty_score),
+                "bloom_level": slot.bloom_level,
+                "question_type": slot.question_type,
+                "slot_number": slot.slot_number,
+            }],
+            context_chunks=extra[:MULTI_CHUNK_EXTRA],
+        )
+        assignments.append(ca)
+
+        # Advance starting index to spread across chunks
+        start_idx += 1
 
     return assignments
 

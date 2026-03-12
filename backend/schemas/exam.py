@@ -55,6 +55,8 @@ class QuestionResponse(BaseModel):
     explanation: Optional[str] = None
     source_citations: Optional[list[str]] = None
     is_validated: bool = False
+    quality_score_detail: Optional[dict] = None     # per-question quality rubric
+    grounding_report_detail: Optional[dict] = None  # per-question grounding analysis
 
     model_config = {"from_attributes": True}
 
@@ -74,6 +76,12 @@ class ExamResponse(BaseModel):
     quality_score: Optional[float] = None
     created_at: datetime
     questions: list[QuestionResponse] = []
+    # Phase 1-5 aggregate data
+    quality_scores: Optional[list[dict]] = None       # per-question quality rubric scores
+    grounding_reports: Optional[list[dict]] = None     # per-question grounding analysis
+    duplicate_groups: Optional[list[dict]] = None      # dedup clusters
+    provider_logs: Optional[list[dict]] = None         # LLM call logs
+    edit_impact_level: Optional[str] = None            # cosmetic, moderate, strong
 
     model_config = {"from_attributes": True}
 

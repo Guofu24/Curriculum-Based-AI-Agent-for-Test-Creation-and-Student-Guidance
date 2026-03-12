@@ -65,6 +65,11 @@ async def generate_exam(
         quality_score=full_exam.quality_score,
         created_at=full_exam.created_at,
         questions=[_format_question(q) for q in questions],
+        quality_scores=full_exam.quality_scores_json,
+        grounding_reports=full_exam.grounding_reports_json,
+        duplicate_groups=full_exam.duplicate_groups_json,
+        provider_logs=full_exam.provider_logs_json,
+        edit_impact_level=full_exam.edit_impact_level,
     )
 
 
@@ -183,6 +188,11 @@ async def partial_regenerate(
         quality_score=full_exam.quality_score,
         created_at=full_exam.created_at,
         questions=[_format_question(q) for q in questions],
+        quality_scores=full_exam.quality_scores_json,
+        grounding_reports=full_exam.grounding_reports_json,
+        duplicate_groups=full_exam.duplicate_groups_json,
+        provider_logs=full_exam.provider_logs_json,
+        edit_impact_level=full_exam.edit_impact_level,
     )
 
 
@@ -203,4 +213,6 @@ def _format_question(q) -> QuestionResponse:
         explanation=q.explanation,
         source_citations=q.source_chunks,
         is_validated=q.is_validated,
+        quality_score_detail=q.quality_score_json,
+        grounding_report_detail=q.grounding_report_json,
     )

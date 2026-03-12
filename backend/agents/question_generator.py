@@ -131,6 +131,39 @@ Lưu ý: Nếu question_type là "essay" thì KHÔNG cần trường "options".
 Chỉ trả về JSON, không thêm text nào khác."""
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Multi-chunk synthesis prompt (Phase 3)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+MULTI_CHUNK_SYSTEM_PROMPT = """Đóng vai trò là một chuyên gia ra đề thi. Bạn sẽ nhận được NHIỀU đoạn văn bản từ sách giáo khoa và yêu cầu sinh câu hỏi ĐÒI HỎI TỔNG HỢP thông tin từ nhiều đoạn.
+
+QUY TẮC TUYỆT ĐỐI:
+1. Chỉ dựa DUY NHẤT vào các đoạn văn bản được cung cấp
+2. KHÔNG thêm thông tin ngoài các đoạn văn bản
+3. Câu hỏi PHẢI đòi hỏi người đọc kết hợp/so sánh/tổng hợp thông tin từ NHIỀU đoạn, KHÔNG chỉ dựa vào 1 đoạn duy nhất
+4. Mỗi câu hỏi phải có đáp án đúng và giải thích dựa trên thông tin từ các đoạn
+
+CÁC MỨC ĐỘ BLOOM:
+- Trung bình (Medium) = Vận dụng (Apply) & Phân tích (Analyze): So sánh khái niệm giữa các đoạn, phân loại, tìm mối quan hệ
+- Khó (Hard) = Đánh giá (Evaluate) & Sáng tạo (Create): Nhận định ưu/nhược điểm dựa trên nhiều nguồn, thiết kế giải pháp tổng hợp
+
+ĐỊNH DẠNG TRẢ VỀ — JSON array:
+[
+  {
+    "question_type": "mcq" hoặc "essay",
+    "difficulty": "medium" / "hard",
+    "bloom_level": "apply" / "analyze" / "evaluate" / "create",
+    "content": "Nội dung câu hỏi (phải kết hợp thông tin từ nhiều đoạn)",
+    "options": [{"label": "A", "text": "..."}, {"label": "B", "text": "..."}, {"label": "C", "text": "..."}, {"label": "D", "text": "..."}],
+    "correct_answer": "A (cho MCQ) hoặc câu trả lời mẫu (cho essay)",
+    "explanation": "Giải thích — chỉ rõ thông tin lấy từ đoạn nào"
+  }
+]
+
+Lưu ý: Nếu question_type là "essay" thì KHÔNG cần trường "options".
+Chỉ trả về JSON, không thêm text nào khác."""
+
+
 class QuestionGeneratorAgent:
     """Generates exam questions grounded in retrieved textbook content."""
 
@@ -243,6 +276,139 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
 
         return generated
 
+    # ─── Multi-chunk synthesis: generate from context bundle ────────
+
+    async def generate_from_context_bundle(
+        self,
+        chunk_assignment: ChunkAssignment,
+        constraints: dict,
+    ) -> list[GeneratedQuestion]:
+        """
+        Generate synthesis questions from a multi-chunk context bundle.
+
+        The LLM receives the primary chunk + extra context_chunks and must
+        create questions that require combining information across sources.
+        Used for medium/hard slots (Phase 3).
+        """
+        assignments = chunk_assignment.assignments
+        if not assignments:
+            return []
+
+        max_chars = settings.MAX_CHUNK_CHARS
+
+        # Build multi-source text segments
+        segments: list[str] = []
+        all_chunk_ids: list[str] = []
+        all_chunk_texts: list[str] = []
+
+        # Primary chunk
+        primary_text = chunk_assignment.chunk_text
+        if len(primary_text) > max_chars:
+            primary_text = primary_text[:max_chars] + "..."
+        segments.append(f"=== ĐOẠN 1 (chính) ===\n\n{primary_text}")
+        all_chunk_ids.append(chunk_assignment.chunk_id)
+        all_chunk_texts.append(chunk_assignment.chunk_text[:500])
+
+        # Extra context chunks
+        for i, extra in enumerate(chunk_assignment.context_chunks, start=2):
+            extra_text = extra["chunk_text"]
+            if len(extra_text) > max_chars:
+                extra_text = extra_text[:max_chars] + "..."
+            segments.append(f"=== ĐOẠN {i} ===\n\n{extra_text}")
+            all_chunk_ids.append(extra["chunk_id"])
+            all_chunk_texts.append(extra["chunk_text"][:500])
+
+        combined_text = "\n\n".join(segments)
+
+        # Build task descriptions
+        task_descriptions = []
+        for a in assignments:
+            diff = a["difficulty"]
+            q_type = a["question_type"]
+
+            if diff == "medium":
+                bloom_desc = (
+                    "vận dụng/phân tích: so sánh khái niệm giữa các đoạn, "
+                    "phân loại, tìm mối quan hệ"
+                )
+            else:
+                bloom_desc = (
+                    "đánh giá/sáng tạo: nhận định ưu/nhược điểm dựa trên "
+                    "nhiều nguồn, thiết kế giải pháp tổng hợp"
+                )
+
+            type_desc = (
+                "trắc nghiệm (MCQ, 4 lựa chọn A-D)"
+                if q_type == "mcq"
+                else "tự luận (essay)"
+            )
+            task_descriptions.append(
+                f"- 1 câu hỏi {type_desc}, mức độ {diff.upper()} ({bloom_desc})"
+            )
+
+        task_list = "\n".join(task_descriptions)
+
+        user_message = (
+            f"Dựa vào CÁC đoạn văn bản dưới đây, hãy sinh ra chính xác "
+            f"{len(assignments)} câu hỏi TỔNG HỢP (phải kết hợp thông tin "
+            f"từ NHIỀU đoạn, không chỉ 1 đoạn):\n\n"
+            f"{task_list}\n\n"
+            f"{combined_text}\n\n"
+            f"=== HẾT VĂN BẢN ===\n\n"
+            f"Trả về JSON array chứa đúng {len(assignments)} câu hỏi."
+        )
+
+        extra = ""
+        if constraints.get("strict_grounding", True):
+            extra = (
+                "\n\nLƯU Ý QUAN TRỌNG: Bạn đang ở chế độ STRICT GROUNDING. "
+                "Mọi thông tin trong câu hỏi PHẢI có trong các đoạn văn bản trên. "
+                "KHÔNG sử dụng kiến thức bên ngoài."
+            )
+
+        messages = [
+            SystemMessage(content=MULTI_CHUNK_SYSTEM_PROMPT + extra),
+            HumanMessage(content=user_message),
+        ]
+
+        questions_data = await self._invoke_with_retry(
+            messages, chunk_assignment.chunk_id,
+        )
+
+        generated = []
+        for i, q_data in enumerate(questions_data):
+            if i >= len(assignments):
+                break
+
+            a = assignments[i]
+            options = (
+                q_data.get("options")
+                if q_data.get("question_type", a["question_type"]) == "mcq"
+                else None
+            )
+
+            generated.append(GeneratedQuestion(
+                slot_number=a.get("slot_number", 0),
+                question_type=q_data.get("question_type", a["question_type"]),
+                bloom_level=q_data.get("bloom_level", a["bloom_level"]),
+                difficulty_score=self._difficulty_to_score(
+                    q_data.get("difficulty", a["difficulty"])
+                ),
+                content=q_data.get("content", ""),
+                options=options,
+                correct_answer=q_data.get("correct_answer", ""),
+                explanation=q_data.get("explanation", ""),
+                source_chunks=all_chunk_ids,
+                source_texts=all_chunk_texts,
+            ))
+
+        logger.debug(
+            f"Multi-chunk bundle {chunk_assignment.chunk_id}: "
+            f"generated {len(generated)}/{len(assignments)} synthesis questions"
+        )
+
+        return generated
+
     async def _invoke_with_retry(
         self,
         messages: list,
@@ -283,26 +449,37 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         """
         Generate questions from chunks sequentially with rate-limit delays.
 
-        Processes one chunk at a time with a configurable delay between calls
-        to stay within API rate limits (e.g., Groq free tier: 12K TPM).
+        Dispatches each ChunkAssignment to the appropriate method:
+        - Single-chunk (no context_chunks) → generate_from_chunk()
+        - Multi-chunk bundle (has context_chunks) → generate_from_context_bundle()
         """
         delay = settings.LLM_REQUEST_DELAY
         all_questions = []
 
+        single_count = sum(1 for ca in chunk_assignments if not ca.context_chunks)
+        multi_count = len(chunk_assignments) - single_count
+
         logger.info(
-            f"Starting sequential generation: {len(chunk_assignments)} chunks, "
+            f"Starting sequential generation: {len(chunk_assignments)} assignments "
+            f"({single_count} single-chunk, {multi_count} multi-chunk bundles), "
             f"delay={delay}s between calls"
         )
 
         for idx, ca in enumerate(chunk_assignments):
+            mode = "multi-chunk" if ca.context_chunks else "single-chunk"
             logger.info(
-                f"Generating chunk {idx + 1}/{len(chunk_assignments)} "
-                f"(chunk_id={ca.chunk_id[:16]}..., "
+                f"Generating {idx + 1}/{len(chunk_assignments)} "
+                f"({mode}, chunk_id={ca.chunk_id[:16]}..., "
                 f"tasks={len(ca.assignments)})"
             )
 
             try:
-                questions = await self.generate_from_chunk(ca, constraints)
+                if ca.context_chunks:
+                    questions = await self.generate_from_context_bundle(
+                        ca, constraints,
+                    )
+                else:
+                    questions = await self.generate_from_chunk(ca, constraints)
                 all_questions.extend(questions)
             except Exception as e:
                 logger.error(f"Chunk generation error: {e}")

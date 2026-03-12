@@ -34,6 +34,8 @@ def _format_question(q) -> QuestionResponse:
         explanation=q.explanation,
         source_citations=q.source_chunks,
         is_validated=q.is_validated,
+        quality_score_detail=q.quality_score_json,
+        grounding_report_detail=q.grounding_report_json,
     )
 
 
@@ -90,6 +92,11 @@ async def get_exam(
         quality_score=exam.quality_score,
         created_at=exam.created_at,
         questions=[_format_question(q) for q in questions],
+        quality_scores=exam.quality_scores_json,
+        grounding_reports=exam.grounding_reports_json,
+        duplicate_groups=exam.duplicate_groups_json,
+        provider_logs=exam.provider_logs_json,
+        edit_impact_level=exam.edit_impact_level,
     )
 
 

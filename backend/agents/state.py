@@ -19,6 +19,7 @@ class QuestionSlot:
     difficulty_score: float  # 0.0 to 1.0
     target_chapter: int
     target_topics: list[str] = field(default_factory=list)
+    chunk_mode: str = "single"  # "single" (easy) or "multi" (medium/hard)
 
 
 @dataclass
@@ -65,11 +66,14 @@ class RetrievedContext:
 @dataclass
 class ChunkAssignment:
     """Maps a single chunk to its question generation assignments.
-    Used by micro-prompting: each chunk generates 1-2 questions."""
+    Used by micro-prompting: each chunk generates 1-2 questions.
+    For multi-chunk mode (medium/hard): context_chunks carries additional
+    source chunks for cross-chunk synthesis questions."""
     chunk_id: str
     chunk_text: str
     chapter: int  # 0 = no chapter
-    assignments: list[dict] = field(default_factory=list)  # [{difficulty, bloom_level, question_type}]
+    assignments: list[dict] = field(default_factory=list)  # [{difficulty, bloom_level, question_type, slot_number}]
+    context_chunks: list[dict] = field(default_factory=list)  # [{chunk_id, chunk_text}] extra chunks for multi-chunk mode
 
 
 # --- LangGraph Agent State ---
@@ -118,9 +122,25 @@ class AgentState(TypedDict):
     chunk_assignments: list[ChunkAssignment]
     original_quota: dict  # {easy: N, medium: N, hard: N} — original target before over-generation
 
+    # --- QualityJudge output ---
+    judged_questions: list[GeneratedQuestion]
+    quality_scores: list[dict]           # per-question rubric scores
+    grounding_reports: list[dict]        # per-question grounding analysis
+
+    # --- DedupFilter output ---
+    duplicate_groups: list[dict]         # [{representative_slot, member_slots, max_similarity}]
+
+    # --- Final output (after all filtering) ---
+    final_questions: list[GeneratedQuestion]
+
     # --- Partial regeneration (Reviewer) ---
     edit_requests: Optional[list[dict]]  # [{question_ids, prompt, range_start, range_end}]
     is_partial_edit: bool
+    edit_impact_level: Optional[str]     # cosmetic, moderate, strong
+    refreshed_contexts: list[RetrievedContext]  # contexts from retrieval refresh (strong edits)
+
+    # --- Provider logging ---
+    provider_logs: list[dict]            # [{provider, latency, retries, success, error}]
 
     # --- Agent instances (injected at graph entry, not serialized to DB) ---
     _retrieval_agent: Optional[Any]
@@ -129,5 +149,7 @@ class AgentState(TypedDict):
     _validator: Optional[Any]
     _reviewer: Optional[Any]
     _pruning_agent: Optional[Any]
+    _quality_judge: Optional[Any]
+    _dedup_filter: Optional[Any]
     _db_session: Optional[Any]
     _retry_attempted: Optional[bool]

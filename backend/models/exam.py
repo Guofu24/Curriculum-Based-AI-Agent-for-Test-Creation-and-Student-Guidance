@@ -64,6 +64,11 @@ class Exam(Base):
     variant_number: Mapped[int] = mapped_column(Integer, default=1)
     total_questions: Mapped[int] = mapped_column(Integer, default=0)
     quality_score: Mapped[float] = mapped_column(Float, nullable=True)
+    quality_scores_json: Mapped[dict] = mapped_column(JSON, nullable=True)  # per-question quality rubric scores
+    grounding_reports_json: Mapped[dict] = mapped_column(JSON, nullable=True)  # per-question grounding analysis
+    duplicate_groups_json: Mapped[dict] = mapped_column(JSON, nullable=True)  # [{representative_slot, member_slots, max_similarity}]
+    provider_logs_json: Mapped[dict] = mapped_column(JSON, nullable=True)  # [{provider, model, latency_ms, ...}]
+    edit_impact_level: Mapped[str] = mapped_column(String(20), nullable=True)  # cosmetic, moderate, strong
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     owner = relationship("User", back_populates="exams")
@@ -92,5 +97,7 @@ class ExamQuestion(Base):
     source_chunks: Mapped[dict] = mapped_column(JSON, nullable=True)  # citations
     is_validated: Mapped[bool] = mapped_column(default=False)
     validation_notes: Mapped[str] = mapped_column(Text, nullable=True)
+    quality_score_json: Mapped[dict] = mapped_column(JSON, nullable=True)  # per-question quality rubric
+    grounding_report_json: Mapped[dict] = mapped_column(JSON, nullable=True)  # per-question grounding
 
     exam = relationship("Exam", back_populates="questions")

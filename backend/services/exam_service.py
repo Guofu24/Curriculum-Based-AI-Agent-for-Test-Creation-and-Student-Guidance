@@ -22,6 +22,10 @@ from agents.question_generator import QuestionGeneratorAgent
 from agents.validator import ValidatorAgent
 from agents.reviewer import ReviewerAgent
 from agents.pruning import PruningAgent
+from agents.quality_judge import QualityJudgeAgent
+from agents.dedup_filter import DedupFilterAgent
+from agents.grounding_checker import GroundingChecker
+from agents.llm_router import create_llm
 from services.rag_service import RAGService
 from services.textbook_service import TextbookService
 
@@ -34,50 +38,8 @@ class ExamService:
         self.db = db
 
     def _get_llm(self):
-        """Get the configured LLM instance."""
-        if settings.LLM_PROVIDER == "groq":
-            from langchain_groq import ChatGroq
-            return ChatGroq(
-                model=settings.GROQ_MODEL,
-                api_key=settings.GROQ_API_KEY,
-                temperature=0.7,
-            )
-        elif settings.LLM_PROVIDER == "g4f":
-            from agents.llm_g4f import ChatG4F
-            return ChatG4F(
-                model=settings.G4F_MODEL,
-                provider=settings.G4F_PROVIDER or None,
-                temperature=0.7,
-            )
-        elif settings.LLM_PROVIDER == "together":
-            # Together AI is OpenAI-compatible — no extra package needed
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=settings.TOGETHER_MODEL,
-                api_key=settings.TOGETHER_API_KEY,
-                base_url="https://api.together.xyz/v1",
-                temperature=0.7,
-            )
-        elif settings.LLM_PROVIDER == "google":
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            return ChatGoogleGenerativeAI(
-                model=settings.GOOGLE_MODEL,
-                google_api_key=settings.GOOGLE_API_KEY,
-                temperature=0.7,
-            )
-        elif settings.LLM_PROVIDER == "openai":
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=settings.OPENAI_MODEL,
-                api_key=settings.OPENAI_API_KEY,
-                temperature=0.7,
-            )
-        else:
-            from langchain_anthropic import ChatAnthropic
-            return ChatAnthropic(
-                model=settings.ANTHROPIC_MODEL,
-                api_key=settings.ANTHROPIC_API_KEY,
-            )
+        """Get the configured LLM instance (instrumented via LLMBackend)."""
+        return create_llm()
 
     async def generate_exam(
         self,
@@ -95,9 +57,12 @@ class ExamService:
         retrieval_agent = RetrievalAgent(vector_store, db_session=self.db)
         blueprint_agent = BlueprintAgent()  # No LLM needed for deterministic blueprint
         question_generator = QuestionGeneratorAgent(llm)
-        validator = ValidatorAgent()  # Rule-based, no LLM needed
+        grounding_checker = GroundingChecker()
+        validator = ValidatorAgent(grounding_checker=grounding_checker)
         reviewer = ReviewerAgent(question_generator, retrieval_agent)
         pruning_agent = PruningAgent()
+        quality_judge = QualityJudgeAgent(grounding_checker=grounding_checker)
+        dedup_filter = DedupFilterAgent()
 
         # Get textbook metadata
         textbook_svc = TextbookService(self.db)
@@ -142,6 +107,11 @@ class ExamService:
             "generated_questions": [],
             "validated_questions": [],
             "validation_summary": {},
+            "judged_questions": [],
+            "quality_scores": [],
+            "grounding_reports": [],
+            "duplicate_groups": [],
+            "final_questions": [],
             "current_step": "parsing",
             "step_progress": 0.0,
             "error": None,
@@ -151,6 +121,9 @@ class ExamService:
             # Partial edit fields
             "edit_requests": None,
             "is_partial_edit": False,
+            "edit_impact_level": None,
+            "refreshed_contexts": [],
+            "provider_logs": [],
             # Inject agent instances (not serialized, used by nodes)
             "_retrieval_agent": retrieval_agent,
             "_blueprint_agent": blueprint_agent,
@@ -158,6 +131,8 @@ class ExamService:
             "_validator": validator,
             "_reviewer": reviewer,
             "_pruning_agent": pruning_agent,
+            "_quality_judge": quality_judge,
+            "_dedup_filter": dedup_filter,
             "_db_session": self.db,
             "_retry_attempted": False,
         }
@@ -169,6 +144,13 @@ class ExamService:
 
             # Save generated questions to DB
             validated_questions = final_state.get("validated_questions", [])
+            quality_scores = final_state.get("quality_scores", [])
+            grounding_reports = final_state.get("grounding_reports", [])
+
+            # Build slot-keyed lookup for per-question data
+            qs_by_slot = {s["slot_number"]: s for s in quality_scores if isinstance(s, dict)}
+            gr_by_slot = {r["slot_number"]: r for r in grounding_reports if isinstance(r, dict)}
+
             for q in validated_questions:
                 db_question = ExamQuestion(
                     id=str(uuid.uuid4()),
@@ -184,14 +166,21 @@ class ExamService:
                     source_chunks=q.source_chunks,
                     is_validated=q.is_validated,
                     validation_notes=q.validation_notes,
+                    quality_score_json=qs_by_slot.get(q.slot_number),
+                    grounding_report_json=gr_by_slot.get(q.slot_number),
                 )
                 self.db.add(db_question)
 
-            # Update exam status
+            # Update exam status and Phase 1-5 aggregate data
             exam.status = ExamStatus.GENERATED
             exam.total_questions = len(validated_questions)
             summary = final_state.get("validation_summary", {})
             exam.quality_score = summary.get("pass_rate", 0.0) * 100
+            exam.quality_scores_json = quality_scores or None
+            exam.grounding_reports_json = grounding_reports or None
+            exam.duplicate_groups_json = final_state.get("duplicate_groups") or None
+            exam.provider_logs_json = final_state.get("provider_logs") or None
+            exam.edit_impact_level = final_state.get("edit_impact_level")
 
             logger.info(
                 f"Exam generated: {exam.id}, "
@@ -223,8 +212,11 @@ class ExamService:
 
         retrieval_agent = RetrievalAgent(vector_store, db_session=self.db)
         question_generator = QuestionGeneratorAgent(llm)
-        validator = ValidatorAgent()  # Rule-based, no LLM needed
+        grounding_checker = GroundingChecker()
+        validator = ValidatorAgent(grounding_checker=grounding_checker)
         reviewer = ReviewerAgent(question_generator, retrieval_agent)
+        quality_judge = QualityJudgeAgent(grounding_checker=grounding_checker)
+        dedup_filter = DedupFilterAgent()
 
         # Convert existing DB questions to GeneratedQuestion objects
         from agents.state import GeneratedQuestion
@@ -275,6 +267,11 @@ class ExamService:
             "generated_questions": [],
             "validated_questions": existing,
             "validation_summary": {},
+            "judged_questions": [],
+            "quality_scores": [],
+            "grounding_reports": [],
+            "duplicate_groups": [],
+            "final_questions": [],
             "current_step": "editing",
             "step_progress": 0.0,
             "error": None,
@@ -284,12 +281,17 @@ class ExamService:
             # Partial edit fields
             "edit_requests": edit_requests,
             "is_partial_edit": True,
+            "edit_impact_level": None,
+            "refreshed_contexts": [],
+            "provider_logs": [],
             "_retrieval_agent": retrieval_agent,
             "_blueprint_agent": None,
             "_question_generator": question_generator,
             "_validator": validator,
             "_reviewer": reviewer,
             "_pruning_agent": PruningAgent(),
+            "_quality_judge": quality_judge,
+            "_dedup_filter": dedup_filter,
             "_db_session": self.db,
             "_retry_attempted": False,
         }
@@ -299,6 +301,12 @@ class ExamService:
 
         # Update questions in DB
         new_questions = final_state.get("validated_questions", [])
+        quality_scores = final_state.get("quality_scores", [])
+        grounding_reports = final_state.get("grounding_reports", [])
+
+        qs_by_slot = {s["slot_number"]: s for s in quality_scores if isinstance(s, dict)}
+        gr_by_slot = {r["slot_number"]: r for r in grounding_reports if isinstance(r, dict)}
+
         # Delete old questions and insert new ones
         for old_q in exam.questions:
             await self.db.delete(old_q)
@@ -318,10 +326,17 @@ class ExamService:
                 source_chunks=q.source_chunks,
                 is_validated=q.is_validated,
                 validation_notes=q.validation_notes,
+                quality_score_json=qs_by_slot.get(q.slot_number),
+                grounding_report_json=gr_by_slot.get(q.slot_number),
             )
             self.db.add(db_question)
 
         exam.status = ExamStatus.GENERATED
+        exam.quality_scores_json = quality_scores or None
+        exam.grounding_reports_json = grounding_reports or None
+        exam.duplicate_groups_json = final_state.get("duplicate_groups") or None
+        exam.provider_logs_json = final_state.get("provider_logs") or None
+        exam.edit_impact_level = final_state.get("edit_impact_level")
         return exam
 
     async def get_exam(self, exam_id: str, user_id: str) -> Exam | None:

@@ -111,6 +111,73 @@ export interface MCQOption {
   text: string;
 }
 
+// Phase 1-5 detail types
+
+export interface QualityScoreDetail {
+  slot_number: number;
+  answerability: number;
+  grounding: number;
+  clarity: number;
+  ambiguity_risk: number;
+  distractor_quality: number;
+  bloom_alignment: number;
+  difficulty_realism: number;
+  overall: number;
+  passed: boolean;
+  recommendation: "keep" | "review" | "regenerate";
+  notes: string[];
+}
+
+export interface ChunkTrace {
+  chunk_index: number;
+  chunk_id: string;
+  stem_overlap: number;
+  answer_overlap: number;
+  is_best_for_answer: boolean;
+}
+
+export interface DistractorDetail {
+  label: string;
+  text: string;
+  source_overlap: number;
+  phrase_match: number;
+  exceeds_correct: boolean;
+}
+
+export interface GroundingReportDetail {
+  slot_number: number;
+  lexical_overlap: number;
+  ngram_overlap: number;
+  phrase_overlap: number;
+  answer_support_score: number;
+  answer_supported: boolean;
+  distractors_valid: boolean;
+  verbatim_ratio: number;
+  overall_score: number;
+  grounding_pass: boolean;
+  source_traceability: ChunkTrace[];
+  distractor_details: DistractorDetail[];
+  details: string[];
+}
+
+export interface DuplicateGroup {
+  representative_slot: number;
+  member_slots: number[];
+  max_similarity: number;
+}
+
+export interface ProviderLog {
+  provider: string;
+  model: string;
+  latency_ms: number;
+  retry_count: number;
+  success: boolean;
+  error_type?: string;
+  error_message?: string;
+  input_chars: number;
+  output_chars: number;
+}
+
 export interface Question {
   id: string;
   question_number: number;
@@ -123,6 +190,8 @@ export interface Question {
   explanation?: string;
   source_citations?: string[];
   is_validated: boolean;
+  quality_score_detail?: QualityScoreDetail;
+  grounding_report_detail?: GroundingReportDetail;
 }
 
 export interface Exam {
@@ -138,6 +207,12 @@ export interface Exam {
   quality_score?: number;
   created_at: string;
   questions: Question[];
+  // Phase 1-5 aggregate data
+  quality_scores?: QualityScoreDetail[];
+  grounding_reports?: GroundingReportDetail[];
+  duplicate_groups?: DuplicateGroup[];
+  provider_logs?: ProviderLog[];
+  edit_impact_level?: "cosmetic" | "moderate" | "strong";
 }
 
 export interface ExamListItem {
