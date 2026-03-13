@@ -12,6 +12,7 @@ This eliminates one LLM call and ensures predictable, token-efficient behavior.
 import math
 import random
 import logging
+import re
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 from agents.state import ExamBlueprint, QuestionSlot, ChunkAssignment
+from agents.retrieval import rank_supporting_chunks
 from models.textbook import TextbookChunk
 
 
@@ -42,6 +44,8 @@ BLOOM_DIFFICULTY_SCORE = {
 }
 
 OVERGENERATION_FACTOR = 1.3  # Generate 30% more than needed
+MAX_SINGLE_PER_CHUNK = 2
+MULTI_CHUNK_EXTRA = 2
 
 
 class BlueprintAgent:
@@ -232,8 +236,13 @@ class BlueprintAgent:
                         else:
                             q_type = "mcq"
 
-                    # Determine chunk mode: easy → single, medium/hard → multi
-                    chunk_mode = "single" if diff_level == "easy" else "multi"
+                    # Determine chunk mode using a soft heuristic rather than a rigid rule.
+                    chunk_mode = _choose_chunk_mode(
+                        diff_level=diff_level,
+                        bloom_level=bloom,
+                        question_type=q_type,
+                        constraints=constraints,
+                    )
 
                     slots.append(QuestionSlot(
                         slot_number=slot_num,
@@ -323,64 +332,52 @@ def _assign_single_chunk_slots(
     chunks: list[dict],
     chapter: int,
 ) -> list[ChunkAssignment]:
-    """Assign single-chunk slots — max 2 tasks per chunk (original logic)."""
+    """Assign single-chunk slots with light diversity and reuse control.
+
+    Keeps the old single-chunk behavior, but prefers chunks that:
+    - have lower reuse count
+    - have not already been used for the same question signature
+    - belong to less-used topic signatures
+    """
     shuffled = list(chunks)
     random.shuffle(shuffled)
 
-    MAX_PER_CHUNK = 2
-    chunk_idx = 0
     chunk_assignment_map: dict[str, ChunkAssignment] = {}
+    chunk_tag_map: dict[str, set[tuple[str, str, str]]] = {}
+    concept_usage: dict[str, int] = {}
 
     for slot in slots:
-        attempts = 0
-        while attempts < len(shuffled):
-            chunk = shuffled[chunk_idx % len(shuffled)]
-            chunk_key = chunk["chunk_id"]
+        desired_tag = (
+            _score_to_difficulty(slot.difficulty_score),
+            slot.bloom_level,
+            slot.question_type,
+        )
+        selected_chunk, selected_assignment = _pick_single_chunk_assignment(
+            slot=slot,
+            desired_tag=desired_tag,
+            shuffled_chunks=shuffled,
+            chapter=chapter,
+            chunk_assignment_map=chunk_assignment_map,
+            chunk_tag_map=chunk_tag_map,
+            concept_usage=concept_usage,
+        )
 
-            if chunk_key not in chunk_assignment_map:
-                chunk_assignment_map[chunk_key] = ChunkAssignment(
-                    chunk_id=chunk["chunk_id"],
-                    chunk_text=chunk["content"],
-                    chapter=chapter,
-                    assignments=[],
-                )
-
-            ca = chunk_assignment_map[chunk_key]
-            if len(ca.assignments) < MAX_PER_CHUNK:
-                ca.assignments.append({
-                    "difficulty": _score_to_difficulty(slot.difficulty_score),
-                    "bloom_level": slot.bloom_level,
-                    "question_type": slot.question_type,
-                    "slot_number": slot.slot_number,
-                })
-                chunk_idx = (chunk_idx + 1) % len(shuffled)
-                break
-
-            chunk_idx = (chunk_idx + 1) % len(shuffled)
-            attempts += 1
-        else:
-            # All chunks at max capacity, overflow to current chunk
-            chunk = shuffled[chunk_idx % len(shuffled)]
-            chunk_key = chunk["chunk_id"]
-            if chunk_key not in chunk_assignment_map:
-                chunk_assignment_map[chunk_key] = ChunkAssignment(
-                    chunk_id=chunk["chunk_id"],
-                    chunk_text=chunk["content"],
-                    chapter=chapter,
-                    assignments=[],
-                )
-            chunk_assignment_map[chunk_key].assignments.append({
-                "difficulty": _score_to_difficulty(slot.difficulty_score),
-                "bloom_level": slot.bloom_level,
-                "question_type": slot.question_type,
-                "slot_number": slot.slot_number,
-            })
+        selected_assignment.assignments.append({
+            "difficulty": _score_to_difficulty(slot.difficulty_score),
+            "bloom_level": slot.bloom_level,
+            "question_type": slot.question_type,
+            "slot_number": slot.slot_number,
+        })
+        chunk_tag_map.setdefault(selected_chunk["chunk_id"], set()).add(desired_tag)
+        concept_key = _chunk_topic_signature(selected_chunk)
+        concept_usage[concept_key] = concept_usage.get(concept_key, 0) + 1
+        selected_assignment.reuse_count = max(0, len(selected_assignment.assignments) - 1)
+        if len(selected_assignment.assignments) > 1:
+            selected_assignment.assignment_reason = (
+                "single-slot reuse with diversity control"
+            )
 
     return list(chunk_assignment_map.values())
-
-
-# Number of extra context chunks for multi-chunk mode
-MULTI_CHUNK_EXTRA = 2
 
 
 def _assign_multi_chunk_slots(
@@ -389,15 +386,14 @@ def _assign_multi_chunk_slots(
     chapter: int,
 ) -> list[ChunkAssignment]:
     """
-    Assign multi-chunk slots — each slot gets its own ChunkAssignment
-    with a primary chunk + 1-2 adjacent context chunks for synthesis.
+    Assign multi-chunk slots using lightweight bundle planning.
 
-    Adjacent chunks are preferred because they are topically coherent
-    (no embedding calls needed).
+    The primary chunk still anchors the assignment, but supporting chunks are
+    selected using heading/topic coherence first and adjacency second.
     """
     assignments: list[ChunkAssignment] = []
 
-    # Build index for adjacency lookup
+    # Build index for lightweight bundle planning.
     chunk_list = list(chunks)  # preserve DB order (page / position)
     num_chunks = len(chunk_list)
 
@@ -411,29 +407,34 @@ def _assign_multi_chunk_slots(
         primary_idx = start_idx % num_chunks
         primary = chunk_list[primary_idx]
 
-        # Gather adjacent chunks (before + after primary)
-        extra: list[dict] = []
-        for offset in range(1, MULTI_CHUNK_EXTRA + 1):
-            # After primary
-            after_idx = primary_idx + offset
-            if after_idx < num_chunks:
-                c = chunk_list[after_idx]
-                extra.append({
-                    "chunk_id": c["chunk_id"],
-                    "chunk_text": c["content"],
-                })
-            # Before primary (fallback if we ran out of "after" chunks)
-            if len(extra) >= MULTI_CHUNK_EXTRA:
-                break
-            before_idx = primary_idx - offset
-            if before_idx >= 0:
-                c = chunk_list[before_idx]
-                extra.append({
-                    "chunk_id": c["chunk_id"],
-                    "chunk_text": c["content"],
-                })
-            if len(extra) >= MULTI_CHUNK_EXTRA:
-                break
+        bundle_strategy = _choose_bundle_strategy(slot)
+        supporting = _select_supporting_chunks(
+            slot=slot,
+            primary=primary,
+            primary_idx=primary_idx,
+            chunk_list=chunk_list,
+            max_extra=MULTI_CHUNK_EXTRA,
+            strategy=bundle_strategy,
+        )
+        bundle_score, score_report = compute_bundle_score(
+            slot=slot,
+            primary=primary,
+            supporting=supporting,
+            primary_idx=primary_idx,
+            chunk_list=chunk_list,
+            strategy=bundle_strategy,
+        )
+        validation_report = validate_bundle_quality(
+            slot=slot,
+            primary=primary,
+            supporting=supporting,
+            bundle_score=bundle_score,
+            score_report=score_report,
+            strategy=bundle_strategy,
+        )
+        evidence_roles = {primary["chunk_id"]: "primary"}
+        for support in supporting:
+            evidence_roles[support["chunk_id"]] = support.get("role", "support")
 
         ca = ChunkAssignment(
             chunk_id=primary["chunk_id"],
@@ -445,7 +446,15 @@ def _assign_multi_chunk_slots(
                 "question_type": slot.question_type,
                 "slot_number": slot.slot_number,
             }],
-            context_chunks=extra[:MULTI_CHUNK_EXTRA],
+            context_chunks=supporting[:MULTI_CHUNK_EXTRA],
+            chunk_mode=slot.chunk_mode,
+            bundle_strategy=bundle_strategy,
+            supporting_chunks=supporting[:MULTI_CHUNK_EXTRA],
+            bundle_score=bundle_score,
+            assignment_reason=validation_report["summary"],
+            evidence_roles=evidence_roles,
+            estimated_context_tokens=_estimate_bundle_tokens(primary, supporting),
+            bundle_validation_report=validation_report,
         )
         assignments.append(ca)
 
@@ -498,3 +507,395 @@ def _score_to_difficulty(score: float) -> str:
         return "medium"
     else:
         return "hard"
+
+
+def _choose_bundle_strategy(slot: QuestionSlot) -> str:
+    """Default bundle strategy heuristic.
+
+    Phase 1 keeps the old easy/medium/hard intuition, but makes the strategy
+    explicit so later phases can override it with stronger retrieval signals.
+    """
+    difficulty = _score_to_difficulty(slot.difficulty_score)
+    if difficulty == "hard":
+        return "semantic_multi"
+    if difficulty == "medium":
+        return "local_multi"
+    return "single"
+
+
+def _choose_chunk_mode(
+    diff_level: str,
+    bloom_level: str,
+    question_type: str,
+    constraints: dict,
+) -> str:
+    """Choose chunk mode using the current heuristic as a default.
+
+    Rules are intentionally soft:
+    - easy still prefers single
+    - hard still prefers multi
+    - medium can stay single for simpler factual MCQ patterns
+    - essay/applied/analyze-style prompts lean multi earlier
+    """
+    if diff_level == "easy":
+        return "single"
+    if diff_level == "hard":
+        return "multi"
+
+    if question_type == "essay":
+        return "multi"
+    if bloom_level in {"analyze", "evaluate", "create"}:
+        return "multi"
+    if constraints.get("allow_applied_questions", True):
+        return "multi"
+    return "single"
+
+
+def _pick_single_chunk_assignment(
+    slot: QuestionSlot,
+    desired_tag: tuple[str, str, str],
+    shuffled_chunks: list[dict],
+    chapter: int,
+    chunk_assignment_map: dict[str, ChunkAssignment],
+    chunk_tag_map: dict[str, set[tuple[str, str, str]]],
+    concept_usage: dict[str, int],
+) -> tuple[dict, ChunkAssignment]:
+    """Pick the best chunk for a single-slot assignment.
+
+    Preference order:
+    1. chunks under capacity and unused for the same slot signature
+    2. chunks with lower topic reuse
+    3. chunks with fewer assigned tasks
+    4. fallback to under-capacity chunks, then overflow reuse
+    """
+    preferred: list[tuple[int, int, int, dict, ChunkAssignment]] = []
+    relaxed: list[tuple[int, int, int, dict, ChunkAssignment]] = []
+
+    for order_idx, chunk in enumerate(shuffled_chunks):
+        chunk_key = chunk["chunk_id"]
+        concept_key = _chunk_topic_signature(chunk)
+        ca = chunk_assignment_map.setdefault(
+            chunk_key,
+            ChunkAssignment(
+                chunk_id=chunk["chunk_id"],
+                chunk_text=chunk["content"],
+                chapter=chapter,
+                assignments=[],
+                chunk_mode="single",
+                bundle_strategy="single",
+                bundle_score=1.0,
+                assignment_reason="single-slot assignment from one chunk",
+                evidence_roles={chunk["chunk_id"]: "primary"},
+                estimated_context_tokens=_estimate_tokens(chunk["content"]),
+            ),
+        )
+        existing_tags = chunk_tag_map.setdefault(chunk_key, set())
+        if len(ca.assignments) >= MAX_SINGLE_PER_CHUNK:
+            continue
+
+        rank_key = (
+            concept_usage.get(concept_key, 0),
+            len(ca.assignments),
+            order_idx,
+            chunk,
+            ca,
+        )
+        relaxed.append(rank_key)
+        if desired_tag not in existing_tags:
+            preferred.append(rank_key)
+
+    if preferred:
+        _, _, _, chunk, ca = min(preferred, key=lambda item: item[:3])
+        return chunk, ca
+    if relaxed:
+        _, _, _, chunk, ca = min(relaxed, key=lambda item: item[:3])
+        return chunk, ca
+
+    overflow_chunk = shuffled_chunks[0]
+    overflow_key = overflow_chunk["chunk_id"]
+    overflow_assignment = chunk_assignment_map.setdefault(
+        overflow_key,
+        ChunkAssignment(
+            chunk_id=overflow_chunk["chunk_id"],
+            chunk_text=overflow_chunk["content"],
+            chapter=chapter,
+            assignments=[],
+            chunk_mode="single",
+            bundle_strategy="single",
+            bundle_score=1.0,
+            assignment_reason="single-slot overflow reuse",
+            evidence_roles={overflow_chunk["chunk_id"]: "primary"},
+            estimated_context_tokens=_estimate_tokens(overflow_chunk["content"]),
+        ),
+    )
+    overflow_assignment.assignment_reason = "single-slot overflow reuse"
+    return overflow_chunk, overflow_assignment
+
+
+def _select_supporting_chunks(
+    slot: QuestionSlot,
+    primary: dict,
+    primary_idx: int,
+    chunk_list: list[dict],
+    max_extra: int,
+    strategy: str,
+) -> list[dict]:
+    """Select supporting chunks using lightweight coherence heuristics.
+
+    Signals used in Phase 1:
+    - same parent heading
+    - heading/topic lexical overlap
+    - chapter proximity
+    - adjacency only as a secondary signal
+    """
+    # Prefer retrieval ranking helper if available (heading/chapter/lexical/
+    # score signals). Keep a local fallback to avoid breaking old flow.
+    ranked_by_retrieval = rank_supporting_chunks(
+        primary_chunk=primary,
+        chunk_list=chunk_list,
+        strategy=strategy,
+        primary_idx=primary_idx,
+        max_extra=max_extra,
+        enforce_diversity=True,
+    )
+
+    if ranked_by_retrieval:
+        supporting: list[dict] = []
+        for item in ranked_by_retrieval:
+            candidate = item["chunk"]
+            idx = item["index"]
+            supporting.append({
+                "chunk_id": candidate["chunk_id"],
+                "chunk_text": candidate["content"],
+                "parent_heading": candidate.get("parent_heading"),
+                "relatedness_score": item["score"],
+                "relatedness_features": item["features"],
+                "role": _infer_support_role(primary, candidate, primary_idx, idx),
+            })
+        return supporting
+
+    ranked: list[tuple[float, dict, int]] = []
+    primary_heading = _normalize_heading(primary.get("parent_heading", ""))
+    primary_signature = _chunk_topic_signature(primary)
+
+    for idx, candidate in enumerate(chunk_list):
+        if idx == primary_idx:
+            continue
+
+        candidate_heading = _normalize_heading(candidate.get("parent_heading", ""))
+        candidate_signature = _chunk_topic_signature(candidate)
+        heading_match = 1.0 if primary_heading and primary_heading == candidate_heading else 0.0
+        lexical_overlap = _lexical_overlap(primary_heading, candidate_heading)
+        topic_overlap = _lexical_overlap(primary_signature, candidate_signature)
+        distance = abs(idx - primary_idx)
+        proximity = 1.0 / (1.0 + distance)
+        chapter_match = 1.0 if primary.get("chapter") == candidate.get("chapter") else 0.0
+
+        if strategy == "semantic_multi":
+            score = (
+                0.32 * heading_match
+                + 0.28 * topic_overlap
+                + 0.20 * lexical_overlap
+                + 0.12 * chapter_match
+                + 0.08 * proximity
+            )
+        else:
+            score = (
+                0.28 * heading_match
+                + 0.24 * lexical_overlap
+                + 0.20 * topic_overlap
+                + 0.18 * chapter_match
+                + 0.10 * proximity
+            )
+
+        ranked.append((score, candidate, idx))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+
+    supporting: list[dict] = []
+    seen_support_groups: set[str] = set()
+    for _, candidate, idx in ranked:
+        group_key = _support_group_key(candidate)
+        if group_key in seen_support_groups and len(ranked) > max_extra:
+            continue
+        supporting.append({
+            "chunk_id": candidate["chunk_id"],
+            "chunk_text": candidate["content"],
+            "parent_heading": candidate.get("parent_heading"),
+            "role": _infer_support_role(primary, candidate, primary_idx, idx),
+        })
+        seen_support_groups.add(group_key)
+        if len(supporting) >= max_extra:
+            break
+
+    return supporting
+
+
+def compute_bundle_score(
+    slot: QuestionSlot,
+    primary: dict,
+    supporting: list[dict],
+    primary_idx: int,
+    chunk_list: list[dict],
+    strategy: str,
+) -> tuple[float, dict]:
+    """Compute a lightweight bundle quality score for multi-chunk assignments."""
+    if not supporting:
+        return 0.25, {
+            "support_count": 0,
+            "heading_proximity_score": 0.0,
+            "concept_overlap_score": 0.0,
+            "distance_score": 0.0,
+            "strategy_fit": 0.5,
+        }
+
+    index_map = {c["chunk_id"]: idx for idx, c in enumerate(chunk_list)}
+    primary_heading = _normalize_heading(primary.get("parent_heading", ""))
+
+    heading_scores: list[float] = []
+    lexical_scores: list[float] = []
+    topic_scores: list[float] = []
+    distance_scores: list[float] = []
+    duplicate_penalties = 0.0
+    diversity_bonus = 0.0
+    primary_signature = _chunk_topic_signature(primary)
+    seen_groups: set[str] = set()
+
+    for support in supporting:
+        support_heading = _normalize_heading(support.get("parent_heading", ""))
+        support_signature = _chunk_topic_signature(support)
+        heading_scores.append(1.0 if primary_heading and support_heading == primary_heading else 0.0)
+        lexical_scores.append(_lexical_overlap(primary_heading, support_heading))
+        topic_scores.append(_lexical_overlap(primary_signature, support_signature))
+        support_idx = index_map.get(support["chunk_id"], primary_idx)
+        distance_scores.append(1.0 / (1.0 + abs(support_idx - primary_idx)))
+        if support_heading and support_heading == primary_heading:
+            duplicate_penalties += 0.05
+        group_key = _support_group_key(support)
+        if group_key not in seen_groups:
+            seen_groups.add(group_key)
+            diversity_bonus += 0.03
+
+    heading_proximity_score = sum(heading_scores) / len(heading_scores)
+    concept_overlap_score = sum(lexical_scores) / len(lexical_scores)
+    topic_overlap_score = sum(topic_scores) / len(topic_scores)
+    distance_score = sum(distance_scores) / len(distance_scores)
+    strategy_fit = 1.0 if strategy == _choose_bundle_strategy(slot) else 0.7
+
+    bundle_score = (
+        0.28 * heading_proximity_score
+        + 0.22 * concept_overlap_score
+        + 0.18 * topic_overlap_score
+        + 0.20 * distance_score
+        + 0.20 * strategy_fit
+        - duplicate_penalties
+        + diversity_bonus
+    )
+    bundle_score = max(0.0, min(1.0, round(bundle_score, 3)))
+
+    return bundle_score, {
+        "support_count": len(supporting),
+        "heading_proximity_score": round(heading_proximity_score, 3),
+        "concept_overlap_score": round(concept_overlap_score, 3),
+        "topic_overlap_score": round(topic_overlap_score, 3),
+        "distance_score": round(distance_score, 3),
+        "strategy_fit": round(strategy_fit, 3),
+        "duplicate_penalty": round(duplicate_penalties, 3),
+        "diversity_bonus": round(diversity_bonus, 3),
+    }
+
+
+def validate_bundle_quality(
+    slot: QuestionSlot,
+    primary: dict,
+    supporting: list[dict],
+    bundle_score: float,
+    score_report: dict,
+    strategy: str,
+) -> dict:
+    """Validate whether a bundle is coherent enough before generation."""
+    issues: list[str] = []
+
+    if slot.chunk_mode == "multi" and not supporting:
+        issues.append("multi slot has no supporting chunks")
+    if strategy == "semantic_multi" and len(supporting) < 2:
+        issues.append("hard slot has limited supporting evidence")
+    if bundle_score < 0.45:
+        issues.append("bundle coherence is weak")
+    if score_report.get("heading_proximity_score", 0.0) < 0.2 and score_report.get("concept_overlap_score", 0.0) < 0.2:
+        issues.append("supporting chunks look weakly related to primary chunk")
+
+    summary = (
+        f"{strategy} bundle for slot {slot.slot_number}: "
+        f"primary={primary['chunk_id'][:12]}..., supports={len(supporting)}, score={bundle_score:.2f}"
+    )
+
+    return {
+        "valid": len(issues) == 0,
+        "summary": summary,
+        "issues": issues,
+        "metrics": score_report,
+    }
+
+
+def _normalize_heading(text: str | None) -> str:
+    """Normalize headings for cheap lexical comparison."""
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _lexical_overlap(left: str, right: str) -> float:
+    """Jaccard overlap over heading tokens."""
+    left_tokens = set(_normalize_heading(left).split())
+    right_tokens = set(_normalize_heading(right).split())
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def _chunk_topic_signature(chunk: dict) -> str:
+    """Create a lightweight concept signature from heading + content prefix."""
+    heading = _normalize_heading(chunk.get("parent_heading") or chunk.get("chapter") or "")
+    if heading:
+        return heading
+
+    content = _normalize_heading(chunk.get("content") or chunk.get("chunk_text") or "")
+    if not content:
+        return "unknown"
+
+    tokens = [token for token in content.split() if len(token) > 3]
+    if not tokens:
+        tokens = content.split()
+    return " ".join(tokens[:8]) if tokens else "unknown"
+
+
+def _support_group_key(chunk: dict) -> str:
+    """Group supporting chunks by heading/topic to avoid redundant bundles."""
+    heading = _normalize_heading(chunk.get("parent_heading", ""))
+    if heading:
+        return f"heading:{heading}"
+    return f"topic:{_chunk_topic_signature(chunk)}"
+
+
+def _infer_support_role(primary: dict, support: dict, primary_idx: int, support_idx: int) -> str:
+    """Assign a simple evidence role for prompt formatting."""
+    primary_heading = _normalize_heading(primary.get("parent_heading", ""))
+    support_heading = _normalize_heading(support.get("parent_heading", ""))
+    if primary_heading and support_heading == primary_heading:
+        return "support"
+    if abs(support_idx - primary_idx) <= 1:
+        return "example"
+    return "contrast"
+
+
+def _estimate_tokens(text: str) -> int:
+    """Cheap token estimate for prompt budgeting."""
+    return max(1, math.ceil(len(text) / 4))
+
+
+def _estimate_bundle_tokens(primary: dict, supporting: list[dict]) -> int:
+    """Estimate total prompt tokens consumed by a bundle."""
+    total_chars = len(primary.get("content", ""))
+    total_chars += sum(len(chunk.get("chunk_text", "")) for chunk in supporting)
+    return max(1, math.ceil(total_chars / 4))

@@ -74,6 +74,28 @@ class ChunkAssignment:
     chapter: int  # 0 = no chapter
     assignments: list[dict] = field(default_factory=list)  # [{difficulty, bloom_level, question_type, slot_number}]
     context_chunks: list[dict] = field(default_factory=list)  # [{chunk_id, chunk_text}] extra chunks for multi-chunk mode
+    chunk_mode: str = "single"
+    bundle_strategy: str = "single"  # single, local_multi, semantic_multi
+    supporting_chunks: list[dict] = field(default_factory=list)  # richer alias for context_chunks
+    bundle_score: float = 0.0
+    assignment_reason: str = ""
+    evidence_roles: dict[str, str] = field(default_factory=dict)  # chunk_id -> primary/support/example/contrast
+    estimated_context_tokens: int = 0
+    reuse_count: int = 0
+    bundle_validation_report: dict = field(default_factory=dict)
+
+    def get_supporting_chunks(self) -> list[dict]:
+        """Return supporting chunks with backward compatibility."""
+        return self.supporting_chunks or self.context_chunks
+
+    def get_source_chunk_ids(self) -> list[str]:
+        """Return ordered source chunk ids used by this assignment."""
+        ids = [self.chunk_id]
+        for chunk in self.get_supporting_chunks():
+            chunk_id = chunk.get("chunk_id")
+            if chunk_id and chunk_id not in ids:
+                ids.append(chunk_id)
+        return ids
 
 
 # --- LangGraph Agent State ---
@@ -120,6 +142,8 @@ class AgentState(TypedDict):
 
     # --- Micro-prompting (chunk-level question generation) ---
     chunk_assignments: list[ChunkAssignment]
+    chunk_assignment_payloads: list[dict]  # serialized assignment metadata across nodes
+    question_chunk_metadata: list[dict]    # per-question chunk/bundle trace after generation
     original_quota: dict  # {easy: N, medium: N, hard: N} — original target before over-generation
 
     # --- QualityJudge output ---

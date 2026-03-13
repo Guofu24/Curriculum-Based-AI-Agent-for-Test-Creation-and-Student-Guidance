@@ -58,6 +58,52 @@ from agents.review_impact import ReviewImpactAnalyzer
 logger = logging.getLogger(__name__)
 
 
+def _serialize_chunk_assignment(assignment: ChunkAssignment) -> dict:
+    """Serialize chunk assignment metadata for cross-node state propagation.
+
+    Backward-compatible with both old and new ChunkAssignment shapes.
+    """
+    supporting_chunks = []
+    if hasattr(assignment, "get_supporting_chunks"):
+        supporting_chunks = assignment.get_supporting_chunks()
+    else:
+        supporting_chunks = getattr(assignment, "context_chunks", []) or []
+
+    primary_chunk = getattr(assignment, "primary_chunk", None) or {
+        "chunk_id": assignment.chunk_id,
+        "chunk_text": assignment.chunk_text,
+    }
+
+    if hasattr(assignment, "get_source_chunk_ids"):
+        source_chunks = assignment.get_source_chunk_ids()
+    else:
+        source_chunks = [assignment.chunk_id]
+        for chunk in supporting_chunks:
+            chunk_id = chunk.get("chunk_id")
+            if chunk_id and chunk_id not in source_chunks:
+                source_chunks.append(chunk_id)
+
+    inferred_chunk_mode = getattr(assignment, "chunk_mode", None)
+    if not inferred_chunk_mode:
+        inferred_chunk_mode = "multi" if supporting_chunks else "single"
+
+    inferred_bundle_strategy = getattr(assignment, "bundle_strategy", None)
+    if not inferred_bundle_strategy:
+        inferred_bundle_strategy = "single" if inferred_chunk_mode == "single" else "local_multi"
+
+    return {
+        "slot_numbers": [a.get("slot_number") for a in assignment.assignments],
+        "chunk_mode": inferred_chunk_mode,
+        "bundle_strategy": inferred_bundle_strategy,
+        "primary_chunk": primary_chunk,
+        "supporting_chunks": supporting_chunks,
+        "source_chunks": source_chunks,
+        "bundle_score": float(getattr(assignment, "bundle_score", 0.0) or 0.0),
+        "assignment_reason": getattr(assignment, "assignment_reason", "") or "",
+        "evidence_roles": getattr(assignment, "evidence_roles", {}) or {},
+    }
+
+
 # ──────────────────────────────────────────────
 # Node Functions (each wraps an agent call)
 # ──────────────────────────────────────────────
@@ -110,8 +156,14 @@ async def assign_chunks_node(state: AgentState) -> dict:
         db_session=db_session,
     )
 
+    chunk_assignment_payloads = [
+        _serialize_chunk_assignment(assignment)
+        for assignment in chunk_assignments
+    ]
+
     return {
         "chunk_assignments": chunk_assignments,
+        "chunk_assignment_payloads": chunk_assignment_payloads,
         "current_step": "assigning_chunks",
         "step_progress": 0.35,
     }
@@ -129,8 +181,34 @@ async def generate_from_chunks_node(state: AgentState) -> dict:
         constraints=state["constraints"],
     )
 
+    # Build slot-level metadata trace so downstream nodes can inspect bundle plan.
+    by_slot: dict[int, dict] = {}
+    for assignment in chunk_assignments:
+        serialized = _serialize_chunk_assignment(assignment)
+        for slot_number in serialized["slot_numbers"]:
+            if isinstance(slot_number, int):
+                by_slot[slot_number] = serialized
+
+    question_chunk_metadata: list[dict] = []
+    for question in questions:
+        slot_meta = by_slot.get(question.slot_number, {})
+        question_chunk_metadata.append({
+            "slot_number": question.slot_number,
+            "chunk_mode": slot_meta.get("chunk_mode", "single"),
+            "bundle_strategy": slot_meta.get("bundle_strategy", "single"),
+            "primary_chunk": slot_meta.get("primary_chunk", {
+                "chunk_id": question.source_chunks[0] if question.source_chunks else None,
+                "chunk_text": question.source_texts[0] if question.source_texts else None,
+            }),
+            "supporting_chunks": slot_meta.get("supporting_chunks", []),
+            "source_chunks": question.source_chunks,
+            "bundle_score": slot_meta.get("bundle_score", 0.0),
+            "assignment_reason": slot_meta.get("assignment_reason", ""),
+        })
+
     return {
         "generated_questions": questions,
+        "question_chunk_metadata": question_chunk_metadata,
         "current_step": "generating",
         "step_progress": 0.6,
     }

@@ -16,6 +16,7 @@ import re
 import logging
 import asyncio
 import time
+from dataclasses import dataclass, field
 
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -164,15 +165,178 @@ Lưu ý: Nếu question_type là "essay" thì KHÔNG cần trường "options".
 Chỉ trả về JSON, không thêm text nào khác."""
 
 
+@dataclass
+class BundleContext:
+    """Normalized bundle metadata for generation.
+
+    Keeps the generator compatible with both the old assignment shape
+    (`chunk_id`, `chunk_text`, `context_chunks`) and the newer richer shape
+    (`primary_chunk`, `supporting_chunks`, `bundle_strategy`, `evidence_roles`).
+    """
+    primary_chunk_id: str
+    primary_chunk_text: str
+    bundle_strategy: str
+    chunk_mode: str
+    supporting_chunks: list[dict] = field(default_factory=list)
+    source_chunk_ids: list[str] = field(default_factory=list)
+    evidence_roles: dict[str, str] = field(default_factory=dict)
+    bundle_score: float = 0.0
+    assignment_reason: str = ""
+
+
 class QuestionGeneratorAgent:
     """Generates exam questions grounded in retrieved textbook content."""
 
     def __init__(self, llm):
         self.llm = llm
 
+    def _normalize_bundle_context(self, chunk_assignment: ChunkAssignment) -> BundleContext:
+        """Normalize chunk assignment metadata into a single bundle view."""
+        primary = getattr(chunk_assignment, "primary_chunk", None) or {
+            "chunk_id": chunk_assignment.chunk_id,
+            "chunk_text": chunk_assignment.chunk_text,
+        }
+
+        primary_chunk_id = primary.get("chunk_id", chunk_assignment.chunk_id)
+        primary_chunk_text = primary.get("chunk_text", chunk_assignment.chunk_text)
+
+        supporting_chunks = list(chunk_assignment.get_supporting_chunks())
+        evidence_roles = dict(getattr(chunk_assignment, "evidence_roles", {}) or {})
+        if primary_chunk_id:
+            evidence_roles.setdefault(primary_chunk_id, "primary")
+
+        source_chunk_ids = []
+        explicit_source_chunks = getattr(chunk_assignment, "source_chunks", None)
+        if explicit_source_chunks:
+            source_chunk_ids = list(explicit_source_chunks)
+        elif hasattr(chunk_assignment, "get_source_chunk_ids"):
+            source_chunk_ids = chunk_assignment.get_source_chunk_ids()
+        else:
+            source_chunk_ids = [primary_chunk_id]
+            for chunk in supporting_chunks:
+                chunk_id = chunk.get("chunk_id")
+                if chunk_id and chunk_id not in source_chunk_ids:
+                    source_chunk_ids.append(chunk_id)
+
+        return BundleContext(
+            primary_chunk_id=primary_chunk_id,
+            primary_chunk_text=primary_chunk_text,
+            bundle_strategy=getattr(chunk_assignment, "bundle_strategy", "single") or "single",
+            chunk_mode=getattr(chunk_assignment, "chunk_mode", "single") or "single",
+            supporting_chunks=supporting_chunks,
+            source_chunk_ids=source_chunk_ids,
+            evidence_roles=evidence_roles,
+            bundle_score=getattr(chunk_assignment, "bundle_score", 0.0) or 0.0,
+            assignment_reason=getattr(chunk_assignment, "assignment_reason", "") or "",
+        )
+
+    def _format_bundle_segments(
+        self,
+        bundle: BundleContext,
+        max_chars: int,
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Format primary/supporting chunks for prompt input and traceability."""
+        segments: list[str] = []
+        all_chunk_ids: list[str] = []
+        all_chunk_texts: list[str] = []
+
+        primary_text = bundle.primary_chunk_text
+        if len(primary_text) > max_chars:
+            primary_text = primary_text[:max_chars] + "..."
+        segments.append(
+            "=== NGUỒN TRUNG TÂM / PRIMARY CHUNK ===\n\n"
+            f"{primary_text}"
+        )
+        all_chunk_ids.append(bundle.primary_chunk_id)
+        all_chunk_texts.append(bundle.primary_chunk_text[:500])
+
+        for i, extra in enumerate(bundle.supporting_chunks, start=2):
+            extra_text = extra.get("chunk_text", "")
+            if len(extra_text) > max_chars:
+                extra_text = extra_text[:max_chars] + "..."
+            chunk_id = extra.get("chunk_id", f"support-{i}")
+            role = bundle.evidence_roles.get(chunk_id, extra.get("role", "support"))
+            segments.append(f"=== NGUỒN BỔ TRỢ {i - 1} ({role}) ===\n\n{extra_text}")
+            if chunk_id not in all_chunk_ids:
+                all_chunk_ids.append(chunk_id)
+                all_chunk_texts.append(extra.get("chunk_text", "")[:500])
+
+        return segments, all_chunk_ids, all_chunk_texts
+
+    def _build_bundle_user_message(
+        self,
+        assignments: list[dict],
+        bundle: BundleContext,
+        combined_text: str,
+    ) -> str:
+        """Build a strategy-aware prompt for local/semantic bundle generation."""
+        task_descriptions = []
+        for assignment in assignments:
+            diff = assignment["difficulty"]
+            q_type = assignment["question_type"]
+
+            if diff == "medium":
+                bloom_desc = (
+                    "vận dụng/phân tích: so sánh khái niệm giữa các đoạn, "
+                    "phân loại, tìm mối quan hệ"
+                )
+            else:
+                bloom_desc = (
+                    "đánh giá/sáng tạo: nhận định ưu/nhược điểm dựa trên "
+                    "nhiều nguồn, thiết kế giải pháp tổng hợp"
+                )
+
+            type_desc = (
+                "trắc nghiệm (MCQ, 4 lựa chọn A-D)"
+                if q_type == "mcq"
+                else "tự luận (essay)"
+            )
+            task_descriptions.append(
+                f"- 1 câu hỏi {type_desc}, mức độ {diff.upper()} ({bloom_desc})"
+            )
+
+        strategy_guidance = {
+            "local_multi": (
+                "Ưu tiên dùng nguồn trung tâm làm trục chính, sau đó kết nối với các nguồn bổ trợ "
+                "gần về cấu trúc/chủ đề để tạo câu hỏi tổng hợp mạch lạc."
+            ),
+            "semantic_multi": (
+                "Ưu tiên tổng hợp ý từ nguồn trung tâm với các nguồn bổ trợ có quan hệ khái niệm, "
+                "ví dụ định nghĩa - ví dụ - ngoại lệ - so sánh, thay vì chỉ gom các đoạn gần nhau."
+            ),
+            "multi": (
+                "Dùng nguồn trung tâm làm neo chính, các nguồn bổ trợ để mở rộng, đối chiếu hoặc minh họa."
+            ),
+        }
+
+        task_list = "\n".join(task_descriptions)
+        source_summary = ", ".join(bundle.source_chunk_ids)
+
+        return (
+            f"Dựa vào CÁC đoạn văn bản dưới đây, hãy sinh ra chính xác "
+            f"{len(assignments)} câu hỏi TỔNG HỢP.\n\n"
+            f"Chunk mode: {bundle.chunk_mode}\n"
+            f"Bundle strategy: {bundle.bundle_strategy}\n"
+            f"Bundle score: {bundle.bundle_score:.2f}\n"
+            f"Primary chunk: {bundle.primary_chunk_id}\n"
+            f"Supporting chunks: {[c.get('chunk_id') for c in bundle.supporting_chunks]}\n"
+            f"Traceable source chunks: {source_summary}\n"
+            f"Assignment reason: {bundle.assignment_reason or 'n/a'}\n\n"
+            f"YÊU CẦU QUAN TRỌNG:\n"
+            f"- Chunk chính là nguồn trung tâm, phải được phản ánh trong nội dung câu hỏi.\n"
+            f"- Supporting chunks chỉ dùng để bổ trợ, mở rộng, đối chiếu hoặc tổng hợp.\n"
+            f"- Không được bỏ qua chunk chính để chỉ hỏi từ chunk phụ.\n"
+            f"- Giải thích phải có khả năng truy vết về các source chunks.\n"
+            f"- {strategy_guidance.get(bundle.bundle_strategy, strategy_guidance['multi'])}\n\n"
+            f"{task_list}\n\n"
+            f"{combined_text}\n\n"
+            f"=== HẾT VĂN BẢN ===\n\n"
+            f"Trả về JSON array chứa đúng {len(assignments)} câu hỏi."
+        )
+
     # ─── Micro-prompting: generate from a single chunk ──────────────
 
-    async def generate_from_chunk(
+    async def generate_from_single_chunk(
         self,
         chunk_assignment: ChunkAssignment,
         constraints: dict,
@@ -276,6 +440,14 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
 
         return generated
 
+    async def generate_from_chunk(
+        self,
+        chunk_assignment: ChunkAssignment,
+        constraints: dict,
+    ) -> list[GeneratedQuestion]:
+        """Backward-compatible alias for the original single-chunk generator."""
+        return await self.generate_from_single_chunk(chunk_assignment, constraints)
+
     # ─── Multi-chunk synthesis: generate from context bundle ────────
 
     async def generate_from_context_bundle(
@@ -295,67 +467,16 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
             return []
 
         max_chars = settings.MAX_CHUNK_CHARS
-
-        # Build multi-source text segments
-        segments: list[str] = []
-        all_chunk_ids: list[str] = []
-        all_chunk_texts: list[str] = []
-
-        # Primary chunk
-        primary_text = chunk_assignment.chunk_text
-        if len(primary_text) > max_chars:
-            primary_text = primary_text[:max_chars] + "..."
-        segments.append(f"=== ĐOẠN 1 (chính) ===\n\n{primary_text}")
-        all_chunk_ids.append(chunk_assignment.chunk_id)
-        all_chunk_texts.append(chunk_assignment.chunk_text[:500])
-
-        # Extra context chunks
-        for i, extra in enumerate(chunk_assignment.context_chunks, start=2):
-            extra_text = extra["chunk_text"]
-            if len(extra_text) > max_chars:
-                extra_text = extra_text[:max_chars] + "..."
-            segments.append(f"=== ĐOẠN {i} ===\n\n{extra_text}")
-            all_chunk_ids.append(extra["chunk_id"])
-            all_chunk_texts.append(extra["chunk_text"][:500])
-
+        bundle = self._normalize_bundle_context(chunk_assignment)
+        segments, all_chunk_ids, all_chunk_texts = self._format_bundle_segments(
+            bundle=bundle,
+            max_chars=max_chars,
+        )
         combined_text = "\n\n".join(segments)
-
-        # Build task descriptions
-        task_descriptions = []
-        for a in assignments:
-            diff = a["difficulty"]
-            q_type = a["question_type"]
-
-            if diff == "medium":
-                bloom_desc = (
-                    "vận dụng/phân tích: so sánh khái niệm giữa các đoạn, "
-                    "phân loại, tìm mối quan hệ"
-                )
-            else:
-                bloom_desc = (
-                    "đánh giá/sáng tạo: nhận định ưu/nhược điểm dựa trên "
-                    "nhiều nguồn, thiết kế giải pháp tổng hợp"
-                )
-
-            type_desc = (
-                "trắc nghiệm (MCQ, 4 lựa chọn A-D)"
-                if q_type == "mcq"
-                else "tự luận (essay)"
-            )
-            task_descriptions.append(
-                f"- 1 câu hỏi {type_desc}, mức độ {diff.upper()} ({bloom_desc})"
-            )
-
-        task_list = "\n".join(task_descriptions)
-
-        user_message = (
-            f"Dựa vào CÁC đoạn văn bản dưới đây, hãy sinh ra chính xác "
-            f"{len(assignments)} câu hỏi TỔNG HỢP (phải kết hợp thông tin "
-            f"từ NHIỀU đoạn, không chỉ 1 đoạn):\n\n"
-            f"{task_list}\n\n"
-            f"{combined_text}\n\n"
-            f"=== HẾT VĂN BẢN ===\n\n"
-            f"Trả về JSON array chứa đúng {len(assignments)} câu hỏi."
+        user_message = self._build_bundle_user_message(
+            assignments=assignments,
+            bundle=bundle,
+            combined_text=combined_text,
         )
 
         extra = ""
@@ -403,11 +524,27 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
             ))
 
         logger.debug(
-            f"Multi-chunk bundle {chunk_assignment.chunk_id}: "
+            f"Multi-chunk bundle {bundle.primary_chunk_id}: "
             f"generated {len(generated)}/{len(assignments)} synthesis questions"
         )
 
         return generated
+
+    async def generate_from_local_bundle(
+        self,
+        chunk_assignment: ChunkAssignment,
+        constraints: dict,
+    ) -> list[GeneratedQuestion]:
+        """Generate from a local multi-chunk bundle."""
+        return await self.generate_from_context_bundle(chunk_assignment, constraints)
+
+    async def generate_from_semantic_bundle(
+        self,
+        chunk_assignment: ChunkAssignment,
+        constraints: dict,
+    ) -> list[GeneratedQuestion]:
+        """Generate from a semantic-style multi-chunk bundle."""
+        return await self.generate_from_context_bundle(chunk_assignment, constraints)
 
     async def _invoke_with_retry(
         self,
@@ -450,13 +587,18 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         Generate questions from chunks sequentially with rate-limit delays.
 
         Dispatches each ChunkAssignment to the appropriate method:
-        - Single-chunk (no context_chunks) → generate_from_chunk()
-        - Multi-chunk bundle (has context_chunks) → generate_from_context_bundle()
+        - Single-chunk (strategy=single or no support) → generate_from_single_chunk()
+        - Local bundle (strategy=local_multi) → generate_from_local_bundle()
+        - Semantic bundle (strategy=semantic_multi) → generate_from_semantic_bundle()
+        - Fallback multi bundle → generate_from_context_bundle()
         """
         delay = settings.LLM_REQUEST_DELAY
         all_questions = []
 
-        single_count = sum(1 for ca in chunk_assignments if not ca.context_chunks)
+        single_count = sum(
+            1 for ca in chunk_assignments
+            if (ca.bundle_strategy == "single") or not ca.get_supporting_chunks()
+        )
         multi_count = len(chunk_assignments) - single_count
 
         logger.info(
@@ -466,20 +608,24 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         )
 
         for idx, ca in enumerate(chunk_assignments):
-            mode = "multi-chunk" if ca.context_chunks else "single-chunk"
+            bundle = self._normalize_bundle_context(ca)
+            supporting_chunks = bundle.supporting_chunks
+            mode = bundle.bundle_strategy or ("multi-chunk" if supporting_chunks else "single")
             logger.info(
                 f"Generating {idx + 1}/{len(chunk_assignments)} "
                 f"({mode}, chunk_id={ca.chunk_id[:16]}..., "
-                f"tasks={len(ca.assignments)})"
+                f"tasks={len(ca.assignments)}, bundle_score={bundle.bundle_score:.2f})"
             )
 
             try:
-                if ca.context_chunks:
-                    questions = await self.generate_from_context_bundle(
-                        ca, constraints,
-                    )
+                if not supporting_chunks or mode == "single":
+                    questions = await self.generate_from_single_chunk(ca, constraints)
+                elif mode == "local_multi":
+                    questions = await self.generate_from_local_bundle(ca, constraints)
+                elif mode == "semantic_multi":
+                    questions = await self.generate_from_semantic_bundle(ca, constraints)
                 else:
-                    questions = await self.generate_from_chunk(ca, constraints)
+                    questions = await self.generate_from_context_bundle(ca, constraints)
                 all_questions.extend(questions)
             except Exception as e:
                 logger.error(f"Chunk generation error: {e}")
