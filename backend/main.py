@@ -27,7 +27,9 @@ from routers import (
     courses_router,
     documents_router,
     exams_router,
+    export_router,
     generation_router,
+    guidance_router,
     textbooks_router,
 )
 
@@ -86,6 +88,8 @@ app.include_router(documents_router, prefix=settings.API_PREFIX)
 app.include_router(textbooks_router, prefix=settings.API_PREFIX)
 app.include_router(exams_router, prefix=settings.API_PREFIX)
 app.include_router(generation_router, prefix=settings.API_PREFIX)
+app.include_router(export_router, prefix=settings.API_PREFIX)
+app.include_router(guidance_router, prefix=settings.API_PREFIX)
 
 
 @app.get("/")

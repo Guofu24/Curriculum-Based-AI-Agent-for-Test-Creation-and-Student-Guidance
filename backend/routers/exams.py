@@ -225,3 +225,60 @@ async def delete_exam(
         raise HTTPException(status_code=404, detail="Exam not found")
 
     return {"message": "Exam deleted successfully"}
+
+
+class EditByPromptRequest:
+    """Inline request model for edit-by-prompt."""
+
+    def __init__(self, prompt: str):
+        self.prompt = prompt
+
+
+@router.post("/{exam_id}/edit-by-prompt", response_model=ExamResponse)
+async def edit_exam_by_prompt(
+    exam_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.LECTURER, UserRole.TEACHING_ASSISTANT)),
+):
+    """
+    Edit an exam using a natural language prompt.
+
+    The prompt describes what changes to make (e.g., "Tăng độ khó các câu trắc nghiệm").
+    The backend converts this into partial regeneration edits.
+
+    Spec reference: §6.12
+    """
+    prompt = body.get("prompt", "")
+    if not prompt or not prompt.strip():
+        raise HTTPException(status_code=400, detail="Prompt is required")
+
+    service = ExamService(db)
+    exam = await service.get_exam(exam_id, current_user.id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+
+    # Convert prompt to a partial regeneration call
+    # This delegates to the existing generation infrastructure
+    from services.generation_service import GenerationService
+
+    gen_service = GenerationService(db)
+    try:
+        updated_exam = await gen_service.partial_regenerate(
+            exam_id=exam_id,
+            user_id=current_user.id,
+            edits=[{
+                "question_ids": [],
+                "edit_type": "regenerate",
+                "edit_prompt": prompt.strip(),
+            }],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Edit failed: {str(e)}")
+
+    # Reload and return full exam
+    refreshed = await service.get_exam(exam_id, current_user.id)
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="Exam not found after edit")
+
+    return _format_exam(refreshed)

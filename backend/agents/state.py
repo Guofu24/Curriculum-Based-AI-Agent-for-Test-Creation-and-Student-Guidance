@@ -196,6 +196,10 @@ class AgentState(TypedDict, total=False):
     bloom_distribution: dict[str, int]
     formatting_preferences: dict[str, Any]
     strict_scope: bool
+    # Audit results (from Scope Auditor & Bloom Auditor agents)
+    scope_audit_results: list[dict[str, Any]]
+    bloom_audit_results: list[dict[str, Any]]
+    # Agent references
     _retrieval_agent: Any
     _blueprint_agent: Any
     _question_generator: Any
@@ -204,5 +208,8 @@ class AgentState(TypedDict, total=False):
     _pruning_agent: Any
     _quality_judge: Any
     _dedup_filter: Any
+    _scope_auditor: Any
+    _bloom_auditor: Any
+    _requirement_parser: Any
     _db_session: Any
     _retry_attempted: bool

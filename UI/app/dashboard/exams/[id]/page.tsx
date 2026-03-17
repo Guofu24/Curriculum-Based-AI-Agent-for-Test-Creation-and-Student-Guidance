@@ -34,12 +34,16 @@ import {
 import {
   AlertTriangle,
   Check,
+  Download,
   Eye,
   FileCheck,
+  FileJson,
   FileText,
+  Filter,
   Layers,
   Loader2,
   Lock,
+  MessageSquare,
   MoreVertical,
   Pencil,
   RefreshCw,
@@ -101,6 +105,11 @@ export default function ExamReviewPage() {
   const [savingQuestionId, setSavingQuestionId] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState("");
+  const [exportLoading, setExportLoading] = useState(false);
+  const [promptEdit, setPromptEdit] = useState("");
+  const [promptEditLoading, setPromptEditLoading] = useState(false);
+  const [filterBloom, setFilterBloom] = useState("all");
+  const [filterType, setFilterType] = useState("all");
 
   useEffect(() => {
     if (!examId) return;
@@ -222,6 +231,66 @@ export default function ExamReviewPage() {
     }
   };
 
+  const handleExport = async (format: "docx" | "docx-answers" | "docx-key" | "json") => {
+    if (!exam) return;
+    setExportLoading(true);
+    setError("");
+    try {
+      const slug = exam.title.replace(/[^\w]/g, "_").toLowerCase().slice(0, 50);
+      switch (format) {
+        case "docx":
+          await examsApi.exportDocx(exam.id, `${slug}.docx`);
+          break;
+        case "docx-answers":
+          await examsApi.exportDocx(exam.id, `${slug}_dap_an.docx`, {
+            includeAnswers: true,
+            includeRubric: true,
+            includeExplanation: true,
+          });
+          break;
+        case "docx-key":
+          await examsApi.exportAnswerKey(exam.id, `${slug}_bang_dap_an.docx`);
+          break;
+        case "json":
+          await examsApi.exportJson(exam.id, `${slug}.json`);
+          break;
+      }
+    } catch (exportError: unknown) {
+      setError(exportError instanceof Error ? exportError.message : "Export failed");
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
+  const handlePromptEdit = async () => {
+    if (!exam || !promptEdit.trim()) return;
+    setPromptEditLoading(true);
+    setError("");
+    try {
+      const updated = await generationApi.partialRegenerate({
+        exam_id: exam.id,
+        edits: [{
+          question_ids: [],
+          edit_type: "regenerate",
+          edit_prompt: promptEdit,
+        }],
+      });
+      setExam(updated);
+      setSelectedVersionId(updated.current_version?.id || updated.versions?.[updated.versions.length - 1]?.id || "");
+      setPromptEdit("");
+    } catch (editError: unknown) {
+      setError(editError instanceof Error ? editError.message : "Edit failed");
+    } finally {
+      setPromptEditLoading(false);
+    }
+  };
+
+  const filteredQuestions = questions.filter((q) => {
+    if (filterBloom !== "all" && q.bloom_level !== filterBloom) return false;
+    if (filterType !== "all" && q.question_type !== filterType) return false;
+    return true;
+  });
+
   if (loading) {
     return (
       <>
@@ -300,6 +369,39 @@ export default function ExamReviewPage() {
                 </Select>
               </div>
             )}
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" disabled={exportLoading}>
+                  {exportLoading ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="mr-2 h-4 w-4" />
+                  )}
+                  Export
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuItem onClick={() => void handleExport("docx")}>
+                  <FileText className="mr-2 h-4 w-4" />
+                  DOCX (đề thi)
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => void handleExport("docx-answers")}>
+                  <FileCheck className="mr-2 h-4 w-4" />
+                  DOCX (kèm đáp án)
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => void handleExport("docx-key")}>
+                  <FileText className="mr-2 h-4 w-4" />
+                  DOCX (bảng đáp án)
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => void handleExport("json")}>
+                  <FileJson className="mr-2 h-4 w-4" />
+                  JSON (file data)
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             <Button onClick={handlePublish} disabled={publishing || !!exam.published_at}>
               {publishing ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -353,8 +455,77 @@ export default function ExamReviewPage() {
           </Card>
         )}
 
+        {/* Global Prompt Edit */}
+        <Card className="rounded-2xl shadow-sm">
+          <CardContent className="p-4">
+            <div className="flex items-start gap-3">
+              <MessageSquare className="mt-1 h-4 w-4 text-muted-foreground shrink-0" />
+              <div className="flex-1 space-y-2">
+                <Textarea
+                  value={promptEdit}
+                  onChange={(e) => setPromptEdit(e.target.value)}
+                  placeholder="Nhập prompt để chỉnh sửa toàn bộ đề... Ví dụ: Tăng độ khó các câu trắc nghiệm, thêm câu hỏi phân tích cho chương 3"
+                  className="min-h-16 resize-none"
+                />
+                <div className="flex justify-end">
+                  <Button
+                    size="sm"
+                    onClick={() => void handlePromptEdit()}
+                    disabled={promptEditLoading || !promptEdit.trim()}
+                  >
+                    {promptEditLoading ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="mr-2 h-4 w-4" />
+                    )}
+                    Áp dụng chỉnh sửa
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Question Filters */}
+        <div className="flex flex-wrap gap-3">
+          <div className="flex items-center gap-2">
+            <Filter className="h-4 w-4 text-muted-foreground" />
+            <Select value={filterBloom} onValueChange={setFilterBloom}>
+              <SelectTrigger className="h-8 w-40 text-xs">
+                <SelectValue placeholder="Bloom level" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Bloom levels</SelectItem>
+                {["remember", "understand", "apply", "analyze", "evaluate", "create"].map((level) => (
+                  <SelectItem key={level} value={level} className="capitalize">
+                    {level}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={filterType} onValueChange={setFilterType}>
+              <SelectTrigger className="h-8 w-36 text-xs">
+                <SelectValue placeholder="Question type" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All types</SelectItem>
+                <SelectItem value="mcq">MCQ</SelectItem>
+                <SelectItem value="essay">Essay</SelectItem>
+              </SelectContent>
+            </Select>
+            {(filterBloom !== "all" || filterType !== "all") && (
+              <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={() => { setFilterBloom("all"); setFilterType("all"); }}>
+                Clear filters
+              </Button>
+            )}
+            <Badge variant="outline" className="text-xs">
+              {filteredQuestions.length}/{questions.length} questions
+            </Badge>
+          </div>
+        </div>
+
         <div className="space-y-4">
-          {questions.map((question) => (
+          {filteredQuestions.map((question) => (
             <QuestionCard
               key={question.id}
               question={question}

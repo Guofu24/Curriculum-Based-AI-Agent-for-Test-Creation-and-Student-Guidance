@@ -13,6 +13,7 @@ from models.exam import (
     ExamVersion,
     QuestionType,
 )
+from models.student import MasteryProfile, StudentSubmission
 from models.textbook import ProcessingStatus, Textbook, TextbookChapter, TextbookChunk
 from models.token_blacklist import TokenBlacklist
 from models.user import User, UserRole
@@ -32,9 +33,11 @@ __all__ = [
     "ExamType",
     "ExamVersion",
     "LearningObjective",
+    "MasteryProfile",
     "ProcessingStatus",
     "QuestionType",
     "Section",
+    "StudentSubmission",
     "Textbook",
     "TextbookChapter",
     "TextbookChunk",

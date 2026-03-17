@@ -555,12 +555,18 @@ export const exams = {
     });
   },
 
-  async exportDocx(id: string, filename: string) {
+  async exportDocx(id: string, filename: string, options?: { includeAnswers?: boolean; includeRubric?: boolean; includeExplanation?: boolean }) {
     const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
     const headers: Record<string, string> = {};
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
-    const res = await fetch(`${API_URL}/export/${encodeURIComponent(id)}/docx`, {
+    const params = new URLSearchParams();
+    if (options?.includeAnswers) params.set("include_answers", "true");
+    if (options?.includeRubric) params.set("include_rubric", "true");
+    if (options?.includeExplanation) params.set("include_explanation", "true");
+    const qs = params.toString() ? `?${params.toString()}` : "";
+
+    const res = await fetch(`${API_URL}/export/${encodeURIComponent(id)}/docx${qs}`, {
       method: "GET",
       headers,
     });
@@ -576,6 +582,59 @@ export const exams = {
     anchor.click();
     window.URL.revokeObjectURL(url);
     document.body.removeChild(anchor);
+  },
+
+  async exportAnswerKey(id: string, filename: string) {
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_URL}/export/${encodeURIComponent(id)}/docx-key`, {
+      method: "GET",
+      headers,
+    });
+
+    if (!res.ok) throw new Error("Failed to export answer key");
+
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(anchor);
+  },
+
+  async exportJson(id: string, filename: string) {
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_URL}/export/${encodeURIComponent(id)}/json`, {
+      method: "GET",
+      headers,
+    });
+
+    if (!res.ok) throw new Error("Failed to export exam JSON");
+
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(anchor);
+  },
+
+  editByPrompt(id: string, prompt: string) {
+    return request<Exam>(`/exams/${encodeURIComponent(id)}/edit-by-prompt`, {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    });
   },
 };
 
