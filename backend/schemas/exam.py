@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional
 from datetime import datetime
 
@@ -22,6 +22,7 @@ class AdvancedConstraints(BaseModel):
     grade_level_scope: Optional[str] = None
     creativity_level: float = Field(default=0.5, ge=0.0, le=1.0)
     bloom_levels: list[str] = ["remember", "understand", "apply", "analyze"]
+    max_concurrency: int = Field(default=1, ge=1, le=5)
 
 
 class ExamGenerationRequest(BaseModel):
@@ -110,6 +111,26 @@ class QuestionEditRequest(BaseModel):
     range_end: Optional[int] = None  # question number end
     edit_type: str = "regenerate"  # regenerate, edit_text
     new_content: Optional[str] = None  # for direct text edits
+
+    @field_validator("edit_type")
+    @classmethod
+    def normalize_edit_type(cls, value: str) -> str:
+        normalized = (value or "regenerate").strip().lower()
+        if normalized not in {"regenerate", "edit_text"}:
+            raise ValueError("edit_type must be 'regenerate' or 'edit_text'")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_targeting(self):
+        has_ids = bool(self.question_ids)
+        has_range = self.range_start is not None and self.range_end is not None
+        if not has_ids and not has_range:
+            raise ValueError("Provide question_ids or range_start/range_end")
+        if has_range and (self.range_start <= 0 or self.range_end <= 0):
+            raise ValueError("range_start and range_end must be >= 1")
+        if self.edit_type == "edit_text" and not (self.new_content and self.new_content.strip()):
+            raise ValueError("new_content is required when edit_type is 'edit_text'")
+        return self
 
 
 class ExamPartialRegenerateRequest(BaseModel):

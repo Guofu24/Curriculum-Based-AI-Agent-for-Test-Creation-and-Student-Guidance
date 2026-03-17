@@ -34,9 +34,9 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
 
     # Embedding
-    # BGE-M3 (BAAI/bge-m3): local HuggingFace model, 1024-dim dense vectors
+    # Keep model/dimension aligned by default (MiniLM = 384 dims).
     EMBEDDING_PROVIDER: str = "huggingface"
-    EMBEDDING_MODEL: str = "BAAI/bge-m3"
+    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     EMBEDDING_DIMENSION: int = 384
 
     # Pinecone (free cloud vector DB)

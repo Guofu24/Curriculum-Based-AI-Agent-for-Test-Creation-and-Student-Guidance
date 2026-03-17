@@ -252,6 +252,7 @@ export interface ExamGenerationRequest {
     grade_level_scope?: string;
     creativity_level: number;
     bloom_levels: string[];
+    max_concurrency?: number;
   };
 }
 
@@ -402,7 +403,11 @@ export const generation = {
             if (!payload) continue;
             try {
               const parsed = JSON.parse(payload);
-              if (parsed.questions) {
+              if (parsed?.type === "complete" && parsed?.exam_id) {
+                onComplete({ id: parsed.exam_id } as Exam);
+              } else if (parsed?.type === "error") {
+                onError(parsed.message || "Generation failed");
+              } else if (parsed.questions) {
                 onComplete(parsed as Exam);
               } else {
                 onStep(parsed as GenerationStep);

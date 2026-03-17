@@ -81,11 +81,13 @@ export default function ExamReviewPage() {
   const [regenerateModal, setRegenerateModal] = useState<{
     type: "single" | "from"
     questionId: string
+    questionNumber: number
   } | null>(null)
   const [regeneratePrompt, setRegeneratePrompt] = useState("")
   const [regenerateFrom, setRegenerateFrom] = useState<string>("current")
   const [isRegenerating, setIsRegenerating] = useState(false)
-  const [isSaving, setIsSaving] = useState(false)
+  const [isSavingDraft, setIsSavingDraft] = useState(false)
+  const [savingQuestionId, setSavingQuestionId] = useState<string | null>(null)
 
   useEffect(() => {
     if (!examId) return
@@ -104,16 +106,27 @@ export default function ExamReviewPage() {
     setEditContent(question.content)
   }
 
-  const saveEdit = () => {
-    if (editingId !== null && exam) {
-      setExam({
-        ...exam,
-        questions: exam.questions.map((q) =>
-          q.id === editingId ? { ...q, content: editContent } : q
-        ),
+  const saveEdit = async () => {
+    if (editingId === null || !exam) return
+    setSavingQuestionId(editingId)
+    try {
+      const result = await generationApi.partialRegenerate({
+        exam_id: exam.id,
+        edits: [
+          {
+            question_ids: [editingId],
+            edit_type: "edit_text",
+            new_content: editContent,
+          },
+        ],
       })
+      setExam(result)
       setEditingId(null)
       setEditContent("")
+    } catch {
+      // silently fail
+    } finally {
+      setSavingQuestionId(null)
     }
   }
 
@@ -126,13 +139,18 @@ export default function ExamReviewPage() {
     if (!regenerateModal || !exam) return
     setIsRegenerating(true)
     try {
+      const regenerateFromCurrent =
+        regenerateModal.type === "from" && regenerateFrom === "current"
+
       const result = await generationApi.partialRegenerate({
         exam_id: exam.id,
         edits: [
           {
-            question_ids: [regenerateModal.questionId],
+            question_ids: regenerateFromCurrent ? [] : [regenerateModal.questionId],
+            range_start: regenerateFromCurrent ? regenerateModal.questionNumber : undefined,
+            range_end: regenerateFromCurrent ? questions.length : undefined,
             edit_prompt: regeneratePrompt || undefined,
-            edit_type: regenerateModal.type === "single" ? "regenerate" : "regenerate",
+            edit_type: "regenerate",
           },
         ],
       })
@@ -147,8 +165,8 @@ export default function ExamReviewPage() {
   }
 
   const handleSave = () => {
-    setIsSaving(true)
-    setTimeout(() => setIsSaving(false), 1500)
+    setIsSavingDraft(true)
+    setTimeout(() => setIsSavingDraft(false), 1500)
   }
 
   if (loading) {
@@ -207,13 +225,13 @@ export default function ExamReviewPage() {
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-            <Button variant="outline" size="sm" onClick={handleSave} disabled={isSaving}>
-              {isSaving ? (
+            <Button variant="outline" size="sm" onClick={handleSave} disabled={isSavingDraft}>
+              {isSavingDraft ? (
                 <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
               ) : (
                 <Save className="mr-2 h-3.5 w-3.5" />
               )}
-              {isSaving ? "Saving..." : "Save"}
+              {isSavingDraft ? "Saving..." : "Save"}
             </Button>
             <Button size="sm">
               <Send className="mr-2 h-3.5 w-3.5" />
@@ -263,8 +281,13 @@ export default function ExamReviewPage() {
                 onStartEdit={() => startEdit(question)}
                 onSaveEdit={saveEdit}
                 onCancelEdit={cancelEdit}
+                isSaving={savingQuestionId === question.id}
                 onRegenerate={(type) =>
-                  setRegenerateModal({ type, questionId: question.id })
+                  setRegenerateModal({
+                    type,
+                    questionId: question.id,
+                    questionNumber: question.question_number,
+                  })
                 }
               />
             ))}
@@ -290,8 +313,13 @@ export default function ExamReviewPage() {
                 onStartEdit={() => startEdit(question)}
                 onSaveEdit={saveEdit}
                 onCancelEdit={cancelEdit}
+                isSaving={savingQuestionId === question.id}
                 onRegenerate={(type) =>
-                  setRegenerateModal({ type, questionId: question.id })
+                  setRegenerateModal({
+                    type,
+                    questionId: question.id,
+                    questionNumber: question.question_number,
+                  })
                 }
               />
             ))}
@@ -304,14 +332,15 @@ export default function ExamReviewPage() {
           onOpenChange={() => {
             setRegenerateModal(null)
             setRegeneratePrompt("")
+            setRegenerateFrom("current")
           }}
         >
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>
                 {regenerateModal?.type === "single"
-                  ? `Modify Question ${regenerateModal?.questionId}`
-                  : `Regenerate from Question ${regenerateModal?.questionId}`}
+                  ? `Modify Question ${regenerateModal?.questionNumber}`
+                  : `Regenerate from Question ${regenerateModal?.questionNumber}`}
               </DialogTitle>
               <DialogDescription>
                 {regenerateModal?.type === "single"
@@ -358,6 +387,7 @@ export default function ExamReviewPage() {
                 onClick={() => {
                   setRegenerateModal(null)
                   setRegeneratePrompt("")
+                  setRegenerateFrom("current")
                 }}
               >
                 Cancel
@@ -382,6 +412,7 @@ function QuestionCard({
   question,
   index,
   isEditing,
+  isSaving,
   editContent,
   onEditContent,
   onStartEdit,
@@ -392,10 +423,11 @@ function QuestionCard({
   question: ApiQuestion
   index: number
   isEditing: boolean
+  isSaving: boolean
   editContent: string
   onEditContent: (content: string) => void
   onStartEdit: () => void
-  onSaveEdit: () => void
+  onSaveEdit: () => Promise<void>
   onCancelEdit: () => void
   onRegenerate: (type: "single" | "from") => void
 }) {
@@ -527,9 +559,19 @@ function QuestionCard({
                 <Button variant="outline" size="sm" onClick={onCancelEdit}>
                   Cancel
                 </Button>
-                <Button size="sm" onClick={onSaveEdit}>
-                  <Check className="mr-1.5 h-3.5 w-3.5" />
-                  Save changes
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    void onSaveEdit()
+                  }}
+                  disabled={isSaving}
+                >
+                  {isSaving ? (
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Check className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  {isSaving ? "Saving..." : "Save changes"}
                 </Button>
               </div>
             </div>
@@ -544,7 +586,7 @@ function QuestionCard({
                     <div
                       key={i}
                       className={`flex items-center gap-3 rounded-lg border px-3 py-2 text-sm ${
-                        option.text === question.correct_answer
+                        option.label === question.correct_answer
                           ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-400"
                           : "border-border text-foreground"
                       }`}
@@ -553,7 +595,7 @@ function QuestionCard({
                         {option.label}
                       </span>
                       {option.text}
-                      {option.text === question.correct_answer && (
+                      {option.label === question.correct_answer && (
                         <Check className="ml-auto h-3.5 w-3.5 shrink-0" />
                       )}
                     </div>

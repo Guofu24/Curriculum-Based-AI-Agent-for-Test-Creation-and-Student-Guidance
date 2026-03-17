@@ -179,6 +179,7 @@ async def generate_from_chunks_node(state: AgentState) -> dict:
     questions = await generator.generate_from_chunks_parallel(
         chunk_assignments=chunk_assignments,
         constraints=state["constraints"],
+        max_concurrency=state["constraints"].get("max_concurrency", 1),
     )
 
     # Build slot-level metadata trace so downstream nodes can inspect bundle plan.
@@ -336,6 +337,7 @@ async def partial_edit_node(state: AgentState) -> dict:
         existing_questions=state["validated_questions"],
         edit_requests=state["edit_requests"],
         textbook_id=state["textbook_id"],
+        chapters=state.get("chapters", []),
         constraints=state["constraints"],
     )
 

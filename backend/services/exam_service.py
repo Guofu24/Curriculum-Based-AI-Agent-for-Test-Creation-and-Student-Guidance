@@ -5,13 +5,11 @@ Manages exam generation workflow, exam CRUD, and coordinates with the LangGraph
 multi-agent orchestrator.
 """
 import uuid
-import json
 import logging
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from config import settings
 from models.exam import Exam, ExamQuestion, ExamStatus, ExamType, DifficultyLevel, QuestionType, BloomLevel
 from schemas.exam import ExamGenerationRequest, ExamPartialRegenerateRequest
 from agents.orchestrator import create_exam_generation_graph
@@ -40,6 +38,20 @@ class ExamService:
     def _get_llm(self):
         """Get the configured LLM instance (instrumented via LLMBackend)."""
         return create_llm()
+
+    def _normalize_question_id_to_slot(
+        self,
+        raw_id: str,
+        id_to_slot: dict[str, int],
+    ) -> int | None:
+        """Accept either DB question UUID or question number and normalize to slot number."""
+        if raw_id in id_to_slot:
+            return id_to_slot[raw_id]
+        try:
+            slot = int(raw_id)
+            return slot if slot > 0 else None
+        except (TypeError, ValueError):
+            return None
 
     async def generate_exam(
         self,
@@ -236,16 +248,45 @@ class ExamService:
             ))
 
         # Build edit state
-        edit_requests = [
-            {
-                "question_ids": e.question_ids,
-                "range_start": e.range_start,
-                "range_end": e.range_end,
-                "edit_prompt": e.edit_prompt,
-                "edit_type": e.edit_type,
-            }
-            for e in request.edits
-        ]
+        id_to_slot = {str(q.id): int(q.question_number) for q in exam.questions}
+        edit_requests = []
+        for edit in request.edits:
+            normalized_ids: list[str] = []
+            for raw_id in edit.question_ids:
+                slot = self._normalize_question_id_to_slot(raw_id, id_to_slot)
+                if slot is not None:
+                    normalized_ids.append(str(slot))
+
+            range_start = edit.range_start
+            range_end = edit.range_end
+            if (
+                isinstance(range_start, int)
+                and isinstance(range_end, int)
+                and range_start > range_end
+            ):
+                range_start, range_end = range_end, range_start
+
+            has_target_ids = bool(normalized_ids)
+            has_target_range = (
+                isinstance(range_start, int)
+                and isinstance(range_end, int)
+            )
+            if not has_target_ids and not has_target_range:
+                continue
+
+            edit_requests.append(
+                {
+                    "question_ids": normalized_ids,
+                    "range_start": range_start,
+                    "range_end": range_end,
+                    "edit_prompt": edit.edit_prompt,
+                    "edit_type": edit.edit_type,
+                    "new_content": edit.new_content,
+                }
+            )
+
+        if not edit_requests:
+            raise ValueError("No valid target questions to edit")
 
         constraints = exam.config.get("constraints", {})
 

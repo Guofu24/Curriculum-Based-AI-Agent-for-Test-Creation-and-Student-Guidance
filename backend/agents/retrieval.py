@@ -1,19 +1,17 @@
-"""
+﻿"""
 Retrieval Agent
 
 Responsibilities:
 - Hybrid search (vector similarity + BM25 keyword match)
-- Filter by chapter, textbook
+- Strict chapter/textbook filtering
 - Re-rank results for relevance
 - Return contextual chunks for each question slot
-
-Storage:
-- Pinecone (cloud) — vector similarity search
-- PostgreSQL textbook_chunks — BM25 keyword search
 """
-from dataclasses import dataclass
-from typing import Any
+
+import asyncio
+import json
 import re
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,13 +27,15 @@ class RetrievalAgent:
     Uses hybrid search: Pinecone vector similarity + PostgreSQL BM25 keyword scoring.
     """
 
-    TOP_K_VECTOR = 10  # top results from vector search
-    TOP_K_BM25 = 10  # top results from BM25
-    FINAL_TOP_K = 5  # final merged results per slot
+    TOP_K_VECTOR = 10
+    TOP_K_BM25 = 10
+    FINAL_TOP_K = 5
+    MAX_VECTOR_EXPANSION = 3
 
     def __init__(self, vector_store, db_session: AsyncSession = None):
         self.vector_store = vector_store
         self.db_session = db_session
+        self._bm25_cache: dict[tuple[str, tuple[int, ...]], dict] = {}
 
     async def retrieve_for_blueprint(
         self,
@@ -44,21 +44,20 @@ class RetrievalAgent:
         chapters: list[int],
         constraints: dict,
     ) -> list[RetrievedContext]:
-        """
-        Retrieve relevant context for each question slot in the blueprint.
-        """
-        contexts = []
+        """Retrieve relevant context for each question slot in the blueprint."""
+        max_concurrency = self._resolve_max_concurrency(constraints)
+        semaphore = asyncio.Semaphore(max_concurrency)
 
-        for slot in blueprint.slots:
-            context = await self._retrieve_for_slot(
-                slot=slot,
-                textbook_id=textbook_id,
-                chapters=chapters,
-                constraints=constraints,
-            )
-            contexts.append(context)
+        async def retrieve_slot(slot: QuestionSlot) -> RetrievedContext:
+            async with semaphore:
+                return await self._retrieve_for_slot(
+                    slot=slot,
+                    textbook_id=textbook_id,
+                    chapters=chapters,
+                    constraints=constraints,
+                )
 
-        return contexts
+        return await asyncio.gather(*(retrieve_slot(slot) for slot in blueprint.slots))
 
     async def _retrieve_for_slot(
         self,
@@ -68,34 +67,24 @@ class RetrievalAgent:
         constraints: dict,
     ) -> RetrievedContext:
         """Retrieve context for a single question slot using hybrid search."""
-
-        # Build the search query from slot info
         query = self._build_query(slot)
-
-        # 1. Vector similarity search (async — namespace already isolates by textbook)
-        vector_results = await self.vector_store.asimilarity_search_with_score(
-            query=query,
-            k=self.TOP_K_VECTOR,
+        chapter_scope = self._resolve_chapter_scope(
+            requested_chapters=chapters,
+            target_chapter=slot.target_chapter,
         )
 
-        # 2. BM25 keyword search over the same collection
+        vector_results = await self._vector_search(
+            query=query,
+            chapters=chapter_scope,
+        )
+
         bm25_results = await self._bm25_search(
             query=query,
             textbook_id=textbook_id,
-            chapters=chapters,
+            chapters=chapter_scope,
         )
 
-        # 3. Merge and re-rank
         merged = self._hybrid_merge(vector_results, bm25_results)
-
-        # 4. Filter by chapter if strict
-        if chapters:
-            merged = [
-                r for r in merged
-                if r.get("metadata", {}).get("page", 0) >= 0  # keep all if no page info
-            ]
-
-        # Take top results
         top_results = merged[:self.FINAL_TOP_K]
 
         return RetrievedContext(
@@ -119,8 +108,39 @@ class RetrievalAgent:
             parts.append(" ".join(slot.target_topics))
         if slot.target_chapter and slot.target_chapter > 0:
             parts.append(f"chapter {slot.target_chapter}")
-        parts.append(f"{slot.bloom_level} level question")
+        parts.append(f"{slot.bloom_level} level {slot.question_type} question")
         return " ".join(parts)
+
+    async def _vector_search(
+        self,
+        query: str,
+        chapters: list[int],
+    ) -> list:
+        """Run vector search and apply strict chapter filtering when requested."""
+        fetch_k = self.TOP_K_VECTOR
+        if chapters:
+            fetch_k = max(self.TOP_K_VECTOR, self.TOP_K_VECTOR * self.MAX_VECTOR_EXPANSION)
+
+        vector_results = await self.vector_store.asimilarity_search_with_score(
+            query=query,
+            k=fetch_k,
+        )
+
+        if not chapters:
+            return vector_results
+
+        filtered = []
+        for item in vector_results:
+            if not (hasattr(item, "__len__") and len(item) == 2):
+                continue
+            doc, _ = item
+            metadata = doc.metadata if isinstance(doc.metadata, dict) else {}
+            if self._matches_chapters(metadata, chapters):
+                filtered.append(item)
+            if len(filtered) >= self.TOP_K_VECTOR:
+                break
+
+        return filtered
 
     async def _bm25_search(
         self,
@@ -132,44 +152,88 @@ class RetrievalAgent:
         if self.db_session is None:
             return []
 
-        import json
+        scope_key = tuple(sorted(set(int(ch) for ch in chapters if isinstance(ch, int) and ch > 0)))
+        cache_key = (textbook_id, scope_key)
+        payload = self._bm25_cache.get(cache_key)
+
+        if payload is None:
+            payload = await self._build_bm25_payload(
+                textbook_id=textbook_id,
+                chapters=list(scope_key),
+            )
+            self._bm25_cache[cache_key] = payload
+
+        bm25 = payload.get("bm25")
+        if bm25 is None:
+            return []
+
+        tokenized_query = self._tokenize(query)
+        scores = bm25.get_scores(tokenized_query)
+
+        rows = payload["rows"]
+        results = []
+        for i, score in enumerate(scores):
+            row = rows[i]
+            results.append(
+                {
+                    "id": row["id"],
+                    "text": row["text"],
+                    "metadata": row["metadata"],
+                    "score": float(score),
+                }
+            )
+
+        results.sort(key=lambda item: item["score"], reverse=True)
+        return results[:self.TOP_K_BM25]
+
+    async def _build_bm25_payload(
+        self,
+        textbook_id: str,
+        chapters: list[int],
+    ) -> dict:
+        """Build and cache BM25 corpus by textbook + chapter scope."""
         result = await self.db_session.execute(
             select(TextbookChunk).where(TextbookChunk.textbook_id == textbook_id)
         )
-        rows = list(result.scalars().all())
+        db_rows = list(result.scalars().all())
+        if not db_rows:
+            return {"bm25": None, "rows": []}
+
+        rows: list[dict] = []
+        for row in db_rows:
+            metadata: dict = {}
+            try:
+                if row.metadata_json:
+                    metadata = json.loads(row.metadata_json)
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+
+            metadata = dict(metadata or {})
+            metadata.setdefault("chapter", row.chapter or "")
+            metadata.setdefault("parent_heading", row.parent_heading or "")
+            metadata.setdefault("page", row.page)
+            metadata.setdefault("chunk_id", row.chunk_id)
+            metadata["chapter_number"] = self._extract_chapter_number_from_metadata(metadata)
+
+            if chapters and not self._matches_chapters(metadata, chapters):
+                continue
+
+            rows.append(
+                {
+                    "id": row.chunk_id,
+                    "text": row.content,
+                    "metadata": metadata,
+                }
+            )
 
         if not rows:
-            return []
+            return {"bm25": None, "rows": []}
 
-        documents = [r.content for r in rows]
-        chunk_ids = [r.chunk_id for r in rows]
-        metadatas = []
-        for r in rows:
-            try:
-                metadatas.append(json.loads(r.metadata_json) if r.metadata_json else {})
-            except (json.JSONDecodeError, TypeError):
-                metadatas.append({})
-
-        # Tokenize for BM25
-        tokenized_corpus = [doc.lower().split() for doc in documents]
-        bm25 = BM25Okapi(tokenized_corpus)
-
-        tokenized_query = query.lower().split()
-        scores = bm25.get_scores(tokenized_query)
-
-        # Create scored results
-        results = []
-        for i, score in enumerate(scores):
-            results.append({
-                "id": chunk_ids[i],
-                "text": documents[i],
-                "metadata": metadatas[i],
-                "score": float(score),
-            })
-
-        # Sort by score descending
-        results.sort(key=lambda x: x["score"], reverse=True)
-        return results[:self.TOP_K_BM25]
+        tokenized_corpus = [self._tokenize(r["text"]) for r in rows]
+        return {
+            "bm25": BM25Okapi(tokenized_corpus),
+            "rows": rows,
+        }
 
     def _hybrid_merge(
         self,
@@ -181,14 +245,13 @@ class RetrievalAgent:
         """
         Reciprocal Rank Fusion (RRF) to merge vector and BM25 results.
         """
-        k = 60  # RRF constant
+        k = 60
 
-        scores = {}  # id -> {score, text, metadata}
+        scores = {}
 
-        # Score vector results
         for rank, item in enumerate(vector_results):
-            if hasattr(item, '__len__') and len(item) == 2:
-                doc, score = item
+            if hasattr(item, "__len__") and len(item) == 2:
+                doc, _score = item
                 doc_id = doc.metadata.get("chunk_id", str(rank))
                 rrf_score = vector_weight / (k + rank + 1)
                 if doc_id not in scores:
@@ -200,7 +263,6 @@ class RetrievalAgent:
                     }
                 scores[doc_id]["score"] += rrf_score
 
-        # Score BM25 results
         for rank, item in enumerate(bm25_results):
             doc_id = item.get("id", str(rank))
             rrf_score = bm25_weight / (k + rank + 1)
@@ -213,7 +275,6 @@ class RetrievalAgent:
                 }
             scores[doc_id]["score"] += rrf_score
 
-        # Sort by combined RRF score
         merged = sorted(scores.values(), key=lambda x: x["score"], reverse=True)
         return merged
 
@@ -225,25 +286,117 @@ class RetrievalAgent:
         top_k: int = 5,
     ) -> RetrievedContext:
         """Retrieve context for a single question (used during partial regeneration)."""
+        chapter_scope = [chapter] if isinstance(chapter, int) and chapter > 0 else []
+        fetch_k = top_k if not chapter_scope else max(top_k, top_k * self.MAX_VECTOR_EXPANSION)
+
         vector_results = await self.vector_store.asimilarity_search_with_score(
             query=query,
-            k=top_k,
+            k=fetch_k,
         )
 
         chunks = []
         for doc, score in vector_results:
-            chunks.append({
-                "id": doc.metadata.get("chunk_id", ""),
-                "text": doc.page_content,
-                "metadata": doc.metadata,
-                "score": float(score),
-            })
+            metadata = doc.metadata if isinstance(doc.metadata, dict) else {}
+            if chapter_scope and not self._matches_chapters(metadata, chapter_scope):
+                continue
+            chunks.append(
+                {
+                    "id": metadata.get("chunk_id", ""),
+                    "text": doc.page_content,
+                    "metadata": metadata,
+                    "score": float(score),
+                }
+            )
+            if len(chunks) >= top_k:
+                break
+
+        if len(chunks) < top_k:
+            bm25_results = await self._bm25_search(
+                query=query,
+                textbook_id=textbook_id,
+                chapters=chapter_scope,
+            )
+            existing_ids = {chunk["id"] for chunk in chunks}
+            for row in bm25_results:
+                if row["id"] in existing_ids:
+                    continue
+                chunks.append(row)
+                existing_ids.add(row["id"])
+                if len(chunks) >= top_k:
+                    break
 
         return RetrievedContext(
             slot_number=0,
             chunks=chunks,
             combined_text="\n\n---\n\n".join(c["text"] for c in chunks),
         )
+
+    def _resolve_chapter_scope(
+        self,
+        requested_chapters: list[int],
+        target_chapter: int | None,
+    ) -> list[int]:
+        if isinstance(target_chapter, int) and target_chapter > 0:
+            return [target_chapter]
+        return [ch for ch in requested_chapters if isinstance(ch, int) and ch > 0]
+
+    def _resolve_max_concurrency(self, constraints: dict | None) -> int:
+        try:
+            value = int((constraints or {}).get("max_concurrency", 1))
+        except (TypeError, ValueError):
+            value = 1
+        return max(1, min(5, value))
+
+    def _tokenize(self, text: str) -> list[str]:
+        return re.findall(r"\w+", (text or "").lower())
+
+    def _matches_chapters(self, metadata: dict, chapters: list[int]) -> bool:
+        if not chapters:
+            return True
+        chapter_number = self._extract_chapter_number_from_metadata(metadata)
+        return chapter_number in set(chapters)
+
+    def _extract_chapter_number_from_metadata(self, metadata: dict) -> int | None:
+        if not isinstance(metadata, dict):
+            return None
+
+        candidates = [
+            metadata.get("chapter_number"),
+            metadata.get("chapter"),
+            metadata.get("parent_heading"),
+        ]
+        for value in candidates:
+            parsed = self._extract_chapter_number(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _extract_chapter_number(self, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value > 0 else None
+        if isinstance(value, float):
+            parsed = int(value)
+            return parsed if parsed > 0 else None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            chapter_match = re.search(
+                r"(?i)(?:chapter|chương|phần|part)\s*[:\-]?\s*(\d+)",
+                text,
+            )
+            if chapter_match:
+                parsed = int(chapter_match.group(1))
+                return parsed if parsed > 0 else None
+            standalone = re.fullmatch(r"\d+", text)
+            if standalone:
+                parsed = int(standalone.group(0))
+                return parsed if parsed > 0 else None
+        return None
 
 
 def score_chunk_relatedness(
@@ -458,6 +611,5 @@ def _lexical_overlap(left: str, right: str) -> float:
 def _normalize_score_signal(score: float | None) -> float:
     if score is None:
         return 0.0
-    # Robust squashing for both cosine-like or BM25-like ranges.
     abs_score = abs(float(score))
     return max(0.0, min(1.0, abs_score / (1.0 + abs_score)))

@@ -22,6 +22,7 @@ import logging
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +49,7 @@ from utils.security import (
     is_token_blacklisted,
     blacklist_token,
     get_current_user,
+    security_scheme,
 )
 from utils.email import send_verification_email
 from utils.rate_limit import check_login_rate_limit
@@ -298,6 +300,7 @@ async def login(
 async def logout(
     request: LogoutRequest,
     current_user: User = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -313,6 +316,22 @@ async def logout(
     - Xóa access token khỏi localStorage/memory
     - Xóa refresh token khỏi cookie/localStorage
     """
+    # Decode and blacklist current access token
+    access_payload = decode_token(credentials.credentials)
+    if (
+        access_payload
+        and access_payload.get("type") == "access"
+        and access_payload.get("jti")
+        and access_payload.get("exp")
+    ):
+        await blacklist_token(
+            jti=access_payload["jti"],
+            token_type="access",
+            user_id=current_user.id,
+            expires_at=datetime.utcfromtimestamp(access_payload["exp"]),
+            db=db,
+        )
+
     # Decode refresh token để lấy JTI
     refresh_payload = decode_token(request.refresh_token)
     if refresh_payload and refresh_payload.get("type") == "refresh":

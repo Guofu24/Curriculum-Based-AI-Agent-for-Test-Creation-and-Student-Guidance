@@ -28,6 +28,7 @@ class ReviewerAgent:
         existing_questions: list[GeneratedQuestion],
         edit_requests: list[dict],
         textbook_id: str,
+        chapters: list[int],
         constraints: dict,
     ) -> list[GeneratedQuestion]:
         """
@@ -44,64 +45,73 @@ class ReviewerAgent:
             }
         ]
         """
-        # Create a map of question number -> question
         question_map = {q.slot_number: q for q in existing_questions}
-
-        # Determine which questions to regenerate
-        to_regenerate = set()
-        edit_prompts = {}  # slot_number -> edit prompt
+        result_map = {q.slot_number: q for q in existing_questions}
+        chapter_hint = chapters[0] if len(chapters) == 1 else 0
+        to_regenerate: set[int] = set()
+        edit_prompts: dict[int, str] = {}
+        text_edits: dict[int, str] = {}
 
         for edit in edit_requests:
-            # By specific IDs (slot numbers in our case)
+            targets: set[int] = set()
             if edit.get("question_ids"):
                 for qid in edit["question_ids"]:
-                    # Find slot number by checking existing questions
-                    for q in existing_questions:
-                        if str(q.slot_number) == str(qid):
-                            to_regenerate.add(q.slot_number)
-                            if edit.get("edit_prompt"):
-                                edit_prompts[q.slot_number] = edit["edit_prompt"]
+                    try:
+                        slot = int(qid)
+                    except (TypeError, ValueError):
+                        continue
+                    if slot in question_map:
+                        targets.add(slot)
 
-            # By range
             if edit.get("range_start") is not None and edit.get("range_end") is not None:
-                for num in range(edit["range_start"], edit["range_end"] + 1):
+                for num in range(int(edit["range_start"]), int(edit["range_end"]) + 1):
                     if num in question_map:
-                        to_regenerate.add(num)
-                        if edit.get("edit_prompt"):
-                            edit_prompts[num] = edit["edit_prompt"]
+                        targets.add(num)
 
-        # Regenerate only the targeted questions
-        result = list(existing_questions)  # copy
+            edit_type = str(edit.get("edit_type", "regenerate")).lower()
+            if edit_type == "edit_text":
+                new_content = (edit.get("new_content") or "").strip()
+                if not new_content:
+                    continue
+                for slot in targets:
+                    text_edits[slot] = new_content
+                continue
 
-        for slot_num in to_regenerate:
+            for slot in targets:
+                to_regenerate.add(slot)
+                if edit.get("edit_prompt"):
+                    edit_prompts[slot] = edit["edit_prompt"]
+
+        for slot_num, new_content in text_edits.items():
+            if slot_num not in result_map:
+                continue
+            result_map[slot_num] = await self.edit_question_text(
+                question=result_map[slot_num],
+                new_content=new_content,
+            )
+
+        for slot_num in sorted(to_regenerate):
             if slot_num not in question_map:
                 continue
 
             original = question_map[slot_num]
 
-            # Retrieve fresh context for this question
-            query = f"chapter {original.bloom_level} {original.question_type}"
+            query = f"{original.content}\n\n{original.bloom_level} {original.question_type}"
             context = await self.retrieval.retrieve_for_single_question(
                 query=query,
                 textbook_id=textbook_id,
-                chapter=0,  # use original context
+                chapter=chapter_hint,
             )
 
-            # Regenerate with optional edit prompt
             new_question = await self.generator.regenerate_single(
                 original_question=original,
                 context=context,
                 constraints=constraints,
                 edit_prompt=edit_prompts.get(slot_num, ""),
             )
+            result_map[slot_num] = new_question
 
-            # Replace in result list
-            for i, q in enumerate(result):
-                if q.slot_number == slot_num:
-                    result[i] = new_question
-                    break
-
-        return result
+        return [result_map[q.slot_number] for q in existing_questions]
 
     async def edit_question_text(
         self,
