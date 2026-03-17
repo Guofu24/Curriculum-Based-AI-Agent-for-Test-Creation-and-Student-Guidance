@@ -35,19 +35,56 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Load user on mount if token exists
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token) {
-      setLoading(false);
-      return;
-    }
-    authApi
-      .me()
-      .then(setUser)
-      .catch(() => {
+    let cancelled = false;
+
+    async function bootstrapAuth() {
+      const token = localStorage.getItem("token");
+      const refreshToken = localStorage.getItem("refresh_token");
+
+      if (!token && !refreshToken) {
+        setLoading(false);
+        return;
+      }
+
+      const clearStoredSession = () => {
         localStorage.removeItem("token");
         localStorage.removeItem("refresh_token");
-      })
-      .finally(() => setLoading(false));
+        if (!cancelled) setUser(null);
+      };
+
+      try {
+        if (!token && refreshToken) {
+          const refreshed = await authApi.refreshToken(refreshToken);
+          localStorage.setItem("token", refreshed.access_token);
+        }
+
+        const me = await authApi.me();
+        if (!cancelled) setUser(me);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401 && refreshToken) {
+          try {
+            const refreshed = await authApi.refreshToken(refreshToken);
+            localStorage.setItem("token", refreshed.access_token);
+            const me = await authApi.me();
+            if (!cancelled) setUser(me);
+            return;
+          } catch {
+            clearStoredSession();
+            return;
+          }
+        }
+
+        clearStoredSession();
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    void bootstrapAuth();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Redirect to login if not authenticated and on a protected route

@@ -31,7 +31,11 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[UserRole] = mapped_column(
-        SAEnum(UserRole, native_enum=False),
+        SAEnum(
+            UserRole,
+            native_enum=False,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
         default=UserRole.LECTURER,
         nullable=False,
     )
