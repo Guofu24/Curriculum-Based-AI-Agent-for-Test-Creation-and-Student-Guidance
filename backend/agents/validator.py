@@ -122,6 +122,10 @@ class ValidatorAgent:
             quality = self._compute_quality(question, all_q_issues)
 
             question.is_validated = quality >= self.QUALITY_THRESHOLD
+            question.warnings = list(all_q_issues)
+            question.verification_status = (
+                "passed" if question.is_validated else "failed"
+            )
             question.validation_notes = json.dumps({
                 "basic_rule_pass": basic_rule_pass,
                 "grounding_pass": grounding_pass,
@@ -130,6 +134,8 @@ class ValidatorAgent:
                     if grounding_report else None
                 ),
                 "validation_errors": all_q_issues,
+                "warnings": all_q_issues,
+                "verification_status": question.verification_status,
                 "overall_quality": round(quality, 3),
                 "method": "rule-based+grounding-v2",
             }, ensure_ascii=False)
@@ -192,6 +198,9 @@ class ValidatorAgent:
                         f"correct_answer '{question.correct_answer}' "
                         f"not in option labels {labels}"
                     )
+        elif question.question_type == "essay":
+            if not question.rubric and (not question.explanation or len(question.explanation.strip()) < 10):
+                issues.append("Essay question should include rubric guidance or grading notes")
 
         return issues
 

@@ -89,6 +89,8 @@ class RetrievalAgent:
 
         return RetrievedContext(
             slot_number=slot.slot_number,
+            query=query,
+            scope_tags=list(getattr(slot, "scope_tags", []) or []),
             chunks=[
                 {
                     "id": r.get("id", ""),
@@ -103,6 +105,9 @@ class RetrievalAgent:
 
     def _build_query(self, slot: QuestionSlot) -> str:
         """Build a search query from the question slot specifications."""
+        preferred_query = getattr(slot, "preferred_query", "")
+        if preferred_query:
+            return preferred_query
         parts = []
         if slot.target_topics:
             parts.append(" ".join(slot.target_topics))
@@ -282,11 +287,23 @@ class RetrievalAgent:
         self,
         query: str,
         textbook_id: str,
-        chapter: int,
+        chapter: int = 0,
+        chapters: list[int] | None = None,
+        scope_tags: list[str] | None = None,
         top_k: int = 5,
     ) -> RetrievedContext:
         """Retrieve context for a single question (used during partial regeneration)."""
-        chapter_scope = [chapter] if isinstance(chapter, int) and chapter > 0 else []
+        chapter_scope = []
+        if chapters:
+            chapter_scope = [
+                int(ch)
+                for ch in chapters
+                if isinstance(ch, int) and int(ch) > 0
+            ]
+        elif isinstance(chapter, int) and chapter > 0:
+            chapter_scope = [chapter]
+        elif scope_tags:
+            chapter_scope = self._scope_tags_to_chapters(scope_tags)
         fetch_k = top_k if not chapter_scope else max(top_k, top_k * self.MAX_VECTOR_EXPANSION)
 
         vector_results = await self.vector_store.asimilarity_search_with_score(
@@ -327,6 +344,8 @@ class RetrievalAgent:
 
         return RetrievedContext(
             slot_number=0,
+            query=query,
+            scope_tags=list(scope_tags or []),
             chunks=chunks,
             combined_text="\n\n---\n\n".join(c["text"] for c in chunks),
         )
@@ -355,6 +374,18 @@ class RetrievalAgent:
             return True
         chapter_number = self._extract_chapter_number_from_metadata(metadata)
         return chapter_number in set(chapters)
+
+    def _scope_tags_to_chapters(self, scope_tags: list[str]) -> list[int]:
+        chapters: list[int] = []
+        for tag in scope_tags:
+            if not isinstance(tag, str) or not tag.startswith("chapter:"):
+                continue
+            _, _, raw_number = tag.partition(":")
+            if raw_number.isdigit():
+                chapter_number = int(raw_number)
+                if chapter_number > 0 and chapter_number not in chapters:
+                    chapters.append(chapter_number)
+        return chapters
 
     def _extract_chapter_number_from_metadata(self, metadata: dict) -> int | None:
         if not isinstance(metadata, dict):

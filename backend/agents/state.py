@@ -1,179 +1,208 @@
 """
-Shared state definitions for the LangGraph multi-agent system.
+Shared orchestration state and exam-generation domain dataclasses.
 
-The AgentState flows through the graph, accumulating results from each agent.
-Each agent reads what it needs and writes its outputs to the state.
+These structures intentionally model the spec-first workflow:
+- request normalization into an ExamSpec
+- blueprint cells before generation
+- slot-level retrieval and provenance
+- auditable question metadata for review/edit/versioning
 """
-from typing import TypedDict, Optional, Annotated, Any
+from __future__ import annotations
+
 from dataclasses import dataclass, field
+from typing import Any, TypedDict
 
 
-# --- Blueprint structures ---
+@dataclass
+class ScopeUnit:
+    scope_id: str
+    scope_type: str = "chapter"
+    title: str = ""
+    chapter_number: int = 0
+    page_from: int | None = None
+    page_to: int | None = None
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ExamSpec:
+    exam_type: str
+    total_questions: int
+    time_limit_minutes: int | None = None
+    output_language: str = "vi"
+    instructions: str = ""
+    strict_scope_flag: bool = True
+    selected_scope: list[ScopeUnit] = field(default_factory=list)
+    bloom_distribution: dict[str, int] = field(default_factory=dict)
+    question_mix: dict[str, int] = field(default_factory=dict)
+    formatting_preferences: dict[str, Any] = field(default_factory=dict)
+    source_prompt: str = ""
+
+
+@dataclass
+class BlueprintCell:
+    cell_id: str
+    scope_unit: ScopeUnit
+    question_type: str
+    bloom_level: str
+    target_count: int
+    generated_count: int = 0
+    priority: int = 0
+    overgenerate_count: int = 0
+
 
 @dataclass
 class QuestionSlot:
-    """A planned slot in the exam blueprint."""
     slot_number: int
-    question_type: str  # mcq, essay
-    bloom_level: str  # remember, understand, apply, analyze, evaluate, create
-    difficulty_score: float  # 0.0 to 1.0
-    target_chapter: int
+    question_type: str
+    bloom_level: str
+    difficulty_score: float
+    target_chapter: int = 0
     target_topics: list[str] = field(default_factory=list)
-    chunk_mode: str = "single"  # "single" (easy) or "multi" (medium/hard)
+    blueprint_cell_key: str = ""
+    scope_tags: list[str] = field(default_factory=list)
+    chunk_mode: str = "single"
+    preferred_query: str = ""
 
 
 @dataclass
 class ExamBlueprint:
-    """The structural plan for an exam, created by the BlueprintAgent."""
     title: str
+    exam_spec: ExamSpec
     total_questions: int
+    cells: list[BlueprintCell] = field(default_factory=list)
     slots: list[QuestionSlot] = field(default_factory=list)
-    difficulty_distribution: dict = field(default_factory=dict)
-    bloom_distribution: dict = field(default_factory=dict)
+    difficulty_distribution: dict[str, int] = field(default_factory=dict)
+    bloom_distribution: dict[str, int] = field(default_factory=dict)
 
 
-# --- Generated question structure ---
+@dataclass
+class RetrievedContext:
+    slot_number: int
+    chunks: list[dict] = field(default_factory=list)
+    combined_text: str = ""
+    query: str = ""
+    scope_tags: list[str] = field(default_factory=list)
+
 
 @dataclass
 class GeneratedQuestion:
-    """A fully generated exam question."""
     slot_number: int
     question_type: str
     bloom_level: str
     difficulty_score: float
     content: str
-    options: Optional[list[dict]] = None  # MCQ: [{label, text}, ...]
-    correct_answer: str = ""
+    correct_answer: str
+    blueprint_cell_key: str = ""
+    options: list[dict] | None = None
+    rubric: dict[str, Any] | None = None
     explanation: str = ""
-    source_chunks: list[str] = field(default_factory=list)  # chunk IDs for citation
-    source_texts: list[str] = field(default_factory=list)  # actual source texts
+    source_chunks: list[str] = field(default_factory=list)
+    source_texts: list[str] = field(default_factory=list)
+    source_evidence: list[dict] = field(default_factory=list)
+    scope_tags: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    verification_status: str = "pending"
+    is_human_edited: bool = False
+    is_locked: bool = False
     is_validated: bool = False
     validation_notes: str = ""
 
 
-# --- Retrieval context ---
-
-@dataclass
-class RetrievedContext:
-    """Context retrieved from the textbook for a specific question slot."""
-    slot_number: int
-    chunks: list[dict] = field(default_factory=list)  # {id, text, metadata, score}
-    combined_text: str = ""
-
-
-# --- Chunk assignment for micro-prompting ---
-
 @dataclass
 class ChunkAssignment:
-    """Maps a single chunk to its question generation assignments.
-    Used by micro-prompting: each chunk generates 1-2 questions.
-    For multi-chunk mode (medium/hard): context_chunks carries additional
-    source chunks for cross-chunk synthesis questions."""
     chunk_id: str
     chunk_text: str
-    chapter: int  # 0 = no chapter
-    assignments: list[dict] = field(default_factory=list)  # [{difficulty, bloom_level, question_type, slot_number}]
-    context_chunks: list[dict] = field(default_factory=list)  # [{chunk_id, chunk_text}] extra chunks for multi-chunk mode
+    chapter: int = 0
+    assignments: list[dict] = field(default_factory=list)
+    context_chunks: list[dict] = field(default_factory=list)
     chunk_mode: str = "single"
-    bundle_strategy: str = "single"  # single, local_multi, semantic_multi
-    supporting_chunks: list[dict] = field(default_factory=list)  # richer alias for context_chunks
+    bundle_strategy: str = "single"
+    supporting_chunks: list[dict] = field(default_factory=list)
     bundle_score: float = 0.0
     assignment_reason: str = ""
-    evidence_roles: dict[str, str] = field(default_factory=dict)  # chunk_id -> primary/support/example/contrast
+    evidence_roles: dict[str, str] = field(default_factory=dict)
     estimated_context_tokens: int = 0
-    reuse_count: int = 0
-    bundle_validation_report: dict = field(default_factory=dict)
+    bundle_validation_report: dict[str, Any] = field(default_factory=dict)
+    source_chunks: list[str] = field(default_factory=list)
+    primary_chunk: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.primary_chunk is None:
+            self.primary_chunk = {
+                "chunk_id": self.chunk_id,
+                "chunk_text": self.chunk_text,
+            }
+        if not self.supporting_chunks and self.context_chunks:
+            self.supporting_chunks = list(self.context_chunks)
+        if not self.source_chunks:
+            self.source_chunks = self.get_source_chunk_ids()
 
     def get_supporting_chunks(self) -> list[dict]:
-        """Return supporting chunks with backward compatibility."""
-        return self.supporting_chunks or self.context_chunks
+        return list(self.supporting_chunks or self.context_chunks or [])
 
     def get_source_chunk_ids(self) -> list[str]:
-        """Return ordered source chunk ids used by this assignment."""
-        ids = [self.chunk_id]
+        chunk_ids: list[str] = []
+        primary_id = (self.primary_chunk or {}).get("chunk_id") or self.chunk_id
+        if primary_id:
+            chunk_ids.append(primary_id)
         for chunk in self.get_supporting_chunks():
             chunk_id = chunk.get("chunk_id")
-            if chunk_id and chunk_id not in ids:
-                ids.append(chunk_id)
-        return ids
+            if chunk_id and chunk_id not in chunk_ids:
+                chunk_ids.append(chunk_id)
+        return chunk_ids
 
 
-# --- LangGraph Agent State ---
-
-class AgentState(TypedDict):
-    """
-    The shared state that flows through the LangGraph workflow.
-
-    Each agent reads its needed inputs and appends its outputs.
-    """
-    # --- Input (from user request) ---
+class AgentState(TypedDict, total=False):
     user_id: str
     textbook_id: str
     chapters: list[int]
     prompt: str
-    exam_type: str  # mcq, essay, mixed
+    exam_type: str
     difficulty: str
-    question_distribution: dict  # {mcq: {easy, medium, hard}, essay: {...}}
+    question_distribution: dict[str, Any]
     num_variants: int
     gradually_increasing: bool
-    constraints: dict  # {strict_grounding, allow_applied, creativity_level, bloom_levels, ...}
-
-    # --- Document Processor output ---
-    textbook_metadata: dict  # {title, chapters: [...], total_chunks}
-    processing_status: str  # ready, processing, error
-
-    # --- Blueprint Agent output ---
-    blueprint: Optional[ExamBlueprint]
-
-    # --- Retrieval Agent output ---
+    constraints: dict[str, Any]
+    textbook_metadata: dict[str, Any]
+    processing_status: str
+    exam_spec: ExamSpec | None
+    blueprint: ExamBlueprint | None
     retrieved_contexts: list[RetrievedContext]
-
-    # --- Question Generator output ---
     generated_questions: list[GeneratedQuestion]
-
-    # --- Validator Agent output ---
     validated_questions: list[GeneratedQuestion]
-    validation_summary: dict  # {total, passed, failed, hallucination_flags}
-
-    # --- Current step tracking ---
-    current_step: str  # parsing, retrieving, generating, validating, finalizing
-    step_progress: float  # 0.0 to 1.0
-    error: Optional[str]
-
-    # --- Micro-prompting (chunk-level question generation) ---
-    chunk_assignments: list[ChunkAssignment]
-    chunk_assignment_payloads: list[dict]  # serialized assignment metadata across nodes
-    question_chunk_metadata: list[dict]    # per-question chunk/bundle trace after generation
-    original_quota: dict  # {easy: N, medium: N, hard: N} — original target before over-generation
-
-    # --- QualityJudge output ---
+    validation_summary: dict[str, Any]
     judged_questions: list[GeneratedQuestion]
-    quality_scores: list[dict]           # per-question rubric scores
-    grounding_reports: list[dict]        # per-question grounding analysis
-
-    # --- DedupFilter output ---
-    duplicate_groups: list[dict]         # [{representative_slot, member_slots, max_similarity}]
-
-    # --- Final output (after all filtering) ---
+    quality_scores: list[dict[str, Any]]
+    grounding_reports: list[dict[str, Any]]
+    duplicate_groups: list[dict[str, Any]]
     final_questions: list[GeneratedQuestion]
-
-    # --- Partial regeneration (Reviewer) ---
-    edit_requests: Optional[list[dict]]  # [{question_ids, prompt, range_start, range_end}]
+    current_step: str
+    step_progress: float
+    error: str | None
+    chunk_assignments: list[ChunkAssignment]
+    chunk_assignment_payloads: list[dict[str, Any]]
+    question_chunk_metadata: list[dict[str, Any]]
+    original_quota: dict[str, int]
+    edit_requests: list[dict[str, Any]] | None
     is_partial_edit: bool
-    edit_impact_level: Optional[str]     # cosmetic, moderate, strong
-    refreshed_contexts: list[RetrievedContext]  # contexts from retrieval refresh (strong edits)
-
-    # --- Provider logging ---
-    provider_logs: list[dict]            # [{provider, latency, retries, success, error}]
-
-    # --- Agent instances (injected at graph entry, not serialized to DB) ---
-    _retrieval_agent: Optional[Any]
-    _blueprint_agent: Optional[Any]
-    _question_generator: Optional[Any]
-    _validator: Optional[Any]
-    _reviewer: Optional[Any]
-    _pruning_agent: Optional[Any]
-    _quality_judge: Optional[Any]
-    _dedup_filter: Optional[Any]
-    _db_session: Optional[Any]
-    _retry_attempted: Optional[bool]
+    edit_impact_level: str | None
+    refreshed_contexts: list[RetrievedContext]
+    provider_logs: list[dict[str, Any]]
+    scope: list[dict[str, Any]]
+    time_limit_minutes: int | None
+    output_language: str
+    instructions: str
+    bloom_distribution: dict[str, int]
+    formatting_preferences: dict[str, Any]
+    strict_scope: bool
+    _retrieval_agent: Any
+    _blueprint_agent: Any
+    _question_generator: Any
+    _validator: Any
+    _reviewer: Any
+    _pruning_agent: Any
+    _quality_judge: Any
+    _dedup_filter: Any
+    _db_session: Any
+    _retry_attempted: bool

@@ -1,20 +1,21 @@
-"use client"
+"use client";
 
-import { useState, useEffect } from "react"
-import { useParams } from "next/navigation"
-import { DashboardHeader } from "@/components/dashboard-header"
-import { Card, CardContent } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Textarea } from "@/components/ui/textarea"
-import { Label } from "@/components/ui/label"
+import { useEffect, useMemo, useState } from "react";
+import { useParams } from "next/navigation";
+import { DashboardHeader } from "@/components/dashboard-header";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
+} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -22,152 +23,204 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog"
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+} from "@/components/ui/dropdown-menu";
 import {
-  RefreshCw,
-  Download,
-  Save,
-  Send,
-  Pencil,
-  MoreVertical,
-  Lock,
-  Unlock,
-  Sparkles,
-  FileText,
-  ChevronDown,
-  ChevronUp,
-  Check,
-  Loader2,
-  ShieldCheck,
-  Activity,
   AlertTriangle,
+  Check,
   Eye,
-  Clock,
-  Zap,
-} from "lucide-react"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
-import { Progress } from "@/components/ui/progress"
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+  FileCheck,
+  FileText,
+  Layers,
+  Loader2,
+  Lock,
+  MoreVertical,
+  Pencil,
+  RefreshCw,
+  Send,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  Unlock,
+} from "lucide-react";
 import {
   exams as examsApi,
   generation as generationApi,
   type Exam,
-  type Question as ApiQuestion,
-  type QualityScoreDetail,
-  type GroundingReportDetail,
-  type ProviderLog,
-  type DuplicateGroup,
-} from "@/lib/api"
+  type Question,
+} from "@/lib/api";
+
+type EditState = {
+  questionId: string;
+  content: string;
+  correctAnswer: string;
+  bloomLevel: string;
+};
+
+type RegenerateState = {
+  type: "single" | "from";
+  questionId: string;
+  questionNumber: number;
+} | null;
+
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function useActiveVersion(exam: Exam | null, selectedVersionId: string) {
+  return useMemo(() => {
+    if (!exam) return null;
+    if (selectedVersionId && exam.versions?.length) {
+      return exam.versions.find((version) => version.id === selectedVersionId) || exam.current_version || null;
+    }
+    return exam.current_version || exam.versions?.[exam.versions.length - 1] || null;
+  }, [exam, selectedVersionId]);
+}
 
 export default function ExamReviewPage() {
-  const params = useParams()
-  const examId = params.id as string
-  const [exam, setExam] = useState<Exam | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [editContent, setEditContent] = useState("")
-  const [regenerateModal, setRegenerateModal] = useState<{
-    type: "single" | "from"
-    questionId: string
-    questionNumber: number
-  } | null>(null)
-  const [regeneratePrompt, setRegeneratePrompt] = useState("")
-  const [regenerateFrom, setRegenerateFrom] = useState<string>("current")
-  const [isRegenerating, setIsRegenerating] = useState(false)
-  const [isSavingDraft, setIsSavingDraft] = useState(false)
-  const [savingQuestionId, setSavingQuestionId] = useState<string | null>(null)
+  const params = useParams();
+  const examId = params.id as string;
+  const [exam, setExam] = useState<Exam | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [selectedVersionId, setSelectedVersionId] = useState("");
+  const [editState, setEditState] = useState<EditState | null>(null);
+  const [regenerateState, setRegenerateState] = useState<RegenerateState>(null);
+  const [regeneratePrompt, setRegeneratePrompt] = useState("");
+  const [savingQuestionId, setSavingQuestionId] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!examId) return
-    examsApi.get(examId)
-      .then(setExam)
-      .catch(() => {})
-      .finally(() => setLoading(false))
-  }, [examId])
-
-  const questions = exam?.questions ?? []
-  const mcqQuestions = questions.filter((q) => q.question_type === "mcq")
-  const essayQuestions = questions.filter((q) => q.question_type === "essay")
-
-  const startEdit = (question: ApiQuestion) => {
-    setEditingId(question.id)
-    setEditContent(question.content)
-  }
-
-  const saveEdit = async () => {
-    if (editingId === null || !exam) return
-    setSavingQuestionId(editingId)
-    try {
-      const result = await generationApi.partialRegenerate({
-        exam_id: exam.id,
-        edits: [
-          {
-            question_ids: [editingId],
-            edit_type: "edit_text",
-            new_content: editContent,
-          },
-        ],
+    if (!examId) return;
+    examsApi
+      .get(examId)
+      .then((result) => {
+        setExam(result);
+        setSelectedVersionId(result.current_version?.id || result.versions?.[result.versions.length - 1]?.id || "");
       })
-      setExam(result)
-      setEditingId(null)
-      setEditContent("")
-    } catch {
-      // silently fail
-    } finally {
-      setSavingQuestionId(null)
-    }
-  }
+      .catch((loadError: unknown) => {
+        setError(loadError instanceof Error ? loadError.message : "Failed to load exam");
+      })
+      .finally(() => setLoading(false));
+  }, [examId]);
 
-  const cancelEdit = () => {
-    setEditingId(null)
-    setEditContent("")
-  }
+  const activeVersion = useActiveVersion(exam, selectedVersionId);
+  const questions = activeVersion?.questions || exam?.questions || [];
+
+  const applyAndRefresh = async (action: () => Promise<Exam>, questionId?: string) => {
+    setError("");
+    if (questionId) setSavingQuestionId(questionId);
+    try {
+      const updated = await action();
+      setExam(updated);
+      setSelectedVersionId(updated.current_version?.id || updated.versions?.[updated.versions.length - 1]?.id || "");
+      setEditState(null);
+      setRegenerateState(null);
+      setRegeneratePrompt("");
+    } catch (actionError: unknown) {
+      setError(actionError instanceof Error ? actionError.message : "Action failed");
+    } finally {
+      if (questionId) setSavingQuestionId(null);
+    }
+  };
+
+  const handleSaveEdit = async () => {
+    if (!exam || !editState) return;
+    await applyAndRefresh(
+      () =>
+        generationApi.partialRegenerate({
+          exam_id: exam.id,
+          edits: [
+            {
+              question_ids: [editState.questionId],
+              edit_type: "edit_text",
+              new_content: editState.content,
+            },
+            {
+              question_ids: [editState.questionId],
+              edit_type: "edit_answer",
+              new_correct_answer: editState.correctAnswer,
+            },
+            {
+              question_ids: [editState.questionId],
+              edit_type: "edit_bloom",
+              new_bloom_level: editState.bloomLevel,
+            },
+          ],
+        }),
+      editState.questionId,
+    );
+  };
+
+  const handleQuestionAction = async (question: Question, action: "lock" | "unlock" | "delete") => {
+    if (!exam) return;
+    await applyAndRefresh(
+      () =>
+        generationApi.partialRegenerate({
+          exam_id: exam.id,
+          edits: [
+            {
+              question_ids: [question.id],
+              edit_type: action,
+            },
+          ],
+        }),
+      question.id,
+    );
+  };
 
   const handleRegenerate = async () => {
-    if (!regenerateModal || !exam) return
-    setIsRegenerating(true)
+    if (!exam || !regenerateState) return;
+    await applyAndRefresh(
+      () =>
+        generationApi.partialRegenerate({
+          exam_id: exam.id,
+          edits: [
+            regenerateState.type === "single"
+              ? {
+                  question_ids: [regenerateState.questionId],
+                  edit_type: "regenerate",
+                  edit_prompt: regeneratePrompt || undefined,
+                }
+              : {
+                  question_ids: [],
+                  range_start: regenerateState.questionNumber,
+                  range_end: questions.length,
+                  edit_type: "regenerate",
+                  edit_prompt: regeneratePrompt || undefined,
+                },
+          ],
+        }),
+      regenerateState.questionId,
+    );
+  };
+
+  const handlePublish = async () => {
+    if (!exam) return;
+    setPublishing(true);
+    setError("");
     try {
-      const regenerateFromCurrent =
-        regenerateModal.type === "from" && regenerateFrom === "current"
-
-      const result = await generationApi.partialRegenerate({
-        exam_id: exam.id,
-        edits: [
-          {
-            question_ids: regenerateFromCurrent ? [] : [regenerateModal.questionId],
-            range_start: regenerateFromCurrent ? regenerateModal.questionNumber : undefined,
-            range_end: regenerateFromCurrent ? questions.length : undefined,
-            edit_prompt: regeneratePrompt || undefined,
-            edit_type: "regenerate",
-          },
-        ],
-      })
-      setExam(result)
-    } catch {
-      // silently fail
+      const updated = await examsApi.publish(exam.id);
+      setExam(updated);
+      setSelectedVersionId(updated.current_version?.id || updated.versions?.[updated.versions.length - 1]?.id || "");
+    } catch (publishError: unknown) {
+      setError(publishError instanceof Error ? publishError.message : "Publish failed");
     } finally {
-      setIsRegenerating(false)
-      setRegenerateModal(null)
-      setRegeneratePrompt("")
+      setPublishing(false);
     }
-  }
-
-  const handleSave = () => {
-    setIsSavingDraft(true)
-    setTimeout(() => setIsSavingDraft(false), 1500)
-  }
+  };
 
   if (loading) {
     return (
@@ -177,7 +230,7 @@ export default function ExamReviewPage() {
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
       </>
-    )
+    );
   }
 
   if (!exam) {
@@ -188,600 +241,464 @@ export default function ExamReviewPage() {
           <p className="text-muted-foreground">Exam not found</p>
         </div>
       </>
-    )
+    );
   }
 
   return (
     <>
       <DashboardHeader title="Exam Review" />
-      <div className="flex flex-1 flex-col gap-6 p-6 max-w-4xl">
-        {/* Page Header */}
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <h2 className="text-2xl font-semibold tracking-tight text-foreground">
-              {exam.title}
-            </h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {exam.total_questions} questions - {exam.chapters.length > 0 ? `Chapters ${exam.chapters.join(", ")}` : "All chapters"} - {new Date(exam.created_at).toLocaleDateString()}
-            </p>
+      <div className="flex flex-1 flex-col gap-6 p-6 max-w-6xl">
+        {error && (
+          <div className="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {error}
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm">
-                  <Download className="mr-2 h-3.5 w-3.5" />
-                  Export
-                  <ChevronDown className="ml-1 h-3 w-3" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem>
-                  <FileText className="mr-2 h-4 w-4" />
-                  Export as PDF
-                </DropdownMenuItem>
-                <DropdownMenuItem>
-                  <FileText className="mr-2 h-4 w-4" />
-                  Export as DOCX
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <Button variant="outline" size="sm" onClick={handleSave} disabled={isSavingDraft}>
-              {isSavingDraft ? (
-                <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+        )}
+
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-2xl font-semibold tracking-tight text-foreground">{exam.title}</h2>
+              <Badge variant="secondary" className="capitalize">
+                {exam.status}
+              </Badge>
+              {exam.published_at && <Badge>Published</Badge>}
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {exam.total_questions} questions · created {formatDate(exam.created_at)}
+              {exam.updated_at ? ` · updated ${formatDate(exam.updated_at)}` : ""}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="outline" className="capitalize">
+                {exam.exam_type}
+              </Badge>
+              <Badge variant="outline" className="capitalize">
+                {exam.difficulty.replaceAll("_", " ")}
+              </Badge>
+              <Badge variant="outline">
+                {exam.strict_scope_flag ? "Strict scope" : "Flexible scope"}
+              </Badge>
+              <Badge variant="outline">
+                {exam.output_language.toUpperCase()}
+              </Badge>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            {(exam.versions?.length || 0) > 0 && (
+              <div className="min-w-52">
+                <Select value={selectedVersionId} onValueChange={setSelectedVersionId}>
+                  <SelectTrigger className="h-10">
+                    <SelectValue placeholder="Choose version" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(exam.versions || []).map((version) => (
+                      <SelectItem key={version.id} value={version.id}>
+                        Version {version.version_number} · {version.status}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            <Button onClick={handlePublish} disabled={publishing || !!exam.published_at}>
+              {publishing ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (
-                <Save className="mr-2 h-3.5 w-3.5" />
+                <Send className="mr-2 h-4 w-4" />
               )}
-              {isSavingDraft ? "Saving..." : "Save"}
-            </Button>
-            <Button size="sm">
-              <Send className="mr-2 h-3.5 w-3.5" />
-              Publish
+              {exam.published_at ? "Published" : "Publish exam"}
             </Button>
           </div>
         </div>
 
-        {/* Regenerate Entire Exam */}
-        <Card className="rounded-2xl shadow-sm border-dashed">
-          <CardContent className="flex items-center justify-between py-4 px-5">
-            <div className="flex items-center gap-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-                <RefreshCw className="h-4 w-4 text-primary" />
-              </div>
-              <div>
-                <p className="text-sm font-medium text-foreground">Not satisfied?</p>
-                <p className="text-xs text-muted-foreground">Regenerate the entire exam with new questions</p>
-              </div>
-            </div>
-            <Button variant="outline" size="sm">
-              <RefreshCw className="mr-2 h-3.5 w-3.5" />
-              Regenerate All
-            </Button>
-          </CardContent>
-        </Card>
+        <div className="grid gap-4 md:grid-cols-4">
+          <SummaryCard
+            title="Active version"
+            value={activeVersion ? `v${activeVersion.version_number}` : "N/A"}
+            note={activeVersion?.change_summary || "Current working version"}
+            icon={Layers}
+          />
+          <SummaryCard
+            title="Blueprint cells"
+            value={String(Array.isArray(exam.blueprint?.cells) ? exam.blueprint.cells.length : 0)}
+            note="Planned scope/question allocations"
+            icon={FileText}
+          />
+          <SummaryCard
+            title="Warnings"
+            value={String(questions.reduce((sum, question) => sum + (question.warnings?.length || 0), 0))}
+            note="Question-level verification warnings"
+            icon={AlertTriangle}
+          />
+          <SummaryCard
+            title="Validated"
+            value={`${questions.filter((question) => question.is_validated).length}/${questions.length}`}
+            note="Questions that passed validation"
+            icon={ShieldCheck}
+          />
+        </div>
 
-        {/* Quality & Analysis Summary */}
-        <ExamQualitySummary exam={exam} />
-
-        {/* Section A: Multiple Choice */}
-        {mcqQuestions.length > 0 && (
-          <div className="flex flex-col gap-4">
-            <div className="flex items-center gap-2">
-              <Badge className="bg-primary text-primary-foreground">Section A</Badge>
-              <span className="text-sm font-medium text-foreground">Multiple Choice</span>
-              <span className="text-xs text-muted-foreground">({mcqQuestions.length} questions)</span>
-            </div>
-            {mcqQuestions.map((question, index) => (
-              <QuestionCard
-                key={question.id}
-                question={question}
-                index={index + 1}
-                isEditing={editingId === question.id}
-                editContent={editContent}
-                onEditContent={setEditContent}
-                onStartEdit={() => startEdit(question)}
-                onSaveEdit={saveEdit}
-                onCancelEdit={cancelEdit}
-                isSaving={savingQuestionId === question.id}
-                onRegenerate={(type) =>
-                  setRegenerateModal({
-                    type,
-                    questionId: question.id,
-                    questionNumber: question.question_number,
-                  })
-                }
-              />
-            ))}
-          </div>
+        {exam.selected_scope && exam.selected_scope.length > 0 && (
+          <Card className="rounded-2xl shadow-sm">
+            <CardHeader className="pb-4">
+              <CardTitle className="text-base">Selected Scope</CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-2">
+              {exam.selected_scope.map((scope, index) => (
+                <Badge key={`${scope.scope_id || scope.title || index}`} variant="outline">
+                  {String(scope.title || scope.scope_id || `Scope ${index + 1}`)}
+                </Badge>
+              ))}
+            </CardContent>
+          </Card>
         )}
 
-        {/* Section B: Essay */}
-        {essayQuestions.length > 0 && (
-          <div className="flex flex-col gap-4">
-            <div className="flex items-center gap-2">
-              <Badge className="bg-primary text-primary-foreground">Section B</Badge>
-              <span className="text-sm font-medium text-foreground">Essay</span>
-              <span className="text-xs text-muted-foreground">({essayQuestions.length} questions)</span>
-            </div>
-            {essayQuestions.map((question, index) => (
-              <QuestionCard
-                key={question.id}
-                question={question}
-                index={mcqQuestions.length + index + 1}
-                isEditing={editingId === question.id}
-                editContent={editContent}
-                onEditContent={setEditContent}
-                onStartEdit={() => startEdit(question)}
-                onSaveEdit={saveEdit}
-                onCancelEdit={cancelEdit}
-                isSaving={savingQuestionId === question.id}
-                onRegenerate={(type) =>
-                  setRegenerateModal({
-                    type,
-                    questionId: question.id,
-                    questionNumber: question.question_number,
-                  })
-                }
-              />
-            ))}
-          </div>
-        )}
+        <div className="space-y-4">
+          {questions.map((question) => (
+            <QuestionCard
+              key={question.id}
+              question={question}
+              isEditing={editState?.questionId === question.id}
+              saving={savingQuestionId === question.id}
+              editState={editState}
+              onStartEdit={() =>
+                setEditState({
+                  questionId: question.id,
+                  content: question.content,
+                  correctAnswer: question.correct_answer,
+                  bloomLevel: question.bloom_level,
+                })
+              }
+              onEditChange={(next) => setEditState((current) => (current ? { ...current, ...next } : current))}
+              onCancelEdit={() => setEditState(null)}
+              onSaveEdit={() => void handleSaveEdit()}
+              onRegenerate={(type) =>
+                setRegenerateState({
+                  type,
+                  questionId: question.id,
+                  questionNumber: question.question_number,
+                })
+              }
+              onLockToggle={() => void handleQuestionAction(question, question.is_locked ? "unlock" : "lock")}
+              onDelete={() => void handleQuestionAction(question, "delete")}
+            />
+          ))}
+        </div>
 
-        {/* Regenerate Modal */}
-        <Dialog
-          open={!!regenerateModal}
-          onOpenChange={() => {
-            setRegenerateModal(null)
-            setRegeneratePrompt("")
-            setRegenerateFrom("current")
-          }}
-        >
-          <DialogContent className="sm:max-w-md">
+        <Dialog open={!!regenerateState} onOpenChange={() => setRegenerateState(null)}>
+          <DialogContent className="sm:max-w-lg">
             <DialogHeader>
               <DialogTitle>
-                {regenerateModal?.type === "single"
-                  ? `Modify Question ${regenerateModal?.questionNumber}`
-                  : `Regenerate from Question ${regenerateModal?.questionNumber}`}
+                {regenerateState?.type === "single"
+                  ? `Regenerate question ${regenerateState.questionNumber}`
+                  : `Regenerate from question ${regenerateState?.questionNumber}`}
               </DialogTitle>
               <DialogDescription>
-                {regenerateModal?.type === "single"
-                  ? "Enter instructions to modify this specific question. All other questions remain unchanged."
-                  : "Regenerate this question and all subsequent questions. Previous questions remain locked."}
+                The backend will keep existing constraints, preserve scope, and create a new exam version after regeneration.
               </DialogDescription>
             </DialogHeader>
-            <div className="flex flex-col gap-4 py-2">
-              {regenerateModal?.type === "from" && (
-                <div className="flex flex-col gap-2">
-                  <Label className="text-sm font-medium">Regenerate scope</Label>
-                  <Select value={regenerateFrom} onValueChange={setRegenerateFrom}>
-                    <SelectTrigger className="h-10">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="current">From this question onward</SelectItem>
-                      <SelectItem value="only">Only this question</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
-              <div className="flex flex-col gap-2">
-                <Label className="text-sm font-medium">Correction prompt</Label>
-                <Textarea
-                  placeholder="e.g., Make this question more applied, increase difficulty, focus on practical scenarios..."
-                  className="min-h-24 resize-none"
-                  value={regeneratePrompt}
-                  onChange={(e) => setRegeneratePrompt(e.target.value)}
-                />
-              </div>
-              <div className="rounded-lg bg-muted/50 p-3 flex items-start gap-2">
-                <Lock className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
-                <p className="text-xs text-muted-foreground">
-                  {regenerateModal?.type === "single"
-                    ? "Only this question will be modified. All other questions remain locked and unchanged."
-                    : "Questions before this one will remain locked and unchanged."}
-                </p>
-              </div>
+            <div className="space-y-3 py-2">
+              <Label>Optional correction prompt</Label>
+              <Textarea
+                value={regeneratePrompt}
+                onChange={(event) => setRegeneratePrompt(event.target.value)}
+                placeholder="Example: Make this question more applied, shorten the wording, and keep it in the same scope."
+                className="min-h-28"
+              />
             </div>
             <DialogFooter>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setRegenerateModal(null)
-                  setRegeneratePrompt("")
-                  setRegenerateFrom("current")
-                }}
-              >
+              <Button variant="outline" onClick={() => setRegenerateState(null)}>
                 Cancel
               </Button>
-              <Button onClick={handleRegenerate} disabled={isRegenerating}>
-                {isRegenerating ? (
+              <Button onClick={() => void handleRegenerate()} disabled={savingQuestionId === regenerateState?.questionId}>
+                {savingQuestionId === regenerateState?.questionId ? (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 ) : (
                   <Sparkles className="mr-2 h-4 w-4" />
                 )}
-                {isRegenerating ? "Regenerating..." : "Regenerate"}
+                Regenerate
               </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
       </div>
     </>
-  )
+  );
+}
+
+function SummaryCard({
+  title,
+  value,
+  note,
+  icon: Icon,
+}: {
+  title: string;
+  value: string;
+  note: string;
+  icon: typeof FileText;
+}) {
+  return (
+    <Card className="rounded-2xl shadow-sm">
+      <CardContent className="p-4">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Icon className="h-3.5 w-3.5" />
+          {title}
+        </div>
+        <p className="mt-2 text-2xl font-semibold text-foreground">{value}</p>
+        <p className="mt-1 text-xs text-muted-foreground">{note}</p>
+      </CardContent>
+    </Card>
+  );
 }
 
 function QuestionCard({
   question,
-  index,
   isEditing,
-  isSaving,
-  editContent,
-  onEditContent,
+  saving,
+  editState,
   onStartEdit,
-  onSaveEdit,
+  onEditChange,
   onCancelEdit,
+  onSaveEdit,
   onRegenerate,
+  onLockToggle,
+  onDelete,
 }: {
-  question: ApiQuestion
-  index: number
-  isEditing: boolean
-  isSaving: boolean
-  editContent: string
-  onEditContent: (content: string) => void
-  onStartEdit: () => void
-  onSaveEdit: () => Promise<void>
-  onCancelEdit: () => void
-  onRegenerate: (type: "single" | "from") => void
+  question: Question;
+  isEditing: boolean;
+  saving: boolean;
+  editState: EditState | null;
+  onStartEdit: () => void;
+  onEditChange: (next: Partial<EditState>) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: () => void;
+  onRegenerate: (type: "single" | "from") => void;
+  onLockToggle: () => void;
+  onDelete: () => void;
 }) {
-  const difficultyLabel = question.difficulty_score <= 0.33 ? "Easy" : question.difficulty_score <= 0.66 ? "Medium" : "Hard"
-  const difficultyColor = {
-    Easy: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800",
-    Medium: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800",
-    Hard: "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950 dark:text-rose-400 dark:border-rose-800",
-  }
-
-  const qs = question.quality_score_detail
-  const gr = question.grounding_report_detail
-  const [detailOpen, setDetailOpen] = useState(false)
-
   return (
-    <Card className={`rounded-2xl shadow-sm transition-all ${isEditing ? "ring-2 ring-primary/20 border-primary/40" : ""}`}>
+    <Card className={`rounded-2xl shadow-sm ${isEditing ? "border-primary/50 ring-2 ring-primary/15" : ""}`}>
       <CardContent className="p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex items-center gap-2">
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-muted text-xs font-semibold text-muted-foreground">
-              {index}
-            </span>
-            <Badge variant="outline" className="text-xs">
-              {question.question_type === "mcq" ? "MCQ" : "Essay"}
-            </Badge>
-            <Badge
-              variant="outline"
-              className={`text-xs ${difficultyColor[difficultyLabel]}`}
-            >
-              {difficultyLabel}
-            </Badge>
-            {qs && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge
-                      variant="outline"
-                      className={`text-xs ${qs.passed
-                        ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800"
-                        : "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950 dark:text-rose-400 dark:border-rose-800"
-                      }`}
-                    >
-                      <ShieldCheck className="mr-1 h-3 w-3" />
-                      {Math.round(qs.overall * 100)}%
-                    </Badge>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    <p>Quality: {qs.recommendation}</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
-            {gr && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge
-                      variant="outline"
-                      className={`text-xs ${gr.grounding_pass
-                        ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800"
-                        : "bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950 dark:text-orange-400 dark:border-orange-800"
-                      }`}
-                    >
-                      <Activity className="mr-1 h-3 w-3" />
-                      {gr.grounding_pass ? "Grounded" : "Weak"}
-                    </Badge>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    <p>Grounding score: {Math.round(gr.overall_score * 100)}%</p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary">Q{question.question_number}</Badge>
+              <Badge variant="outline" className="capitalize">
+                {question.question_type}
+              </Badge>
+              <Badge variant="outline" className="capitalize">
+                {question.bloom_level}
+              </Badge>
+              {question.verification_status && (
+                <Badge variant={question.verification_status === "passed" ? "secondary" : "outline"}>
+                  {question.verification_status}
+                </Badge>
+              )}
+              {question.is_locked && (
+                <Badge>
+                  <Lock className="mr-1 h-3 w-3" />
+                  Locked
+                </Badge>
+              )}
+              {question.is_human_edited && (
+                <Badge variant="outline">
+                  <Pencil className="mr-1 h-3 w-3" />
+                  Human edited
+                </Badge>
+              )}
+            </div>
+            {question.blueprint_cell_key && (
+              <p className="text-xs text-muted-foreground">Blueprint cell: {question.blueprint_cell_key}</p>
             )}
           </div>
 
-          <div className="flex items-center gap-1">
-            {!isEditing && (
-              <>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7"
-                  onClick={onStartEdit}
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                  <span className="sr-only">Edit question</span>
-                </Button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-7 w-7">
-                      <MoreVertical className="h-3.5 w-3.5" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-56">
-                    <DropdownMenuItem onClick={() => onRegenerate("single")}>
-                      <RefreshCw className="mr-2 h-4 w-4" />
-                      Regenerate this question
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => onRegenerate("from")}>
-                      <Sparkles className="mr-2 h-4 w-4" />
-                      Regenerate from here onward
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={onStartEdit}>
-                      <Pencil className="mr-2 h-4 w-4" />
-                      Edit question text
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </>
-            )}
-          </div>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-8 w-8">
+                <MoreVertical className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem onClick={onStartEdit}>
+                <Pencil className="mr-2 h-4 w-4" />
+                Edit content, answer, Bloom
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onRegenerate("single")}>
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Regenerate this question
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onRegenerate("from")}>
+                <Sparkles className="mr-2 h-4 w-4" />
+                Regenerate from here onward
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={onLockToggle}>
+                {question.is_locked ? (
+                  <>
+                    <Unlock className="mr-2 h-4 w-4" />
+                    Unlock question
+                  </>
+                ) : (
+                  <>
+                    <Lock className="mr-2 h-4 w-4" />
+                    Lock question
+                  </>
+                )}
+              </DropdownMenuItem>
+              <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={onDelete}>
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete question
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
-        <div className="mt-4">
-          {isEditing ? (
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center gap-1.5 text-xs text-primary font-medium">
-                <Unlock className="h-3 w-3" />
-                Editing mode - Only this question is unlocked
-              </div>
+        {isEditing && editState ? (
+          <div className="mt-4 space-y-4">
+            <div className="space-y-2">
+              <Label>Question content</Label>
               <Textarea
-                value={editContent}
-                onChange={(e) => onEditContent(e.target.value)}
-                className="min-h-24 resize-none"
-                autoFocus
+                value={editState.content}
+                onChange={(event) => onEditChange({ content: event.target.value })}
+                className="min-h-28"
               />
-              <div className="flex items-center gap-2 justify-end">
-                <Button variant="outline" size="sm" onClick={onCancelEdit}>
-                  Cancel
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    void onSaveEdit()
-                  }}
-                  disabled={isSaving}
-                >
-                  {isSaving ? (
-                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Check className="mr-1.5 h-3.5 w-3.5" />
-                  )}
-                  {isSaving ? "Saving..." : "Save changes"}
-                </Button>
+            </div>
+            <div className="grid gap-4 md:grid-cols-[1fr_220px]">
+              <div className="space-y-2">
+                <Label>Correct answer</Label>
+                <Input
+                  value={editState.correctAnswer}
+                  onChange={(event) => onEditChange({ correctAnswer: event.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Bloom level</Label>
+                <Select value={editState.bloomLevel} onValueChange={(value) => onEditChange({ bloomLevel: value })}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {["remember", "understand", "apply", "analyze", "evaluate", "create"].map((level) => (
+                      <SelectItem key={level} value={level}>
+                        {level}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
-          ) : (
-            <>
-              <p className="text-sm text-foreground leading-relaxed">
-                {question.content}
-              </p>
-              {question.options && (
-                <div className="mt-3 flex flex-col gap-2">
-                  {question.options.map((option, i) => (
-                    <div
-                      key={i}
-                      className={`flex items-center gap-3 rounded-lg border px-3 py-2 text-sm ${
-                        option.label === question.correct_answer
-                          ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-400"
-                          : "border-border text-foreground"
-                      }`}
-                    >
-                      <span className="flex h-5 w-5 items-center justify-center rounded-full border text-xs font-medium shrink-0">
-                        {option.label}
-                      </span>
-                      {option.text}
-                      {option.label === question.correct_answer && (
-                        <Check className="ml-auto h-3.5 w-3.5 shrink-0" />
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={onCancelEdit}>
+                Cancel
+              </Button>
+              <Button onClick={onSaveEdit} disabled={saving}>
+                {saving ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="mr-2 h-4 w-4" />
+                )}
+                Save as new version
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-4 space-y-4">
+            <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{question.content}</p>
+
+            {question.options && question.options.length > 0 && (
+              <div className="space-y-2">
+                {question.options.map((option) => (
+                  <div
+                    key={`${question.id}-${option.label}`}
+                    className={`flex items-start gap-3 rounded-lg border px-3 py-2 text-sm ${
+                      option.label === question.correct_answer
+                        ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+                        : "border-border bg-background text-foreground"
+                    }`}
+                  >
+                    <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs font-medium">
+                      {option.label}
+                    </span>
+                    <span className="flex-1">{option.text}</span>
+                    {option.label === question.correct_answer && <Check className="h-4 w-4 shrink-0" />}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!question.options?.length && (
+              <div className="rounded-lg bg-muted/30 p-3 text-sm">
+                <span className="font-medium text-foreground">Answer: </span>
+                <span className="text-muted-foreground">{question.correct_answer}</span>
+              </div>
+            )}
+
+            {question.explanation && (
+              <div className="rounded-xl border bg-muted/20 p-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Explanation</p>
+                <p className="mt-2 text-sm text-foreground">{question.explanation}</p>
+              </div>
+            )}
+
+            {question.rubric && (
+              <div className="rounded-xl border bg-muted/20 p-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Rubric</p>
+                <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-sm text-foreground">
+                  {JSON.stringify(question.rubric, null, 2)}
+                </pre>
+              </div>
+            )}
+
+            {question.warnings?.length > 0 && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                <div className="flex items-center gap-2 text-sm font-medium text-amber-800">
+                  <AlertTriangle className="h-4 w-4" />
+                  Verification warnings
+                </div>
+                <ul className="mt-2 space-y-1 text-sm text-amber-700">
+                  {question.warnings.map((warning) => (
+                    <li key={warning}>• {warning}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {question.source_evidence && question.source_evidence.length > 0 && (
+              <div className="rounded-xl border bg-muted/20 p-4">
+                <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                  <Eye className="h-4 w-4" />
+                  Source evidence
+                </div>
+                <div className="mt-3 space-y-2">
+                  {question.source_evidence.map((evidence) => (
+                    <div key={`${question.id}-${evidence.chunk_id}`} className="rounded-lg border bg-background p-3">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <Badge variant="outline">{evidence.chunk_id}</Badge>
+                        {evidence.chapter_number ? <Badge variant="secondary">Chapter {evidence.chapter_number}</Badge> : null}
+                        {evidence.page ? <Badge variant="outline">Page {evidence.page}</Badge> : null}
+                        {evidence.parent_heading ? <Badge variant="outline">{evidence.parent_heading}</Badge> : null}
+                      </div>
+                      {evidence.text_preview && (
+                        <p className="mt-2 text-sm text-foreground">{evidence.text_preview}</p>
                       )}
                     </div>
                   ))}
                 </div>
-              )}
+              </div>
+            )}
 
-              {/* Quality & Grounding Detail (collapsible) */}
-              {(qs || gr) && (
-                <Collapsible open={detailOpen} onOpenChange={setDetailOpen}>
-                  <CollapsibleTrigger asChild>
-                    <Button variant="ghost" size="sm" className="mt-3 text-xs text-muted-foreground gap-1.5 px-2 h-7">
-                      <Eye className="h-3 w-3" />
-                      {detailOpen ? "Hide" : "Show"} analysis
-                      {detailOpen ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                    </Button>
-                  </CollapsibleTrigger>
-                  <CollapsibleContent>
-                    <div className="mt-2 rounded-lg bg-muted/40 p-4 flex flex-col gap-3">
-                      {qs && (
-                        <div className="flex flex-col gap-2">
-                          <p className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                            <ShieldCheck className="h-3.5 w-3.5" />
-                            Quality Rubric
-                            <Badge variant="outline" className="ml-auto text-[10px]">
-                              {qs.recommendation}
-                            </Badge>
-                          </p>
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
-                            <QualityBar label="Answerability" value={qs.answerability} />
-                            <QualityBar label="Grounding" value={qs.grounding} />
-                            <QualityBar label="Clarity" value={qs.clarity} />
-                            <QualityBar label="Ambiguity Risk" value={qs.ambiguity_risk} invert />
-                            <QualityBar label="Distractor Quality" value={qs.distractor_quality} />
-                            <QualityBar label="Bloom Alignment" value={qs.bloom_alignment} />
-                            <QualityBar label="Difficulty Realism" value={qs.difficulty_realism} />
-                            <QualityBar label="Overall" value={qs.overall} bold />
-                          </div>
-                          {qs.notes.length > 0 && (
-                            <div className="flex flex-col gap-0.5 mt-1">
-                              {qs.notes.map((note, i) => (
-                                <p key={i} className="text-[11px] text-muted-foreground flex items-start gap-1">
-                                  <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5 text-amber-500" />
-                                  {note}
-                                </p>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      {gr && (
-                        <div className="flex flex-col gap-2">
-                          <p className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                            <Activity className="h-3.5 w-3.5" />
-                            Grounding Analysis
-                            <Badge variant="outline" className={`ml-auto text-[10px] ${gr.grounding_pass ? "text-emerald-600" : "text-rose-600"}`}>
-                              {gr.grounding_pass ? "Pass" : "Fail"}
-                            </Badge>
-                          </p>
-                          <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
-                            <QualityBar label="Lexical Overlap" value={gr.lexical_overlap} />
-                            <QualityBar label="N-gram Overlap" value={gr.ngram_overlap} />
-                            <QualityBar label="Phrase Overlap" value={gr.phrase_overlap} />
-                            <QualityBar label="Answer Support" value={gr.answer_support_score} />
-                            <QualityBar label="Verbatim Ratio" value={gr.verbatim_ratio} invert />
-                            <QualityBar label="Overall" value={gr.overall_score} bold />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </CollapsibleContent>
-                </Collapsible>
-              )}
-            </>
-          )}
-        </div>
+            {question.scope_tags?.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {question.scope_tags.map((tag) => (
+                  <Badge key={tag} variant="outline">
+                    {tag}
+                  </Badge>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
-  )
-}
-
-/* ── Helper: single quality metric bar ──────────────────────────── */
-function QualityBar({
-  label,
-  value,
-  bold,
-  invert,
-}: {
-  label: string
-  value: number
-  bold?: boolean
-  invert?: boolean
-}) {
-  const pct = Math.round(value * 100)
-  const color = invert
-    ? pct > 60 ? "bg-rose-500" : pct > 30 ? "bg-amber-500" : "bg-emerald-500"
-    : pct >= 70 ? "bg-emerald-500" : pct >= 40 ? "bg-amber-500" : "bg-rose-500"
-
-  return (
-    <div className="flex items-center gap-2">
-      <span className={`text-[11px] w-28 shrink-0 ${bold ? "font-semibold text-foreground" : "text-muted-foreground"}`}>
-        {label}
-      </span>
-      <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
-        <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${pct}%` }} />
-      </div>
-      <span className={`text-[11px] w-8 text-right ${bold ? "font-semibold" : "text-muted-foreground"}`}>{pct}%</span>
-    </div>
-  )
-}
-
-/* ── Exam-level quality summary ─────────────────────────────────── */
-function ExamQualitySummary({ exam }: { exam: Exam }) {
-  const qs = exam.quality_scores
-  const gr = exam.grounding_reports
-  const dupes = exam.duplicate_groups
-  const logs = exam.provider_logs
-
-  // Skip if no data at all
-  if (!qs?.length && !gr?.length && !dupes?.length && !logs?.length) return null
-
-  const passCount = qs?.filter((s) => s.passed).length ?? 0
-  const totalQ = qs?.length ?? exam.total_questions
-  const avgOverall = qs?.length ? qs.reduce((a, s) => a + s.overall, 0) / qs.length : 0
-  const groundedCount = gr?.filter((r) => r.grounding_pass).length ?? 0
-  const totalLatency = logs?.reduce((a, l) => a + l.latency_ms, 0) ?? 0
-  const avgLatency = logs?.length ? totalLatency / logs.length : 0
-
-  return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-      {qs && qs.length > 0 && (
-        <Card className="rounded-2xl shadow-sm">
-          <CardContent className="p-4 flex flex-col gap-1.5">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <ShieldCheck className="h-3.5 w-3.5" />
-              Quality
-            </div>
-            <p className="text-lg font-semibold">{Math.round(avgOverall * 100)}%</p>
-            <p className="text-[11px] text-muted-foreground">
-              {passCount}/{totalQ} passed
-            </p>
-          </CardContent>
-        </Card>
-      )}
-      {gr && gr.length > 0 && (
-        <Card className="rounded-2xl shadow-sm">
-          <CardContent className="p-4 flex flex-col gap-1.5">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Activity className="h-3.5 w-3.5" />
-              Grounding
-            </div>
-            <p className="text-lg font-semibold">{groundedCount}/{gr.length}</p>
-            <p className="text-[11px] text-muted-foreground">
-              questions grounded
-            </p>
-          </CardContent>
-        </Card>
-      )}
-      {dupes && dupes.length > 0 && (
-        <Card className="rounded-2xl shadow-sm">
-          <CardContent className="p-4 flex flex-col gap-1.5">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <AlertTriangle className="h-3.5 w-3.5" />
-              Duplicates
-            </div>
-            <p className="text-lg font-semibold">{dupes.length}</p>
-            <p className="text-[11px] text-muted-foreground">
-              groups detected
-            </p>
-          </CardContent>
-        </Card>
-      )}
-      {logs && logs.length > 0 && (
-        <Card className="rounded-2xl shadow-sm">
-          <CardContent className="p-4 flex flex-col gap-1.5">
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Zap className="h-3.5 w-3.5" />
-              LLM Calls
-            </div>
-            <p className="text-lg font-semibold">{logs.length}</p>
-            <p className="text-[11px] text-muted-foreground">
-              avg {Math.round(avgLatency)}ms
-            </p>
-          </CardContent>
-        </Card>
-      )}
-    </div>
-  )
+  );
 }

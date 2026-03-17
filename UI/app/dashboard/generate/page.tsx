@@ -1,143 +1,250 @@
-"use client"
+"use client";
 
-import { useState, useEffect, useCallback } from "react"
-import { useRouter } from "next/navigation"
-import { DashboardHeader } from "@/components/dashboard-header"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
-import { Checkbox } from "@/components/ui/checkbox"
-import { Switch } from "@/components/ui/switch"
-import { Slider } from "@/components/ui/slider"
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { DashboardHeader } from "@/components/dashboard-header";
+import { GenerationStepper } from "@/components/generation-stepper";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select"
+} from "@/components/ui/select";
 import {
-  Accordion,
-  AccordionContent,
-  AccordionItem,
-  AccordionTrigger,
-} from "@/components/ui/accordion"
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip"
-import {
+  AlertCircle,
   BookOpen,
-  Sparkles,
-  Wand2,
-  Info,
-  Loader2,
-  ChevronRight,
-  GraduationCap,
   Brain,
+  ChevronRight,
+  FileText,
+  GraduationCap,
+  Hash,
+  Layers,
+  Loader2,
   ShieldCheck,
   Sliders,
-  FileText,
-  Hash,
-} from "lucide-react"
-import { GenerationStepper } from "@/components/generation-stepper"
+  Sparkles,
+  Wand2,
+} from "lucide-react";
 import {
-  textbooks as textbooksApi,
+  courses as coursesApi,
+  documents as documentsApi,
   generation as generationApi,
-  type TextbookListItem,
-  type Exam,
+  isReadyStatus,
+  textbooks as textbooksApi,
+  type Course,
+  type CurriculumNode,
   type ExamGenerationRequest,
   type GenerationStep,
-} from "@/lib/api"
+  type ScopeUnitPayload,
+  type TextbookListItem,
+} from "@/lib/api";
 
 const bloomLevels = [
-  "Remember",
-  "Understand",
-  "Apply",
-  "Analyze",
-  "Evaluate",
-  "Create",
-]
+  "remember",
+  "understand",
+  "apply",
+  "analyze",
+  "evaluate",
+  "create",
+] as const;
+
+function flattenNodes(nodes: CurriculumNode[]): CurriculumNode[] {
+  return nodes.flatMap((node) => [node, ...flattenNodes(node.children || [])]);
+}
+
+function buildScopePayload(node: CurriculumNode): ScopeUnitPayload {
+  return {
+    scope_id: node.id || `${node.section_type}:${node.chapter_number}:${node.section_order}:${node.title}`,
+    scope_type: node.section_type || "topic",
+    title: node.title,
+    chapter_number: node.chapter_number || 0,
+    page_from: node.page_from ?? null,
+    page_to: node.page_to ?? null,
+    tags: [
+      node.scope_label || `${node.section_type || "topic"}:${node.chapter_number || 0}`,
+      ...(node.chapter_number ? [`chapter:${node.chapter_number}`] : []),
+    ],
+  };
+}
 
 export default function GenerateExamPage() {
-  const router = useRouter()
-  const [books, setBooks] = useState<TextbookListItem[]>([])
-  const [loadingBooks, setLoadingBooks] = useState(true)
-  const [selectedTextbook, setSelectedTextbook] = useState("")
-  const [selectedChapters, setSelectedChapters] = useState<number[]>([])
-  const [prompt, setPrompt] = useState("")
-  const [questionType, setQuestionType] = useState("mixed")
-  const [mcqCounts, setMcqCounts] = useState({ easy: 5, medium: 3, hard: 2 })
-  const [essayCounts, setEssayCounts] = useState({ easy: 1, medium: 2, hard: 1 })
-  const [examCount, setExamCount] = useState(1)
-  const [gradualDifficulty, setGradualDifficulty] = useState(false)
-  const [noHallucination, setNoHallucination] = useState(true)
-  const [appliedQuestions, setAppliedQuestions] = useState(true)
-  const [gradeLevelScope, setGradeLevelScope] = useState(true)
-  const [creativityLevel, setCreativityLevel] = useState([30])
-  const [bloomLevel, setBloomLevel] = useState("Apply")
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [generationSteps, setGenerationSteps] = useState<GenerationStep[]>([])
-  const [generationError, setGenerationError] = useState("")
-  const [generatedExamId, setGeneratedExamId] = useState<string | null>(null)
+  const router = useRouter();
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [documents, setDocuments] = useState<TextbookListItem[]>([]);
+  const [loadingSources, setLoadingSources] = useState(true);
+  const [selectedCourse, setSelectedCourse] = useState<string>("all");
+  const [selectedDocument, setSelectedDocument] = useState<string>("");
+  const [curriculumTree, setCurriculumTree] = useState<CurriculumNode[]>([]);
+  const [loadingTree, setLoadingTree] = useState(false);
+  const [selectedScopeIds, setSelectedScopeIds] = useState<string[]>([]);
+  const [prompt, setPrompt] = useState("");
+  const [instructions, setInstructions] = useState("");
+  const [questionType, setQuestionType] = useState("mixed");
+  const [mcqCounts, setMcqCounts] = useState({ easy: 5, medium: 3, hard: 2 });
+  const [essayCounts, setEssayCounts] = useState({ easy: 1, medium: 1, hard: 1 });
+  const [timeLimit, setTimeLimit] = useState("45");
+  const [examCount, setExamCount] = useState(1);
+  const [gradualDifficulty, setGradualDifficulty] = useState(false);
+  const [strictGrounding, setStrictGrounding] = useState(true);
+  const [strictScope, setStrictScope] = useState(true);
+  const [appliedQuestions, setAppliedQuestions] = useState(true);
+  const [gradeLevelScope, setGradeLevelScope] = useState("undergraduate");
+  const [creativityLevel, setCreativityLevel] = useState([30]);
+  const [bloomLevel, setBloomLevel] = useState<string>("apply");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generationSteps, setGenerationSteps] = useState<GenerationStep[]>([]);
+  const [generationError, setGenerationError] = useState("");
+  const [generatedExamId, setGeneratedExamId] = useState<string | null>(null);
 
-  // Fetch textbooks
-  useEffect(() => {
-    textbooksApi.list().then((list) => {
-      setBooks(list.filter((b) => b.status.toLowerCase() === "processed"))
-    }).catch(() => {}).finally(() => setLoadingBooks(false))
-  }, [])
-
-  const currentTextbook = books.find((t) => t.id === selectedTextbook)
-  const chapterCount = currentTextbook?.chapter_count || 0
-
-  const toggleChapter = (ch: number) => {
-    setSelectedChapters((prev) =>
-      prev.includes(ch) ? prev.filter((c) => c !== ch) : [...prev, ch]
-    )
-  }
-
-  const selectAllChapters = () => {
-    if (selectedChapters.length === chapterCount) {
-      setSelectedChapters([])
-    } else {
-      setSelectedChapters(Array.from({ length: chapterCount }, (_, i) => i + 1))
+  const loadSources = useCallback(async () => {
+    try {
+      const [courseList, documentList] = await Promise.all([
+        coursesApi.list(),
+        textbooksApi.list(),
+      ]);
+      setCourses(courseList);
+      setDocuments(documentList);
+    } finally {
+      setLoadingSources(false);
     }
-  }
+  }, []);
 
-  const totalMcq = mcqCounts.easy + mcqCounts.medium + mcqCounts.hard
-  const totalEssay = essayCounts.easy + essayCounts.medium + essayCounts.hard
-  const totalQuestions = questionType === "mcq" ? totalMcq : questionType === "essay" ? totalEssay : totalMcq + totalEssay
+  useEffect(() => {
+    void loadSources();
+  }, [loadSources]);
+
+  const readyDocuments = useMemo(
+    () => documents.filter((document) => isReadyStatus(document.status)),
+    [documents],
+  );
+
+  const filteredDocuments = useMemo(() => {
+    if (selectedCourse === "all") return readyDocuments;
+    if (selectedCourse === "unassigned") {
+      return readyDocuments.filter((document) => !document.course_id);
+    }
+    return readyDocuments.filter((document) => document.course_id === selectedCourse);
+  }, [readyDocuments, selectedCourse]);
+
+  useEffect(() => {
+    if (!selectedDocument && filteredDocuments.length > 0) {
+      setSelectedDocument(filteredDocuments[0].id);
+      return;
+    }
+    if (selectedDocument && !filteredDocuments.some((document) => document.id === selectedDocument)) {
+      setSelectedDocument(filteredDocuments[0]?.id || "");
+    }
+  }, [filteredDocuments, selectedDocument]);
+
+  useEffect(() => {
+    if (!selectedDocument) {
+      setCurriculumTree([]);
+      setSelectedScopeIds([]);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingTree(true);
+    setSelectedScopeIds([]);
+    void documentsApi
+      .getCurriculumTree(selectedDocument)
+      .then((tree) => {
+        if (!cancelled) setCurriculumTree(tree);
+      })
+      .catch(() => {
+        if (!cancelled) setCurriculumTree([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingTree(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDocument]);
+
+  const scopeNodes = useMemo(() => flattenNodes(curriculumTree), [curriculumTree]);
+  const scopeNodeMap = useMemo(
+    () => new Map(scopeNodes.map((node) => [buildScopePayload(node).scope_id || "", node])),
+    [scopeNodes],
+  );
+
+  const selectedScope = useMemo(
+    () =>
+      selectedScopeIds
+        .map((scopeId) => {
+          const node = scopeNodeMap.get(scopeId);
+          return node ? buildScopePayload(node) : null;
+        })
+        .filter((value): value is ScopeUnitPayload => value !== null),
+    [scopeNodeMap, selectedScopeIds],
+  );
+
+  const selectedDocumentItem = readyDocuments.find((document) => document.id === selectedDocument) || null;
+
+  const totalMcq = mcqCounts.easy + mcqCounts.medium + mcqCounts.hard;
+  const totalEssay = essayCounts.easy + essayCounts.medium + essayCounts.hard;
+  const totalQuestions =
+    questionType === "mcq" ? totalMcq : questionType === "essay" ? totalEssay : totalMcq + totalEssay;
+
+  const toggleScope = useCallback((scopeId: string, checked: boolean) => {
+    setSelectedScopeIds((current) => {
+      if (checked) return Array.from(new Set([...current, scopeId]));
+      return current.filter((id) => id !== scopeId);
+    });
+  }, []);
+
+  const selectAllScope = useCallback(() => {
+    setSelectedScopeIds(scopeNodes.map((node) => buildScopePayload(node).scope_id || "").filter(Boolean));
+  }, [scopeNodes]);
+
+  const clearScope = useCallback(() => {
+    setSelectedScopeIds([]);
+  }, []);
 
   const updateCount = (
     setter: React.Dispatch<React.SetStateAction<{ easy: number; medium: number; hard: number }>>,
     level: "easy" | "medium" | "hard",
-    delta: number
+    delta: number,
   ) => {
-    setter((prev) => ({
-      ...prev,
-      [level]: Math.max(0, Math.min(50, prev[level] + delta)),
-    }))
-  }
+    setter((previous) => ({
+      ...previous,
+      [level]: Math.max(0, Math.min(50, previous[level] + delta)),
+    }));
+  };
 
-  const handleGenerate = () => {
-    if (!selectedTextbook || totalQuestions === 0) return
-    if (chapterCount > 0 && selectedChapters.length === 0) return
-    setIsGenerating(true)
-    setGenerationError("")
-    setGeneratedExamId(null)
+  const handleGenerate = useCallback(() => {
+    if (!selectedDocumentItem || totalQuestions === 0) return;
 
-    const reqData: ExamGenerationRequest = {
-      textbook_id: selectedTextbook,
-      chapters: chapterCount > 0 ? selectedChapters : [],
-      prompt: prompt || (chapterCount > 0
-        ? `Generate exam for chapters ${selectedChapters.join(", ")}`
-        : `Generate exam covering the entire textbook`),
+    setIsGenerating(true);
+    setGenerationError("");
+    setGeneratedExamId(null);
+    setGenerationSteps([]);
+
+    const chapters = Array.from(
+      new Set(selectedScope.filter((item) => item.chapter_number > 0).map((item) => item.chapter_number)),
+    );
+
+    const requestPayload: ExamGenerationRequest = {
+      course_id: selectedDocumentItem.course_id || undefined,
+      document_id: selectedDocumentItem.id,
+      chapters,
+      scope: selectedScope,
+      prompt:
+        prompt.trim() ||
+        `Generate a ${questionType} exam grounded in ${selectedDocumentItem.title}${
+          selectedScope.length ? ` using ${selectedScope.length} selected scope units` : ""
+        }.`,
       exam_type: questionType,
       difficulty: "custom",
       question_distribution: {
@@ -147,49 +254,61 @@ export default function GenerateExamPage() {
       num_variants: examCount,
       gradually_increasing: gradualDifficulty,
       constraints: {
-        strict_grounding: noHallucination,
+        strict_grounding: strictGrounding,
         allow_applied_questions: appliedQuestions,
-        grade_level_scope: gradeLevelScope ? "undergraduate" : undefined,
+        strict_scope: strictScope,
+        grade_level_scope: gradeLevelScope || undefined,
         creativity_level: creativityLevel[0] / 100,
-        bloom_levels: [bloomLevel.toLowerCase()],
+        bloom_levels: [bloomLevel],
       },
-    }
+      instructions: instructions.trim() || undefined,
+      time_limit_minutes: Number(timeLimit) || undefined,
+      output_language: "vi",
+      strict_scope: strictScope,
+    };
 
     generationApi.generateStream(
-      reqData,
-      (step) => setGenerationSteps((prev) => {
-        const idx = prev.findIndex((s) => s.step === step.step)
-        if (idx >= 0) {
-          const copy = [...prev]
-          copy[idx] = step
-          return copy
-        }
-        return [...prev, step]
-      }),
-      (exam) => {
-        setGeneratedExamId(exam.id)
-      },
+      requestPayload,
+      (step) =>
+        setGenerationSteps((current) => {
+          const existingIndex = current.findIndex((item) => item.step === step.step);
+          if (existingIndex >= 0) {
+            const next = [...current];
+            next[existingIndex] = step;
+            return next;
+          }
+          return [...current, step];
+        }),
+      (exam) => setGeneratedExamId(exam.id),
       (error) => {
-        setGenerationError(error)
+        setGenerationError(error);
+        setIsGenerating(false);
       },
-    )
-  }
+    );
+  }, [
+    appliedQuestions,
+    bloomLevel,
+    creativityLevel,
+    essayCounts,
+    examCount,
+    gradualDifficulty,
+    instructions,
+    mcqCounts,
+    prompt,
+    questionType,
+    selectedDocumentItem,
+    selectedScope,
+    strictGrounding,
+    strictScope,
+    timeLimit,
+    totalQuestions,
+    gradeLevelScope,
+  ]);
 
-  const handleGenerationComplete = useCallback(() => {
-    if (generatedExamId) {
-      router.push(`/dashboard/exams/${generatedExamId}`)
-    } else {
-      // fallback if stream sent exam_id in step message
-      const finalStep = generationSteps.find(
-        (s) => s.step === 5 && s.status === "completed" && s.message,
-      )
-      if (finalStep?.message) {
-        router.push(`/dashboard/exams/${finalStep.message}`)
-      } else {
-        router.push("/dashboard/history")
-      }
-    }
-  }, [generatedExamId, generationSteps, router])
+  useEffect(() => {
+    if (!generatedExamId) return;
+    router.push(`/dashboard/exams/${generatedExamId}`);
+  }, [generatedExamId, router]);
 
   if (isGenerating) {
     return (
@@ -198,457 +317,285 @@ export default function GenerateExamPage() {
         {generationError ? (
           <div className="flex flex-1 items-center justify-center p-6">
             <div className="max-w-md text-center">
-              <p className="text-destructive font-medium mb-2">Generation Failed</p>
-              <p className="text-sm text-muted-foreground mb-4">{generationError}</p>
-              <Button onClick={() => { setIsGenerating(false); setGenerationError(""); }}>
-                Try Again
+              <p className="mb-2 font-medium text-destructive">Generation failed</p>
+              <p className="mb-4 text-sm text-muted-foreground">{generationError}</p>
+              <Button
+                onClick={() => {
+                  setIsGenerating(false);
+                  setGenerationError("");
+                }}
+              >
+                Try again
               </Button>
             </div>
           </div>
         ) : (
           <GenerationStepper
             steps={generationSteps}
-            onComplete={handleGenerationComplete}
+            onComplete={() => {
+              if (!generatedExamId) {
+                setIsGenerating(false);
+              }
+            }}
           />
         )}
       </>
-    )
+    );
+  }
+
+  if (loadingSources) {
+    return (
+      <>
+        <DashboardHeader title="Generate Exam" />
+        <div className="flex flex-1 items-center justify-center">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        </div>
+      </>
+    );
   }
 
   return (
     <>
       <DashboardHeader title="Generate Exam" />
-      <div className="flex flex-1 flex-col gap-6 p-6 max-w-4xl">
-        {/* Page Header */}
+      <div className="flex flex-1 flex-col gap-6 p-6 max-w-6xl">
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight text-foreground">
-            Configure Your Exam
-          </h2>
+          <h2 className="text-2xl font-semibold tracking-tight text-foreground">Blueprint-first exam generation</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Select a textbook, configure parameters, and let AI generate a professional exam.
+            Select a document, choose the exact curriculum scope, and generate an exam that stays grounded in the uploaded material.
           </p>
         </div>
 
-        {/* Section 1: Textbook Selection */}
-        <Card className="rounded-2xl shadow-sm">
-          <CardHeader className="pb-4">
-            <CardTitle className="flex items-center gap-2 text-base font-semibold text-foreground">
-              <BookOpen className="h-4 w-4 text-primary" />
-              Textbook Selection
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-5">
-            <div className="flex flex-col gap-2">
-              <Label className="text-sm font-medium">Select Textbook</Label>
-              <Select value={selectedTextbook} onValueChange={(val) => {
-                setSelectedTextbook(val)
-                setSelectedChapters([])
-              }}>
-                <SelectTrigger className="h-11">
-                  <SelectValue placeholder={loadingBooks ? "Loading textbooks..." : "Choose a textbook from your library"} />
-                </SelectTrigger>
-                <SelectContent>
-                  {books.map((book) => (
-                    <SelectItem key={book.id} value={book.id}>
-                      <div className="flex items-center gap-2">
-                        <BookOpen className="h-3.5 w-3.5 text-muted-foreground" />
-                        {book.title}
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {currentTextbook && chapterCount > 0 && (
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <Label className="text-sm font-medium">Select Chapters</Label>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 text-xs"
-                    onClick={selectAllChapters}
-                  >
-                    {selectedChapters.length === chapterCount
-                      ? "Deselect all"
-                      : "Select all chapters"}
-                  </Button>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {Array.from({ length: chapterCount }, (_, i) => i + 1).map(
-                    (ch) => (
-                      <button
-                        key={ch}
-                        onClick={() => toggleChapter(ch)}
-                        className={`flex h-9 w-9 items-center justify-center rounded-lg border text-sm font-medium transition-colors ${
-                          selectedChapters.includes(ch)
-                            ? "border-primary bg-primary text-primary-foreground"
-                            : "border-border bg-card text-foreground hover:border-primary/40 hover:bg-muted/50"
-                        }`}
-                      >
-                        {ch}
-                      </button>
-                    )
-                  )}
-                </div>
-                {selectedChapters.length > 0 && (
-                  <p className="text-xs text-muted-foreground">
-                    {selectedChapters.length} of {chapterCount} chapters selected
-                  </p>
-                )}
-              </div>
-            )}
-
-            {currentTextbook && chapterCount === 0 && (
-              <div className="rounded-xl border border-dashed border-primary/30 bg-primary/5 p-4">
-                <p className="text-sm font-medium text-foreground">
-                  No chapters detected
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  The entire textbook content will be used for exam generation.
+        {readyDocuments.length === 0 ? (
+          <Card className="rounded-2xl border-dashed shadow-sm">
+            <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
+              <AlertCircle className="h-8 w-8 text-muted-foreground" />
+              <div>
+                <p className="text-base font-semibold text-foreground">No ready documents found</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Upload and process at least one document before generating an exam.
                 </p>
               </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Section 2: Exam Configuration */}
-        <Card className="rounded-2xl shadow-sm">
-          <CardHeader className="pb-4">
-            <CardTitle className="flex items-center gap-2 text-base font-semibold text-foreground">
-              <Sliders className="h-4 w-4 text-primary" />
-              Exam Configuration
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-6">
-            {/* Prompt Input */}
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <Label className="text-sm font-medium">
-                  <div className="flex items-center gap-1.5">
-                    <Wand2 className="h-3.5 w-3.5 text-primary" />
-                    AI Prompt
-                  </div>
-                </Label>
-                <Badge variant="outline" className="text-xs gap-1">
-                  <Sparkles className="h-3 w-3" />
-                  AI-assisted
-                </Badge>
-              </div>
-              <Textarea
-                placeholder="Generate an exam for Chapter 1 including theory and applied questions. Focus on core data structures like arrays, linked lists, and stacks..."
-                className="min-h-28 resize-none"
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">
-                Describe the type of exam you want. Be specific about topics and question style.
-              </p>
-            </div>
-
-            {/* Question Type Selection */}
-            <div className="flex flex-col gap-3">
-              <Label className="text-sm font-medium">
-                <div className="flex items-center gap-1.5">
-                  <FileText className="h-3.5 w-3.5 text-primary" />
-                  Question Type
-                </div>
-              </Label>
-              <div className="flex flex-wrap gap-2">
-                {[
-                  { id: "mcq", label: "Multiple Choice" },
-                  { id: "essay", label: "Essay" },
-                  { id: "mixed", label: "Mixed" },
-                ].map((type) => (
-                  <button
-                    key={type.id}
-                    onClick={() => setQuestionType(type.id)}
-                    className={`rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${
-                      questionType === type.id
-                        ? "border-primary bg-primary text-primary-foreground"
-                        : "border-border bg-card text-foreground hover:border-primary/40"
-                    }`}
-                  >
-                    {type.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Question Distribution by Difficulty */}
-            <div className="flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <Label className="text-sm font-medium">
-                  <div className="flex items-center gap-1.5">
-                    <GraduationCap className="h-3.5 w-3.5 text-primary" />
-                    Question Distribution
-                  </div>
-                </Label>
-                <div className="flex items-center gap-2">
-                  <Label
-                    htmlFor="gradual"
-                    className="text-xs text-muted-foreground cursor-pointer"
-                  >
-                    Gradually increasing
-                  </Label>
-                  <Switch
-                    id="gradual"
-                    checked={gradualDifficulty}
-                    onCheckedChange={setGradualDifficulty}
-                  />
-                </div>
-              </div>
-
-              {/* Distribution Table */}
-              <div className="rounded-xl border overflow-hidden">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b bg-muted/40">
-                      <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">Difficulty</th>
-                      {(questionType === "mcq" || questionType === "mixed") && (
-                        <th className="px-4 py-2.5 text-center font-medium text-muted-foreground">
-                          MCQ
-                        </th>
-                      )}
-                      {(questionType === "essay" || questionType === "mixed") && (
-                        <th className="px-4 py-2.5 text-center font-medium text-muted-foreground">
-                          Essay
-                        </th>
-                      )}
-                      <th className="px-4 py-2.5 text-center font-medium text-muted-foreground">Subtotal</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(["easy", "medium", "hard"] as const).map((level, idx) => {
-                      const labelMap = { easy: "Easy", medium: "Medium", hard: "Hard" }
-                      const colorMap = {
-                        easy: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-                        medium: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
-                        hard: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400",
-                      }
-                      const rowMcq = mcqCounts[level]
-                      const rowEssay = essayCounts[level]
-                      const subtotal =
-                        questionType === "mcq"
-                          ? rowMcq
-                          : questionType === "essay"
-                          ? rowEssay
-                          : rowMcq + rowEssay
-
-                      return (
-                        <tr
-                          key={level}
-                          className={idx < 2 ? "border-b" : ""}
-                        >
-                          <td className="px-4 py-3">
-                            <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ${colorMap[level]}`}>
-                              {labelMap[level]}
-                            </span>
-                          </td>
-                          {(questionType === "mcq" || questionType === "mixed") && (
-                            <td className="px-4 py-3">
-                              <div className="flex items-center justify-center gap-1.5">
-                                <button
-                                  onClick={() => updateCount(setMcqCounts, level, -1)}
-                                  disabled={mcqCounts[level] <= 0}
-                                  className="flex h-7 w-7 items-center justify-center rounded-md border text-sm font-medium transition-colors hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
-                                >
-                                  -
-                                </button>
-                                <span className="w-8 text-center font-medium tabular-nums">
-                                  {rowMcq}
-                                </span>
-                                <button
-                                  onClick={() => updateCount(setMcqCounts, level, 1)}
-                                  className="flex h-7 w-7 items-center justify-center rounded-md border text-sm font-medium transition-colors hover:bg-muted"
-                                >
-                                  +
-                                </button>
-                              </div>
-                            </td>
-                          )}
-                          {(questionType === "essay" || questionType === "mixed") && (
-                            <td className="px-4 py-3">
-                              <div className="flex items-center justify-center gap-1.5">
-                                <button
-                                  onClick={() => updateCount(setEssayCounts, level, -1)}
-                                  disabled={essayCounts[level] <= 0}
-                                  className="flex h-7 w-7 items-center justify-center rounded-md border text-sm font-medium transition-colors hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
-                                >
-                                  -
-                                </button>
-                                <span className="w-8 text-center font-medium tabular-nums">
-                                  {rowEssay}
-                                </span>
-                                <button
-                                  onClick={() => updateCount(setEssayCounts, level, 1)}
-                                  className="flex h-7 w-7 items-center justify-center rounded-md border text-sm font-medium transition-colors hover:bg-muted"
-                                >
-                                  +
-                                </button>
-                              </div>
-                            </td>
-                          )}
-                          <td className="px-4 py-3 text-center font-semibold tabular-nums text-foreground">
-                            {subtotal}
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                  <tfoot>
-                    <tr className="border-t bg-muted/30">
-                      <td className="px-4 py-2.5 font-medium text-foreground">Total</td>
-                      {(questionType === "mcq" || questionType === "mixed") && (
-                        <td className="px-4 py-2.5 text-center font-semibold text-primary tabular-nums">
-                          {totalMcq}
-                        </td>
-                      )}
-                      {(questionType === "essay" || questionType === "mixed") && (
-                        <td className="px-4 py-2.5 text-center font-semibold text-primary tabular-nums">
-                          {totalEssay}
-                        </td>
-                      )}
-                      <td className="px-4 py-2.5 text-center font-bold text-primary tabular-nums">
-                        {totalQuestions}
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-
-              {totalQuestions === 0 && (
-                <p className="text-xs text-destructive">
-                  Please add at least one question.
-                </p>
-              )}
-            </div>
-
-            {/* Number of Exams */}
-            <div className="flex flex-col gap-2">
-              <Label className="text-sm font-medium">
-                <div className="flex items-center gap-1.5">
-                  <Hash className="h-3.5 w-3.5 text-primary" />
-                  Number of Exam Variants
-                </div>
-              </Label>
-              <div className="flex items-center gap-3">
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="h-9 w-9 shrink-0"
-                  onClick={() => setExamCount(Math.max(1, examCount - 1))}
-                  disabled={examCount <= 1}
-                >
-                  -
-                </Button>
-                <Input
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={examCount}
-                  onChange={(e) =>
-                    setExamCount(
-                      Math.max(1, Math.min(10, parseInt(e.target.value) || 1))
-                    )
-                  }
-                  className="h-9 w-20 text-center"
-                />
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="h-9 w-9 shrink-0"
-                  onClick={() => setExamCount(Math.min(10, examCount + 1))}
-                  disabled={examCount >= 10}
-                >
-                  +
-                </Button>
-                <span className="text-xs text-muted-foreground">
-                  Max 10 variants
-                </span>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Section 3: Advanced Constraints */}
-        <Card className="rounded-2xl shadow-sm">
-          <Accordion type="single" collapsible>
-            <AccordionItem value="constraints" className="border-none">
-              <CardHeader className="pb-0">
-                <AccordionTrigger className="hover:no-underline py-0">
-                  <CardTitle className="flex items-center gap-2 text-base font-semibold text-foreground">
-                    <ShieldCheck className="h-4 w-4 text-primary" />
-                    Advanced Constraints
+              <Button asChild>
+                <Link href="/dashboard/textbooks">
+                  <ChevronRight className="mr-2 h-4 w-4" />
+                  Go to document library
+                </Link>
+              </Button>
+            </CardContent>
+          </Card>
+        ) : (
+          <>
+            <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+              <Card className="rounded-2xl shadow-sm">
+                <CardHeader className="pb-4">
+                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                    <BookOpen className="h-4 w-4 text-primary" />
+                    Scope Selection
                   </CardTitle>
-                </AccordionTrigger>
-              </CardHeader>
-              <AccordionContent>
-                <CardContent className="flex flex-col gap-6 pt-4">
-                  {/* Toggle Constraints */}
-                  <TooltipProvider>
-                    <div className="flex flex-col gap-4">
-                      <ConstraintToggle
-                        label="Strictly use textbook knowledge only"
-                        description="Prevents AI from generating questions beyond the textbook content"
-                        checked={noHallucination}
-                        onCheckedChange={setNoHallucination}
-                        tooltip="Ensures zero hallucination - all questions and answers are strictly derived from the uploaded textbook material."
-                      />
-                      <ConstraintToggle
-                        label="Allow applied questions based on textbook"
-                        description="Questions can be applied but must reference textbook concepts"
-                        checked={appliedQuestions}
-                        onCheckedChange={setAppliedQuestions}
-                        tooltip="Allows real-world application questions that are grounded in the textbook's theoretical frameworks."
-                      />
-                      <ConstraintToggle
-                        label="Enforce grade-level scope"
-                        description="Knowledge must not exceed the defined academic level"
-                        checked={gradeLevelScope}
-                        onCheckedChange={setGradeLevelScope}
-                        tooltip="Ensures question complexity aligns with the target academic level, preventing overly advanced content."
-                      />
+                </CardHeader>
+                <CardContent className="flex flex-col gap-5">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label>Select course</Label>
+                      <Select value={selectedCourse} onValueChange={setSelectedCourse}>
+                        <SelectTrigger className="h-11">
+                          <SelectValue placeholder="Filter by course" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All ready documents</SelectItem>
+                          {documents.some((document) => isReadyStatus(document.status) && !document.course_id) && (
+                            <SelectItem value="unassigned">Personal library</SelectItem>
+                          )}
+                          {courses.map((course) => (
+                            <SelectItem key={course.id} value={course.id}>
+                              {course.course_name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
-                  </TooltipProvider>
 
-                  {/* Creativity Level */}
-                  <div className="flex flex-col gap-3">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-sm font-medium">
-                        <div className="flex items-center gap-1.5">
-                          <Brain className="h-3.5 w-3.5 text-primary" />
-                          Creativity Level
-                        </div>
-                      </Label>
-                      <span className="text-sm font-medium text-primary">
-                        {creativityLevel[0]}%
-                      </span>
-                    </div>
-                    <Slider
-                      value={creativityLevel}
-                      onValueChange={setCreativityLevel}
-                      max={100}
-                      step={5}
-                      className="w-full"
-                    />
-                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>Conservative</span>
-                      <span>Creative</span>
+                    <div className="space-y-2">
+                      <Label>Select document</Label>
+                      <Select value={selectedDocument} onValueChange={setSelectedDocument}>
+                        <SelectTrigger className="h-11">
+                          <SelectValue placeholder="Choose a processed document" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {filteredDocuments.map((document) => (
+                            <SelectItem key={document.id} value={document.id}>
+                              {document.title}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
                   </div>
 
-                  {/* Bloom Taxonomy */}
-                  <div className="flex flex-col gap-2">
-                    <Label className="text-sm font-medium">
-                      <div className="flex items-center gap-1.5">
-                        <GraduationCap className="h-3.5 w-3.5 text-primary" />
-                        {"Bloom's Taxonomy Level"}
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <MiniStat label="Course" value={selectedDocumentItem?.course_id ? courses.find((course) => course.id === selectedDocumentItem.course_id)?.course_name || "Assigned" : "Personal"} icon={GraduationCap} />
+                    <MiniStat label="Pages/Slides" value={String(selectedDocumentItem?.total_pages_or_slides || 0)} icon={FileText} />
+                    <MiniStat label="Chunks" value={String(selectedDocumentItem?.total_chunks || 0)} icon={Layers} />
+                  </div>
+
+                  <div className="rounded-xl border p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">Curriculum scope</p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Leave everything unchecked to generate from the whole document, or select specific units for strict scope.
+                        </p>
                       </div>
-                    </Label>
+                      <div className="flex items-center gap-2">
+                        <Button variant="outline" size="sm" onClick={selectAllScope} disabled={scopeNodes.length === 0}>
+                          Select all
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={clearScope}>
+                          Clear
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 rounded-xl bg-muted/25 p-4">
+                      {loadingTree ? (
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Loading curriculum tree...
+                        </div>
+                      ) : curriculumTree.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">
+                          No structured tree is available for this document yet. The generator can still use the whole document.
+                        </p>
+                      ) : (
+                        <div className="space-y-2">
+                          {curriculumTree.map((node) => (
+                            <ScopeTreeNode
+                              key={buildScopePayload(node).scope_id}
+                              node={node}
+                              selectedScopeIds={selectedScopeIds}
+                              onToggle={toggleScope}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Card className="rounded-2xl shadow-sm">
+                <CardHeader className="pb-4">
+                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                    <Sliders className="h-4 w-4 text-primary" />
+                    Exam Controls
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-5">
+                  <div className="space-y-2">
+                    <Label>Exam type</Label>
+                    <Select value={questionType} onValueChange={setQuestionType}>
+                      <SelectTrigger className="h-11">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="mixed">Mixed</SelectItem>
+                        <SelectItem value="mcq">Multiple choice</SelectItem>
+                        <SelectItem value="essay">Essay</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>Time limit (minutes)</Label>
+                    <Input value={timeLimit} onChange={(event) => setTimeLimit(event.target.value)} />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>Generation prompt</Label>
+                    <Textarea
+                      value={prompt}
+                      onChange={(event) => setPrompt(event.target.value)}
+                      placeholder="Example: Create a midterm focused on core concepts with more application questions in later sections."
+                      className="min-h-24"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>Instructions shown in exam</Label>
+                    <Textarea
+                      value={instructions}
+                      onChange={(event) => setInstructions(event.target.value)}
+                      placeholder="Example: Answer all questions. Show your work for essay items."
+                      className="min-h-20"
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+              <Card className="rounded-2xl shadow-sm">
+                <CardHeader className="pb-4">
+                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                    <Hash className="h-4 w-4 text-primary" />
+                    Question Mix
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                  {(questionType === "mcq" || questionType === "mixed") && (
+                    <DistributionEditor
+                      title="Multiple choice"
+                      counts={mcqCounts}
+                      onChange={(level, delta) => updateCount(setMcqCounts, level, delta)}
+                    />
+                  )}
+                  {(questionType === "essay" || questionType === "mixed") && (
+                    <DistributionEditor
+                      title="Essay"
+                      counts={essayCounts}
+                      onChange={(level, delta) => updateCount(setEssayCounts, level, delta)}
+                    />
+                  )}
+                </CardContent>
+              </Card>
+
+              <Card className="rounded-2xl shadow-sm">
+                <CardHeader className="pb-4">
+                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                    <ShieldCheck className="h-4 w-4 text-primary" />
+                    Constraints
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                  <ToggleRow
+                    label="Strict grounding"
+                    description="Force the generator to stay close to retrieved evidence."
+                    checked={strictGrounding}
+                    onChange={setStrictGrounding}
+                  />
+                  <ToggleRow
+                    label="Strict scope"
+                    description="Do not step outside the selected curriculum units."
+                    checked={strictScope}
+                    onChange={setStrictScope}
+                  />
+                  <ToggleRow
+                    label="Allow applied questions"
+                    description="Permit reasoning and application while staying grounded."
+                    checked={appliedQuestions}
+                    onChange={setAppliedQuestions}
+                  />
+                  <ToggleRow
+                    label="Gradually increase difficulty"
+                    description="Arrange items from easier to harder over the exam."
+                    checked={gradualDifficulty}
+                    onChange={setGradualDifficulty}
+                  />
+
+                  <div className="space-y-2">
+                    <Label>Target Bloom level</Label>
                     <Select value={bloomLevel} onValueChange={setBloomLevel}>
-                      <SelectTrigger className="h-10">
+                      <SelectTrigger className="h-11">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -659,69 +606,192 @@ export default function GenerateExamPage() {
                         ))}
                       </SelectContent>
                     </Select>
-                    <p className="text-xs text-muted-foreground">
-                      {"Sets the cognitive complexity target based on Bloom's revised taxonomy."}
-                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>Academic level</Label>
+                    <Input
+                      value={gradeLevelScope}
+                      onChange={(event) => setGradeLevelScope(event.target.value)}
+                      placeholder="undergraduate"
+                    />
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label>Creativity level</Label>
+                      <span className="text-xs text-muted-foreground">{creativityLevel[0]}%</span>
+                    </div>
+                    <Slider value={creativityLevel} onValueChange={setCreativityLevel} max={100} step={5} />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>Variants</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={examCount}
+                      onChange={(event) => setExamCount(Number(event.target.value) || 1)}
+                    />
                   </div>
                 </CardContent>
-              </AccordionContent>
-            </AccordionItem>
-          </Accordion>
-        </Card>
+              </Card>
+            </div>
 
-        {/* Generate Button */}
-        <div className="flex items-center justify-end gap-3 pb-6">
-          <Button variant="outline" size="lg" onClick={() => router.push("/dashboard")}>
-            Cancel
-          </Button>
-          <Button
-            size="lg"
-            className="px-8"
-            onClick={handleGenerate}
-            disabled={!selectedTextbook || (chapterCount > 0 && selectedChapters.length === 0) || totalQuestions === 0}
-          >
-            <Sparkles className="mr-2 h-4 w-4" />
-            Generate Exam
-            <ChevronRight className="ml-1 h-4 w-4" />
-          </Button>
-        </div>
+            <Card className="rounded-2xl shadow-sm">
+              <CardContent className="flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary">{totalQuestions} questions</Badge>
+                    <Badge variant="outline">
+                      {selectedScope.length > 0 ? `${selectedScope.length} scope units selected` : "Whole document scope"}
+                    </Badge>
+                    <Badge variant="outline">{selectedDocumentItem?.title || "No document"}</Badge>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    The generator will create an exam blueprint first, retrieve only relevant evidence, and then generate questions per blueprint cell.
+                  </p>
+                </div>
+                <Button size="lg" className="h-11 md:min-w-56" disabled={!selectedDocumentItem || totalQuestions === 0} onClick={handleGenerate}>
+                  <Wand2 className="mr-2 h-4 w-4" />
+                  Generate exam
+                </Button>
+              </CardContent>
+            </Card>
+          </>
+        )}
       </div>
     </>
-  )
+  );
 }
 
-function ConstraintToggle({
+function MiniStat({
+  label,
+  value,
+  icon: Icon,
+}: {
+  label: string;
+  value: string;
+  icon: typeof BookOpen;
+}) {
+  return (
+    <div className="rounded-xl border bg-muted/20 p-4">
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <Icon className="h-3.5 w-3.5" />
+        {label}
+      </div>
+      <p className="mt-2 text-lg font-semibold text-foreground">{value}</p>
+    </div>
+  );
+}
+
+function ScopeTreeNode({
+  node,
+  selectedScopeIds,
+  onToggle,
+  depth = 0,
+}: {
+  node: CurriculumNode;
+  selectedScopeIds: string[];
+  onToggle: (scopeId: string, checked: boolean) => void;
+  depth?: number;
+}) {
+  const scopeId = buildScopePayload(node).scope_id || "";
+  const checked = selectedScopeIds.includes(scopeId);
+
+  return (
+    <div>
+      <div
+        className="flex items-start gap-3 rounded-xl border bg-background px-3 py-3"
+        style={{ marginLeft: `${depth * 14}px` }}
+      >
+        <Checkbox checked={checked} onCheckedChange={(value) => onToggle(scopeId, value === true)} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-medium text-foreground">{node.title}</p>
+            <Badge variant="outline" className="capitalize">
+              {node.section_type || "topic"}
+            </Badge>
+            {node.chapter_number > 0 && <Badge variant="secondary">Chapter {node.chapter_number}</Badge>}
+          </div>
+          {(node.summary || node.page_from || node.page_to) && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {node.summary || "Scoped curriculum unit"}
+              {node.page_from || node.page_to ? ` · pages ${node.page_from || "?"}-${node.page_to || "?"}` : ""}
+            </p>
+          )}
+        </div>
+      </div>
+      {(node.children || []).length > 0 && (
+        <div className="mt-2 space-y-2">
+          {node.children.map((child) => (
+            <ScopeTreeNode
+              key={buildScopePayload(child).scope_id}
+              node={child}
+              selectedScopeIds={selectedScopeIds}
+              onToggle={onToggle}
+              depth={depth + 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DistributionEditor({
+  title,
+  counts,
+  onChange,
+}: {
+  title: string;
+  counts: { easy: number; medium: number; hard: number };
+  onChange: (level: "easy" | "medium" | "hard", delta: number) => void;
+}) {
+  return (
+    <div className="rounded-xl border p-4">
+      <p className="text-sm font-medium text-foreground">{title}</p>
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+        {(["easy", "medium", "hard"] as const).map((level) => (
+          <div key={level} className="rounded-lg bg-muted/30 p-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs uppercase tracking-wide text-muted-foreground">{level}</span>
+              <span className="text-lg font-semibold text-foreground">{counts[level]}</span>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <Button variant="outline" size="sm" className="flex-1" onClick={() => onChange(level, -1)}>
+                -
+              </Button>
+              <Button variant="outline" size="sm" className="flex-1" onClick={() => onChange(level, 1)}>
+                +
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ToggleRow({
   label,
   description,
   checked,
-  onCheckedChange,
-  tooltip,
+  onChange,
 }: {
-  label: string
-  description: string
-  checked: boolean
-  onCheckedChange: (checked: boolean) => void
-  tooltip: string
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 rounded-xl border p-4">
-      <div className="flex items-start gap-3 min-w-0">
-        <div className="flex flex-col gap-0.5">
-          <div className="flex items-center gap-1.5">
-            <span className="text-sm font-medium text-foreground">{label}</span>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Info className="h-3.5 w-3.5 text-muted-foreground cursor-help shrink-0" />
-              </TooltipTrigger>
-              <TooltipContent side="top" className="max-w-xs">
-                <p className="text-xs">{tooltip}</p>
-              </TooltipContent>
-            </Tooltip>
-          </div>
-          <span className="text-xs text-muted-foreground">{description}</span>
-        </div>
+    <label className="flex cursor-pointer items-start justify-between gap-4 rounded-xl border p-4">
+      <div>
+        <p className="text-sm font-medium text-foreground">{label}</p>
+        <p className="mt-1 text-xs text-muted-foreground">{description}</p>
       </div>
-      <Switch checked={checked} onCheckedChange={onCheckedChange} className="shrink-0" />
-    </div>
-  )
+      <Checkbox checked={checked} onCheckedChange={(value) => onChange(value === true)} />
+    </label>
+  );
 }

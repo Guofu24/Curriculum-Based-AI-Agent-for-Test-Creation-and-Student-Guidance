@@ -154,7 +154,7 @@ export default function HistoryPage() {
               <div className="relative flex-1">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
-                  placeholder="Search exams or textbooks..."
+                  placeholder="Search exams or documents..."
                   className="h-9 pl-9"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
@@ -185,6 +185,7 @@ export default function HistoryPage() {
                     <SelectItem value="all">All Difficulties</SelectItem>
                     <SelectItem value="basic">Basic</SelectItem>
                     <SelectItem value="advanced">Advanced</SelectItem>
+                    <SelectItem value="application">Application</SelectItem>
                     <SelectItem value="high_application">High Application</SelectItem>
                     <SelectItem value="custom">Custom</SelectItem>
                   </SelectContent>
@@ -258,7 +259,7 @@ export default function HistoryPage() {
                           {exam.title}
                         </Link>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          {exam.total_questions} questions
+                          {exam.total_questions} questions · {exam.status}
                         </p>
                       </TableCell>
                       <TableCell className="hidden lg:table-cell">

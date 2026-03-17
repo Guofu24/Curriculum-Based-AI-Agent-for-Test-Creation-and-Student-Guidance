@@ -22,7 +22,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
 from database import init_db
-from routers import auth_router, textbooks_router, exams_router, generation_router
+from routers import (
+    auth_router,
+    courses_router,
+    documents_router,
+    exams_router,
+    generation_router,
+    textbooks_router,
+)
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -74,6 +81,8 @@ app.add_middleware(
 
 # Routers
 app.include_router(auth_router, prefix=settings.API_PREFIX)
+app.include_router(courses_router, prefix=settings.API_PREFIX)
+app.include_router(documents_router, prefix=settings.API_PREFIX)
 app.include_router(textbooks_router, prefix=settings.API_PREFIX)
 app.include_router(exams_router, prefix=settings.API_PREFIX)
 app.include_router(generation_router, prefix=settings.API_PREFIX)

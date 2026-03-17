@@ -12,6 +12,8 @@ from routers.auth import get_current_user
 from schemas.textbook import TextbookResponse, TextbookListResponse
 from services.textbook_service import TextbookService
 from config import settings
+from utils.security import require_roles
+from models.user import UserRole
 
 router = APIRouter(prefix="/textbooks", tags=["textbooks"])
 
@@ -21,9 +23,11 @@ ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".pptx", ".ppt"}
 @router.post("/upload", response_model=TextbookResponse)
 async def upload_textbook(
     title: str = Form(...),
+    course_id: str | None = Form(None),
+    language: str = Form("vi"),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.LECTURER, UserRole.TEACHING_ASSISTANT)),
 ):
     """Upload a textbook file for processing."""
     # Validate file type
@@ -50,6 +54,8 @@ async def upload_textbook(
         file_name=file.filename,
         file_content=content,
         file_type=file_ext.lstrip("."),
+        course_id=course_id,
+        language=language,
     )
 
     return textbook
@@ -67,15 +73,18 @@ async def list_textbooks(
     return [
         TextbookListResponse(
             id=tb.id,
+            course_id=tb.course_id,
             title=tb.title,
             file_name=tb.file_name,
             file_type=tb.file_type,
             file_size=tb.file_size,
             status=tb.status.value,
             version=tb.version,
+            total_pages_or_slides=tb.total_pages_or_slides,
             total_chunks=tb.total_chunks,
             chapter_count=len(tb.chapters),
             created_at=tb.created_at,
+            updated_at=tb.updated_at,
         )
         for tb in textbooks
     ]
@@ -85,7 +94,7 @@ async def list_textbooks(
 async def get_textbook(
     textbook_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.LECTURER, UserRole.TEACHING_ASSISTANT)),
 ):
     """Get textbook details with chapters."""
     service = TextbookService(db)

@@ -27,7 +27,7 @@ from passlib.context import CryptContext
 
 from config import settings
 from database import get_db
-from models.user import User
+from models.user import User, UserRole
 from models.token_blacklist import TokenBlacklist
 
 logger = logging.getLogger(__name__)
@@ -243,3 +243,18 @@ async def get_current_user(
         raise credentials_exception
 
     return user
+
+
+def require_roles(*allowed_roles: UserRole):
+    allowed = {role.value if isinstance(role, UserRole) else str(role) for role in allowed_roles}
+
+    async def dependency(current_user: User = Depends(get_current_user)) -> User:
+        user_role = current_user.role.value if isinstance(current_user.role, UserRole) else str(current_user.role)
+        if user_role not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to perform this action",
+            )
+        return current_user
+
+    return dependency

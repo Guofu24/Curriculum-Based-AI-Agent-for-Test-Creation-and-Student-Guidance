@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from typing import Optional
 
@@ -54,7 +55,13 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 100
 
     # CORS
-    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://192.168.78.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000"
+    ]
 
     # Auth — JWT tokens
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15              # Short-lived access token (15 phút)
@@ -73,7 +80,22 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: Optional[str] = None
     SMTP_FROM_EMAIL: str = "noreply@examai.local"
 
-    model_config = {"env_file": ".env", "extra": "ignore"}
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def normalize_debug_flag(cls, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "debug", "development"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "release", "production"}:
+                return False
+        return value
+
+    model_config = {"env_file": str(_BASE_DIR / ".env"), "extra": "ignore"}
 
 
 settings = Settings()

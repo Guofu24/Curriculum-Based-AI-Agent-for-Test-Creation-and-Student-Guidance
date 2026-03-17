@@ -17,6 +17,7 @@ import {
 } from "lucide-react"
 import { useAuth } from "@/components/auth-provider"
 import {
+  courses as coursesApi,
   textbooks as textbooksApi,
   exams as examsApi,
   type ExamListItem,
@@ -37,7 +38,8 @@ function formatDate(iso: string) {
 
 export default function DashboardPage() {
   const { user } = useAuth()
-  const [textbookCount, setTextbookCount] = useState(0)
+  const [courseCount, setCourseCount] = useState(0)
+  const [documentCount, setDocumentCount] = useState(0)
   const [examCount, setExamCount] = useState(0)
   const [totalQuestions, setTotalQuestions] = useState(0)
   const [recentExams, setRecentExams] = useState<ExamListItem[]>([])
@@ -46,11 +48,13 @@ export default function DashboardPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [books, examList] = await Promise.all([
+        const [courseList, documentList, examList] = await Promise.all([
+          coursesApi.list(),
           textbooksApi.list(),
           examsApi.list(),
         ])
-        setTextbookCount(books.length)
+        setCourseCount(courseList.length)
+        setDocumentCount(documentList.length)
         setExamCount(examList.length)
         setTotalQuestions(examList.reduce((sum, e) => sum + e.total_questions, 0))
         setRecentExams(examList.slice(0, 3))
@@ -67,8 +71,13 @@ export default function DashboardPage() {
 
   const stats = [
     {
-      title: "Total Textbooks",
-      value: textbookCount.toString(),
+      title: "Courses",
+      value: courseCount.toString(),
+      icon: BookOpen,
+    },
+    {
+      title: "Documents",
+      value: documentCount.toString(),
       icon: BookOpen,
     },
     {
@@ -102,7 +111,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Stats Grid */}
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
           {stats.map((stat) => (
             <Card key={stat.title} className="rounded-2xl shadow-sm">
               <CardHeader className="flex flex-row items-center justify-between pb-2">
@@ -139,7 +148,7 @@ export default function DashboardPage() {
               <Button asChild variant="outline" className="w-full justify-start h-11" size="lg">
                 <Link href="/dashboard/textbooks">
                   <BookOpen className="mr-2 h-4 w-4" />
-                  Upload Textbook
+                  Manage Documents
                 </Link>
               </Button>
               <Button asChild variant="outline" className="w-full justify-start h-11" size="lg">
@@ -186,7 +195,7 @@ export default function DashboardPage() {
                           </span>
                         </div>
                         <span className="text-xs text-muted-foreground truncate">
-                          {exam.total_questions} questions - {exam.chapters.length > 0 ? `Ch. ${exam.chapters.join(", ")}` : "All chapters"}
+                          {exam.total_questions} questions - {exam.chapters.length > 0 ? `Ch. ${exam.chapters.join(", ")}` : "Scoped curriculum"}
                         </span>
                       </div>
                       <div className="flex items-center gap-2 shrink-0 ml-4">

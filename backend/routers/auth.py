@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_db
-from models.user import User
+from models.user import User, UserRole
 from models.token_blacklist import TokenBlacklist
 from schemas.auth import (
     LoginRequest,
@@ -125,6 +125,7 @@ async def register(request: UserCreate, db: AsyncSession = Depends(get_db)):
         email=request.email,
         hashed_password=hash_password(request.password),  # bcrypt hash
         full_name=request.full_name,
+        role=UserRole(request.role),
         department=request.department,
         university=request.university,
         is_email_verified=auto_verify,

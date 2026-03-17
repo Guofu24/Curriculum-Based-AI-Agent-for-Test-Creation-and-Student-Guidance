@@ -99,15 +99,15 @@ export default function LoginPage() {
               Generate professional exams with AI intelligence.
             </h1>
             <p className="mt-4 text-lg text-primary-foreground/70 leading-relaxed max-w-md">
-              Upload your textbooks, configure constraints, and let AI create validated, curriculum-aligned examinations in minutes.
+              Upload course documents, configure scope and constraints, and let AI create validated, curriculum-aligned examinations in minutes.
             </p>
           </div>
 
           <div className="flex flex-col gap-4">
             <FeatureItem
               icon={<BookOpen className="h-4 w-4" />}
-              title="Textbook-Grounded"
-              description="Questions strictly derived from your uploaded materials"
+              title="Curriculum-Grounded"
+              description="Questions strictly derived from your uploaded course materials"
             />
             <FeatureItem
               icon={<Sparkles className="h-4 w-4" />}

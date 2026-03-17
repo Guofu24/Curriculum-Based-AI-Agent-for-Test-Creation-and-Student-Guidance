@@ -10,7 +10,7 @@ const _sourceSerif = Source_Serif_4({ subsets: ['latin'], variable: '--font-sour
 
 export const metadata: Metadata = {
   title: 'ExamAI - AI Exam Generation Platform',
-  description: 'Generate professional exams from your textbooks using AI. Built for university lecturers.',
+  description: 'Generate professional exams from curriculum-grounded course documents using AI. Built for university lecturers.',
   icons: {
     icon: [
       {

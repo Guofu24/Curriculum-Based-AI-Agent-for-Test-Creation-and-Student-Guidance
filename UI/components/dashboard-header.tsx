@@ -32,7 +32,7 @@ export function DashboardHeader({ title }: { title: string }) {
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Search textbooks, exams..."
+              placeholder="Search courses, documents, exams..."
               className="h-8 w-56 pl-8 text-sm"
               autoFocus
               onBlur={() => setSearchOpen(false)}
@@ -74,7 +74,7 @@ export function DashboardHeader({ title }: { title: string }) {
             <DropdownMenuItem onClick={() => router.push("/dashboard/textbooks")}>
               <div className="flex flex-col gap-0.5">
                 <span className="text-sm">Textbook processed</span>
-                <span className="text-xs text-muted-foreground">Algorithms 4th Ed. - 5 hours ago</span>
+                <span className="text-xs text-muted-foreground">Document structured and indexed - 5 hours ago</span>
               </div>
             </DropdownMenuItem>
           </DropdownMenuContent>

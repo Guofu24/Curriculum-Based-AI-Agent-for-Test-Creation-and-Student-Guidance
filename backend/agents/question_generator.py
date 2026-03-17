@@ -263,6 +263,74 @@ class QuestionGeneratorAgent:
 
         return segments, all_chunk_ids, all_chunk_texts
 
+    def _build_single_source_evidence(
+        self,
+        chunk_assignment: ChunkAssignment,
+    ) -> list[dict]:
+        return [
+            {
+                "chunk_id": chunk_assignment.chunk_id,
+                "chapter_number": chunk_assignment.chapter,
+                "role": "primary",
+                "text_preview": chunk_assignment.chunk_text[:500],
+            }
+        ]
+
+    def _build_bundle_source_evidence(
+        self,
+        bundle: BundleContext,
+    ) -> list[dict]:
+        evidence = [
+            {
+                "chunk_id": bundle.primary_chunk_id,
+                "role": "primary",
+                "text_preview": bundle.primary_chunk_text[:500],
+            }
+        ]
+        for chunk in bundle.supporting_chunks:
+            evidence.append(
+                {
+                    "chunk_id": chunk.get("chunk_id", ""),
+                    "chapter_number": chunk.get("chapter_number"),
+                    "page": chunk.get("page"),
+                    "parent_heading": chunk.get("parent_heading"),
+                    "role": bundle.evidence_roles.get(
+                        chunk.get("chunk_id", ""),
+                        chunk.get("role", "support"),
+                    ),
+                    "score": chunk.get("relatedness_score"),
+                    "text_preview": (chunk.get("chunk_text", "") or "")[:500],
+                }
+            )
+        return evidence
+
+    def _build_context_source_evidence(self, context: RetrievedContext) -> list[dict]:
+        evidence = []
+        for chunk in context.chunks:
+            metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+            evidence.append(
+                {
+                    "chunk_id": chunk.get("id", ""),
+                    "chapter_number": metadata.get("chapter_number"),
+                    "page": metadata.get("page"),
+                    "parent_heading": metadata.get("parent_heading"),
+                    "role": "primary",
+                    "score": chunk.get("score"),
+                    "text_preview": (chunk.get("text", "") or "")[:500],
+                }
+            )
+        return evidence
+
+    def _normalize_rubric(self, question_type: str, payload: dict) -> dict | None:
+        rubric = payload.get("rubric")
+        if isinstance(rubric, dict):
+            return rubric
+        if question_type == "essay":
+            explanation = (payload.get("explanation") or "").strip()
+            if explanation:
+                return {"guidance": explanation}
+        return None
+
     def _build_bundle_user_message(
         self,
         assignments: list[dict],
@@ -412,6 +480,7 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
 
         # Convert to GeneratedQuestion objects
         generated = []
+        source_evidence = self._build_single_source_evidence(chunk_assignment)
         for i, q_data in enumerate(questions_data):
             if i >= len(assignments):
                 break
@@ -421,6 +490,7 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
 
             generated.append(GeneratedQuestion(
                 slot_number=a.get("slot_number", 0),
+                blueprint_cell_key=a.get("blueprint_cell_key", ""),
                 question_type=q_data.get("question_type", a["question_type"]),
                 bloom_level=q_data.get("bloom_level", a["bloom_level"]),
                 difficulty_score=self._difficulty_to_score(
@@ -429,9 +499,15 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
                 content=q_data.get("content", ""),
                 options=options,
                 correct_answer=q_data.get("correct_answer", ""),
+                rubric=self._normalize_rubric(
+                    q_data.get("question_type", a["question_type"]),
+                    q_data,
+                ),
                 explanation=q_data.get("explanation", ""),
                 source_chunks=[chunk_assignment.chunk_id],
                 source_texts=[chunk_assignment.chunk_text[:500]],
+                source_evidence=list(source_evidence),
+                scope_tags=list(a.get("scope_tags") or []),
             ))
 
         logger.debug(
@@ -497,6 +573,7 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         )
 
         generated = []
+        source_evidence = self._build_bundle_source_evidence(bundle)
         for i, q_data in enumerate(questions_data):
             if i >= len(assignments):
                 break
@@ -510,6 +587,7 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
 
             generated.append(GeneratedQuestion(
                 slot_number=a.get("slot_number", 0),
+                blueprint_cell_key=a.get("blueprint_cell_key", ""),
                 question_type=q_data.get("question_type", a["question_type"]),
                 bloom_level=q_data.get("bloom_level", a["bloom_level"]),
                 difficulty_score=self._difficulty_to_score(
@@ -518,9 +596,15 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
                 content=q_data.get("content", ""),
                 options=options,
                 correct_answer=q_data.get("correct_answer", ""),
+                rubric=self._normalize_rubric(
+                    q_data.get("question_type", a["question_type"]),
+                    q_data,
+                ),
                 explanation=q_data.get("explanation", ""),
                 source_chunks=all_chunk_ids,
                 source_texts=all_chunk_texts,
+                source_evidence=list(source_evidence),
+                scope_tags=list(a.get("scope_tags") or []),
             ))
 
         logger.debug(
@@ -685,6 +769,15 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
                 "Do NOT use any external knowledge."
             )
 
+        edit_prompt = (constraints.get("_edit_prompt") or "").strip()
+        edit_instruction = ""
+        if edit_prompt:
+            edit_instruction = (
+                "\n\nEdit guidance to preserve while regenerating:\n"
+                f"{edit_prompt}\n"
+                "Keep the same scope, answerability requirements, and question family."
+            )
+
         user_message = f"""Generate a {slot.question_type.upper()} question with these specifications:
 
 Chapter: {slot.target_chapter}
@@ -692,6 +785,7 @@ Topics: {', '.join(slot.target_topics) if slot.target_topics else 'General'}
 Bloom's Level: {slot.bloom_level}
 Difficulty: {slot.difficulty_score:.2f} (scale 0.0-1.0)
 Question Number: {slot.slot_number}
+Scope Tags: {', '.join(getattr(slot, 'scope_tags', []) or [])}
 
 === TEXTBOOK CONTEXT (use ONLY this information) ===
 
@@ -699,7 +793,7 @@ Question Number: {slot.slot_number}
 
 === END CONTEXT ===
 
-Generate the question now."""
+Generate the question now.{edit_instruction}"""
 
         messages = [
             SystemMessage(content=system_prompt),
@@ -716,15 +810,19 @@ Generate the question now."""
 
         return GeneratedQuestion(
             slot_number=slot.slot_number,
+            blueprint_cell_key=getattr(slot, "blueprint_cell_key", ""),
             question_type=slot.question_type,
             bloom_level=slot.bloom_level,
             difficulty_score=slot.difficulty_score,
             content=question_data.get("content", ""),
             options=options,
             correct_answer=question_data.get("correct_answer", ""),
+            rubric=self._normalize_rubric(slot.question_type, question_data),
             explanation=question_data.get("explanation", ""),
             source_chunks=[c["id"] for c in context.chunks],
             source_texts=[c["text"] for c in context.chunks],
+            source_evidence=self._build_context_source_evidence(context),
+            scope_tags=list(getattr(slot, "scope_tags", []) or []),
         )
 
     # ─── Response parsing ──────────────────────────────────────────
@@ -809,10 +907,14 @@ Generate the question now."""
             difficulty_score=original_question.difficulty_score,
             target_chapter=0,  # will use existing context
             target_topics=[],
+            blueprint_cell_key=original_question.blueprint_cell_key,
+            scope_tags=list(original_question.scope_tags or []),
         )
 
         if edit_prompt:
             # Add specific edit guidance
             constraints = {**constraints, "_edit_prompt": edit_prompt}
 
-        return await self._generate_single(slot, context, constraints)
+        regenerated = await self._generate_single(slot, context, constraints)
+        regenerated.is_locked = original_question.is_locked
+        return regenerated

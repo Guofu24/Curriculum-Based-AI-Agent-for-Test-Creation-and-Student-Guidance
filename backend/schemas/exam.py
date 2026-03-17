@@ -1,9 +1,8 @@
-from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Optional
 from datetime import datetime
+from typing import Optional
 
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-# --- Generation Request ---
 
 class DifficultyDistribution(BaseModel):
     easy: int = 0
@@ -12,77 +11,206 @@ class DifficultyDistribution(BaseModel):
 
 
 class QuestionDistribution(BaseModel):
-    mcq: DifficultyDistribution = DifficultyDistribution()
-    essay: DifficultyDistribution = DifficultyDistribution()
+    mcq: DifficultyDistribution = Field(default_factory=DifficultyDistribution)
+    essay: DifficultyDistribution = Field(default_factory=DifficultyDistribution)
+
+
+class ScopeUnitPayload(BaseModel):
+    scope_id: Optional[str] = None
+    scope_type: str = "chapter"
+    title: Optional[str] = None
+    chapter_number: int = 0
+    page_from: Optional[int] = None
+    page_to: Optional[int] = None
+    tags: list[str] = Field(default_factory=list)
 
 
 class AdvancedConstraints(BaseModel):
-    strict_grounding: bool = True  # Only textbook knowledge
+    strict_grounding: bool = True
     allow_applied_questions: bool = True
+    strict_scope: bool = True
     grade_level_scope: Optional[str] = None
     creativity_level: float = Field(default=0.5, ge=0.0, le=1.0)
-    bloom_levels: list[str] = ["remember", "understand", "apply", "analyze"]
+    bloom_levels: list[str] = Field(
+        default_factory=lambda: [
+            "remember",
+            "understand",
+            "apply",
+            "analyze",
+            "evaluate",
+            "create",
+        ]
+    )
     max_concurrency: int = Field(default=1, ge=1, le=5)
 
 
 class ExamGenerationRequest(BaseModel):
-    textbook_id: str
-    chapters: list[int] = []  # chapter numbers (empty = use entire textbook)
-    prompt: str  # e.g. "Generate midterm exam for chapters 1-3"
-    exam_type: str  # mcq, essay, mixed
-    difficulty: str  # basic, advanced, application, high_application, custom
+    textbook_id: Optional[str] = None
+    document_id: Optional[str] = None
+    document_ids: list[str] = Field(default_factory=list)
+    course_id: Optional[str] = None
+    chapters: list[int] = Field(default_factory=list)
+    scope: list[ScopeUnitPayload] = Field(default_factory=list)
+    prompt: str = ""
+    exam_type: str
+    difficulty: str = "custom"
     question_distribution: QuestionDistribution
     num_variants: int = Field(default=1, ge=1, le=10)
     gradually_increasing: bool = False
-    constraints: AdvancedConstraints = AdvancedConstraints()
+    constraints: AdvancedConstraints = Field(default_factory=AdvancedConstraints)
+    instructions: str = ""
+    time_limit_minutes: Optional[int] = None
+    output_language: str = "vi"
+    bloom_distribution: dict[str, int] = Field(default_factory=dict)
+    formatting_preferences: dict = Field(default_factory=dict)
+    strict_scope: bool = True
 
+    @field_validator("exam_type")
+    @classmethod
+    def validate_exam_type(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"mcq", "essay", "mixed"}:
+            raise ValueError("exam_type must be one of: mcq, essay, mixed")
+        return normalized
 
-# --- Question Schema ---
+    @field_validator("difficulty")
+    @classmethod
+    def validate_difficulty(cls, value: str) -> str:
+        normalized = (value or "custom").strip().lower()
+        allowed = {"basic", "advanced", "application", "high_application", "custom"}
+        if normalized not in allowed:
+            raise ValueError(
+                "difficulty must be one of: basic, advanced, application, high_application, custom"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def normalize_scope(self):
+        if not self.textbook_id:
+            if self.document_id:
+                self.textbook_id = self.document_id
+            elif len(self.document_ids) == 1:
+                self.textbook_id = self.document_ids[0]
+        if not self.textbook_id and not self.course_id:
+            raise ValueError("Provide textbook_id/document_id or course_id")
+        if not self.scope and self.chapters:
+            self.scope = [
+                ScopeUnitPayload(
+                    scope_id=f"chapter:{chapter}",
+                    scope_type="chapter",
+                    title=f"Chapter {chapter}",
+                    chapter_number=chapter,
+                    tags=[f"chapter:{chapter}"],
+                )
+                for chapter in self.chapters
+            ]
+        return self
+
 
 class MCQOption(BaseModel):
-    label: str  # A, B, C, D
+    label: str
     text: str
+
+
+class SourceEvidenceResponse(BaseModel):
+    chunk_id: str
+    chapter_number: Optional[int] = None
+    page: Optional[int] = None
+    parent_heading: Optional[str] = None
+    role: Optional[str] = None
+    score: Optional[float] = None
+    text_preview: Optional[str] = None
 
 
 class QuestionResponse(BaseModel):
     id: str
     question_number: int
+    blueprint_cell_key: Optional[str] = None
     question_type: str
     bloom_level: str
     difficulty_score: float
     content: str
     options: Optional[list[MCQOption]] = None
     correct_answer: str
+    rubric: Optional[dict] = None
     explanation: Optional[str] = None
     source_citations: Optional[list[str]] = None
+    source_evidence: Optional[list[SourceEvidenceResponse]] = None
+    scope_tags: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    verification_status: Optional[str] = None
+    is_human_edited: bool = False
+    is_locked: bool = False
     is_validated: bool = False
-    quality_score_detail: Optional[dict] = None     # per-question quality rubric
-    grounding_report_detail: Optional[dict] = None  # per-question grounding analysis
+    quality_score_detail: Optional[dict] = None
+    grounding_report_detail: Optional[dict] = None
 
     model_config = {"from_attributes": True}
 
 
-# --- Exam Response ---
+class BlueprintCellResponse(BaseModel):
+    cell_id: str
+    scope_unit: dict
+    question_type: str
+    bloom_level: str
+    target_count: int
+    generated_count: int = 0
+    priority: int = 0
+    overgenerate_count: int = 0
+
+
+class ExamSpecResponse(BaseModel):
+    exam_type: str
+    total_questions: int
+    time_limit_minutes: Optional[int] = None
+    output_language: str = "vi"
+    instructions: str = ""
+    strict_scope_flag: bool = True
+    selected_scope: list[dict] = Field(default_factory=list)
+    bloom_distribution: dict[str, int] = Field(default_factory=dict)
+    question_mix: dict[str, int] = Field(default_factory=dict)
+    formatting_preferences: dict = Field(default_factory=dict)
+    source_prompt: str = ""
+
+
+class ExamBlueprintResponse(BaseModel):
+    title: str
+    total_questions: int
+    difficulty_distribution: dict = Field(default_factory=dict)
+    bloom_distribution: dict = Field(default_factory=dict)
+    cells: list[BlueprintCellResponse] = Field(default_factory=list)
+
 
 class ExamResponse(BaseModel):
     id: str
     title: str
     textbook_id: str
+    course_id: Optional[str] = None
     exam_type: str
     difficulty: str
     status: str
-    chapters: list[int] = []
+    chapters: list[int] = Field(default_factory=list)
     variant_number: int
     total_questions: int
+    instructions: Optional[str] = None
+    output_language: str = "vi"
+    strict_scope_flag: bool = True
     quality_score: Optional[float] = None
     created_at: datetime
-    questions: list[QuestionResponse] = []
-    # Phase 1-5 aggregate data
-    quality_scores: Optional[list[dict]] = None       # per-question quality rubric scores
-    grounding_reports: Optional[list[dict]] = None     # per-question grounding analysis
-    duplicate_groups: Optional[list[dict]] = None      # dedup clusters
-    provider_logs: Optional[list[dict]] = None         # LLM call logs
-    edit_impact_level: Optional[str] = None            # cosmetic, moderate, strong
+    updated_at: Optional[datetime] = None
+    published_at: Optional[datetime] = None
+    questions: list[QuestionResponse] = Field(default_factory=list)
+    exam_spec: Optional[dict] = None
+    blueprint: Optional[dict] = None
+    selected_scope: Optional[list[dict]] = None
+    quality_scores: Optional[list[dict]] = None
+    grounding_reports: Optional[list[dict]] = None
+    duplicate_groups: Optional[list[dict]] = None
+    provider_logs: Optional[list[dict]] = None
+    edit_impact_level: Optional[str] = None
+    edit_history: Optional[list[dict]] = None
+    current_version: Optional["ExamVersionResponse"] = None
+    versions: Optional[list["ExamVersionResponse"]] = None
 
     model_config = {"from_attributes": True}
 
@@ -91,33 +219,36 @@ class ExamListResponse(BaseModel):
     id: str
     title: str
     textbook_id: str
+    course_id: Optional[str] = None
     exam_type: str
     difficulty: str
     status: str
-    chapters: list[int] = []
+    chapters: list[int] = Field(default_factory=list)
     total_questions: int
+    strict_scope_flag: bool = True
     quality_score: Optional[float] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
 
-# --- Edit Request ---
-
 class QuestionEditRequest(BaseModel):
-    question_ids: list[str]  # IDs of questions to regenerate
-    edit_prompt: Optional[str] = None  # optional guidance for regeneration
-    range_start: Optional[int] = None  # question number start
-    range_end: Optional[int] = None  # question number end
-    edit_type: str = "regenerate"  # regenerate, edit_text
-    new_content: Optional[str] = None  # for direct text edits
+    question_ids: list[str] = Field(default_factory=list)
+    edit_prompt: Optional[str] = None
+    range_start: Optional[int] = None
+    range_end: Optional[int] = None
+    edit_type: str = "regenerate"
+    new_content: Optional[str] = None
+    new_correct_answer: Optional[str] = None
+    new_bloom_level: Optional[str] = None
 
     @field_validator("edit_type")
     @classmethod
     def normalize_edit_type(cls, value: str) -> str:
         normalized = (value or "regenerate").strip().lower()
-        if normalized not in {"regenerate", "edit_text"}:
-            raise ValueError("edit_type must be 'regenerate' or 'edit_text'")
+        if normalized not in {"regenerate", "edit_text", "edit_answer", "edit_bloom", "lock", "unlock", "delete"}:
+            raise ValueError("Unsupported edit_type")
         return normalized
 
     @model_validator(mode="after")
@@ -130,6 +261,10 @@ class QuestionEditRequest(BaseModel):
             raise ValueError("range_start and range_end must be >= 1")
         if self.edit_type == "edit_text" and not (self.new_content and self.new_content.strip()):
             raise ValueError("new_content is required when edit_type is 'edit_text'")
+        if self.edit_type == "edit_answer" and not (self.new_correct_answer and self.new_correct_answer.strip()):
+            raise ValueError("new_correct_answer is required when edit_type is 'edit_answer'")
+        if self.edit_type == "edit_bloom" and not (self.new_bloom_level and self.new_bloom_level.strip()):
+            raise ValueError("new_bloom_level is required when edit_type is 'edit_bloom'")
         return self
 
 
@@ -138,11 +273,36 @@ class ExamPartialRegenerateRequest(BaseModel):
     edits: list[QuestionEditRequest]
 
 
-# --- Generation Status (SSE) ---
+class EditOperationResponse(BaseModel):
+    id: str
+    edit_type: str
+    target_question_id: Optional[str] = None
+    prompt_used: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ExamVersionResponse(BaseModel):
+    id: str
+    version_number: int
+    status: str
+    created_by: str
+    parent_version_id: Optional[str] = None
+    change_summary: Optional[str] = None
+    created_at: datetime
+    questions: list[QuestionResponse] = Field(default_factory=list)
+    edit_operations: list[EditOperationResponse] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}
+
+
+ExamResponse.model_rebuild()
+
 
 class GenerationStep(BaseModel):
     step: int
     name: str
-    status: str  # pending, running, completed, failed
+    status: str
     message: Optional[str] = None
-    progress: Optional[float] = None  # 0.0 to 1.0
+    progress: Optional[float] = None

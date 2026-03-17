@@ -6,11 +6,11 @@ import { cn } from "@/lib/utils"
 import type { GenerationStep as SSEStep } from "@/lib/api"
 
 const defaultSteps = [
-  { id: 1, label: "Parsing textbook", description: "Extracting content from selected chapters", icon: BookOpen },
-  { id: 2, label: "Retrieving knowledge", description: "Building knowledge graph from textbook content", icon: Database },
-  { id: 3, label: "Generating questions", description: "AI is crafting exam questions based on your configuration", icon: Sparkles },
-  { id: 4, label: "Validating constraints", description: "Checking hallucination, scope, and difficulty alignment", icon: ShieldCheck },
-  { id: 5, label: "Finalizing exam", description: "Formatting and organizing the final exam document", icon: FileCheck },
+  { id: 1, label: "Building exam spec", description: "Normalizing your request into a structured exam specification", icon: BookOpen },
+  { id: 2, label: "Planning blueprint", description: "Allocating scope, question types, and Bloom targets across the exam", icon: Database },
+  { id: 3, label: "Retrieving evidence", description: "Finding the most relevant grounded content inside the selected scope", icon: Sparkles },
+  { id: 4, label: "Generating and validating", description: "Creating questions and checking scope, quality, and answerability", icon: ShieldCheck },
+  { id: 5, label: "Finalizing exam", description: "Saving the generated version and preparing it for review", icon: FileCheck },
 ]
 
 export function GenerationStepper({

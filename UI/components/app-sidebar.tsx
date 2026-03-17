@@ -37,7 +37,7 @@ import { useAuth } from "@/components/auth-provider"
 
 const navItems = [
   { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { title: "My Textbooks", href: "/dashboard/textbooks", icon: BookOpen },
+  { title: "Courses & Documents", href: "/dashboard/textbooks", icon: BookOpen },
   { title: "Generate Exam", href: "/dashboard/generate", icon: Sparkles },
   { title: "Exam History", href: "/dashboard/history", icon: History },
 ]
@@ -71,7 +71,7 @@ export function AppSidebar() {
                 </div>
                 <div className="flex flex-col gap-0.5 leading-none">
                   <span className="font-semibold text-sm">ExamAI</span>
-                  <span className="text-xs text-muted-foreground">Exam Generation</span>
+                  <span className="text-xs text-muted-foreground">Curriculum Assessment</span>
                 </div>
               </Link>
             </SidebarMenuButton>

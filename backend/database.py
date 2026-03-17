@@ -24,5 +24,7 @@ async def get_db() -> AsyncSession:
 
 
 async def init_db():
+    import models  # noqa: F401 - ensure all tables are registered before create_all
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

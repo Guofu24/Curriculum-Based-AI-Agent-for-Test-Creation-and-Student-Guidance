@@ -44,7 +44,6 @@ from agents.state import (
     RetrievedContext,
     ChunkAssignment,
 )
-from agents.document_processor import DocumentProcessorAgent
 from agents.retrieval import RetrievalAgent
 from agents.blueprint import BlueprintAgent, assign_chunks_to_slots
 from agents.question_generator import QuestionGeneratorAgent
@@ -133,9 +132,17 @@ async def create_blueprint_node(state: AgentState) -> dict:
         gradually_increasing=state["gradually_increasing"],
         constraints=state["constraints"],
         textbook_metadata=state.get("textbook_metadata", {}),
+        scope=state.get("scope", []),
+        time_limit_minutes=state.get("time_limit_minutes"),
+        output_language=state.get("output_language", "vi"),
+        instructions=state.get("instructions", ""),
+        bloom_distribution=state.get("bloom_distribution", {}),
+        formatting_preferences=state.get("formatting_preferences", {}),
+        strict_scope=state.get("strict_scope", True),
     )
 
     return {
+        "exam_spec": blueprint.exam_spec,
         "blueprint": blueprint,
         "original_quota": original_quota,
         "current_step": "blueprint",
@@ -143,17 +150,36 @@ async def create_blueprint_node(state: AgentState) -> dict:
     }
 
 
+async def retrieve_contexts_node(state: AgentState) -> dict:
+    """Node: Retrieve grounded evidence for each blueprint slot."""
+    logger.info("Step 3/7: Retrieving scoped evidence for blueprint slots...")
+
+    retrieval_agent: RetrievalAgent = state["_retrieval_agent"]
+    blueprint: ExamBlueprint = state["blueprint"]
+    retrieved_contexts = await retrieval_agent.retrieve_for_blueprint(
+        blueprint=blueprint,
+        textbook_id=state["textbook_id"],
+        chapters=state["chapters"],
+        constraints=state["constraints"],
+    )
+
+    return {
+        "retrieved_contexts": retrieved_contexts,
+        "current_step": "retrieving",
+        "step_progress": 0.32,
+    }
+
+
 async def assign_chunks_node(state: AgentState) -> dict:
     """Node: Assign specific chunks to question generation tasks."""
-    logger.info("Step 3/7: Assigning chunks for micro-prompting...")
+    logger.info("Step 4/7: Assigning retrieved evidence bundles...")
 
     blueprint: ExamBlueprint = state["blueprint"]
-    db_session = state["_db_session"]
+    retrieved_contexts: list[RetrievedContext] = state.get("retrieved_contexts", [])
 
     chunk_assignments = await assign_chunks_to_slots(
         blueprint=blueprint,
-        textbook_id=state["textbook_id"],
-        db_session=db_session,
+        retrieved_contexts=retrieved_contexts,
     )
 
     chunk_assignment_payloads = [
@@ -165,13 +191,13 @@ async def assign_chunks_node(state: AgentState) -> dict:
         "chunk_assignments": chunk_assignments,
         "chunk_assignment_payloads": chunk_assignment_payloads,
         "current_step": "assigning_chunks",
-        "step_progress": 0.35,
+        "step_progress": 0.42,
     }
 
 
 async def generate_from_chunks_node(state: AgentState) -> dict:
     """Node: Generate questions via micro-prompting (sequential, rate-limit aware)."""
-    logger.info("Step 4/7: Generating questions (micro-prompting, sequential)...")
+    logger.info("Step 5/7: Generating questions from blueprint slots...")
 
     generator: QuestionGeneratorAgent = state["_question_generator"]
     chunk_assignments: list[ChunkAssignment] = state["chunk_assignments"]
@@ -211,13 +237,13 @@ async def generate_from_chunks_node(state: AgentState) -> dict:
         "generated_questions": questions,
         "question_chunk_metadata": question_chunk_metadata,
         "current_step": "generating",
-        "step_progress": 0.6,
+        "step_progress": 0.62,
     }
 
 
 async def validate_questions_node(state: AgentState) -> dict:
     """Node: Validate all questions for grounding and quality."""
-    logger.info("Step 5/7: Validating constraints...")
+    logger.info("Step 6/7: Validating constraints...")
 
     validator: ValidatorAgent = state["_validator"]
     questions = state["generated_questions"]
@@ -232,13 +258,13 @@ async def validate_questions_node(state: AgentState) -> dict:
         "validated_questions": validated,
         "validation_summary": summary,
         "current_step": "validating",
-        "step_progress": 0.75,
+        "step_progress": 0.76,
     }
 
 
 async def quality_judge_node(state: AgentState) -> dict:
     """Node: Deep quality assessment on validated questions."""
-    logger.info("Step 5.5/7: Quality judging...")
+    logger.info("Step 6.3/7: Quality judging...")
 
     judge: QualityJudgeAgent = state["_quality_judge"]
     questions = state.get("validated_questions", [])
@@ -250,13 +276,13 @@ async def quality_judge_node(state: AgentState) -> dict:
         "quality_scores": scores,
         "grounding_reports": grounding_reports,
         "current_step": "quality_judging",
-        "step_progress": 0.8,
+        "step_progress": 0.82,
     }
 
 
 async def dedup_filter_node(state: AgentState) -> dict:
     """Node: Remove near-duplicate questions, keep best representative."""
-    logger.info("Step 5.7/7: Deduplicating...")
+    logger.info("Step 6.6/7: Deduplicating...")
 
     dedup: DedupFilterAgent = state["_dedup_filter"]
     judged = state.get("judged_questions", state.get("validated_questions", []))
@@ -272,7 +298,7 @@ async def dedup_filter_node(state: AgentState) -> dict:
         "validated_questions": filtered,
         "duplicate_groups": duplicate_groups,
         "current_step": "deduplicating",
-        "step_progress": 0.85,
+        "step_progress": 0.86,
     }
 
 
@@ -290,7 +316,7 @@ async def prune_node(state: AgentState) -> dict:
             "step_progress": 0.9,
         }
 
-    logger.info("Step 6/7: Pruning to match quota...")
+    logger.info("Step 7/7: Pruning to match blueprint quota...")
 
     pruning_agent: PruningAgent = state["_pruning_agent"]
     validated = state.get("validated_questions", [])
@@ -303,13 +329,13 @@ async def prune_node(state: AgentState) -> dict:
     return {
         "validated_questions": selected,
         "current_step": "pruning",
-        "step_progress": 0.9,
+        "step_progress": 0.92,
     }
 
 
 async def finalize_node(state: AgentState) -> dict:
     """Node: Finalize the exam — prepare output and drain provider logs."""
-    logger.info("Step 7/7: Finalizing exam...")
+    logger.info("Finalizing exam...")
 
     # Drain LLM provider logs if the backend supports it
     provider_logs: list[dict] = []
@@ -398,16 +424,41 @@ async def retrieval_refresh_node(state: AgentState) -> dict:
         if q.slot_number not in edited_slots:
             continue
 
+        scoped_chapters = []
+        for tag in q.scope_tags or []:
+            if isinstance(tag, str) and tag.startswith("chapter:"):
+                _, _, raw_number = tag.partition(":")
+                if raw_number.isdigit():
+                    scoped_chapters.append(int(raw_number))
+        if not scoped_chapters:
+            scoped_chapters = [
+                ch for ch in state.get("chapters", [])
+                if isinstance(ch, int) and ch > 0
+            ]
+
         # Re-retrieve using the NEW question content as query
         context = await retrieval.retrieve_for_single_question(
             query=q.content,
             textbook_id=state["textbook_id"],
-            chapter=0,
+            chapters=scoped_chapters,
+            scope_tags=q.scope_tags,
         )
 
         # Update source references on the question
         q.source_chunks = [c["id"] for c in context.chunks]
         q.source_texts = [c["text"] for c in context.chunks]
+        q.source_evidence = [
+            {
+                "chunk_id": c.get("id", ""),
+                "chapter_number": (c.get("metadata") or {}).get("chapter_number"),
+                "page": (c.get("metadata") or {}).get("page"),
+                "parent_heading": (c.get("metadata") or {}).get("parent_heading"),
+                "role": "primary",
+                "score": c.get("score"),
+                "text_preview": (c.get("text", "") or "")[:500],
+            }
+            for c in context.chunks
+        ]
         refreshed_contexts.append(context)
 
     logger.info(
@@ -484,6 +535,7 @@ def create_exam_generation_graph() -> StateGraph:
     # Add nodes
     graph.add_node("parse_textbook", parse_textbook_node)
     graph.add_node("create_blueprint", create_blueprint_node)
+    graph.add_node("retrieve_contexts", retrieve_contexts_node)
     graph.add_node("assign_chunks", assign_chunks_node)
     graph.add_node("generate_from_chunks", generate_from_chunks_node)
     graph.add_node("validate_questions", validate_questions_node)
@@ -512,7 +564,8 @@ def create_exam_generation_graph() -> StateGraph:
     )
 
     # Full generation flow (micro-prompting pipeline)
-    graph.add_edge("create_blueprint", "assign_chunks")
+    graph.add_edge("create_blueprint", "retrieve_contexts")
+    graph.add_edge("retrieve_contexts", "assign_chunks")
     graph.add_edge("assign_chunks", "generate_from_chunks")
     graph.add_edge("generate_from_chunks", "validate_questions")
 

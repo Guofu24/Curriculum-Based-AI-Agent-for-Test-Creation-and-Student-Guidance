@@ -93,6 +93,7 @@ class DocumentProcessorAgent:
 
         # Step 5: Format output and store
         formatted = self._format_output(chunks, file_path, textbook_id)
+        sections = self._derive_sections(formatted, chapters)
         chunk_ids = await self._store_chunks(formatted, textbook_id)
         logger.info(f"[PROCESSOR] Step 5 — Stored {len(chunk_ids)} chunks")
 
@@ -102,6 +103,7 @@ class DocumentProcessorAgent:
             "total_pages": self._count_pages(elements),
             "total_chunks": len(formatted),
             "chapters": chapters,
+            "sections": sections,
             "chunk_ids": chunk_ids,
         }
 
@@ -389,6 +391,101 @@ class DocumentProcessorAgent:
                 if el.metadata.page_number is not None:
                     pages.add(el.metadata.page_number)
         return len(pages) or 1
+
+    def _derive_sections(self, formatted_chunks: list[dict], chapters: list[dict]) -> list[dict]:
+        """Derive curriculum sections from chapter-aware chunk metadata."""
+        chapter_nodes: dict[int, dict] = {}
+        sections: list[dict] = []
+        order_counter = 1
+
+        for chapter in chapters:
+            chapter_number = int(chapter.get("chapter_number") or 0)
+            section = {
+                "section_key": f"chapter:{chapter_number}" if chapter_number > 0 else "chapter:general",
+                "parent_key": None,
+                "section_title": chapter.get("title") or (f"Chapter {chapter_number}" if chapter_number > 0 else "General"),
+                "section_type": "chapter",
+                "section_order": order_counter,
+                "page_from": chapter.get("start_page"),
+                "page_to": chapter.get("end_page"),
+                "scope_label": f"chapter:{chapter_number}" if chapter_number > 0 else "general",
+                "summary": None,
+                "metadata": {"chapter_number": chapter_number},
+            }
+            chapter_nodes[chapter_number] = section
+            sections.append(section)
+            order_counter += 1
+
+        topic_lookup: dict[tuple[int, str], dict] = {}
+        topic_summaries: dict[str, list[str]] = {}
+
+        for chunk in formatted_chunks:
+            metadata = chunk.get("metadata") or {}
+            chapter_number = int(metadata.get("chapter_number") or 0)
+            page_number = metadata.get("page_number")
+            heading = (metadata.get("parent_heading") or "").strip()
+
+            if chapter_number not in chapter_nodes:
+                section = {
+                    "section_key": f"chapter:{chapter_number}" if chapter_number > 0 else "chapter:general",
+                    "parent_key": None,
+                    "section_title": f"Chapter {chapter_number}" if chapter_number > 0 else "General",
+                    "section_type": "chapter",
+                    "section_order": order_counter,
+                    "page_from": page_number,
+                    "page_to": page_number,
+                    "scope_label": f"chapter:{chapter_number}" if chapter_number > 0 else "general",
+                    "summary": None,
+                    "metadata": {"chapter_number": chapter_number},
+                }
+                chapter_nodes[chapter_number] = section
+                sections.append(section)
+                order_counter += 1
+
+            chapter_section = chapter_nodes[chapter_number]
+            if page_number is not None:
+                if chapter_section["page_from"] is None or page_number < chapter_section["page_from"]:
+                    chapter_section["page_from"] = page_number
+                if chapter_section["page_to"] is None or page_number > chapter_section["page_to"]:
+                    chapter_section["page_to"] = page_number
+
+            if not heading:
+                continue
+
+            topic_key = (chapter_number, heading.lower())
+            if topic_key not in topic_lookup:
+                topic_lookup[topic_key] = {
+                    "section_key": f"topic:{chapter_number}:{len(topic_lookup) + 1}",
+                    "parent_key": chapter_section["section_key"],
+                    "section_title": heading,
+                    "section_type": "topic",
+                    "section_order": order_counter,
+                    "page_from": page_number,
+                    "page_to": page_number,
+                    "scope_label": heading,
+                    "summary": None,
+                    "metadata": {
+                        "chapter_number": chapter_number,
+                        "parent_heading": heading,
+                    },
+                }
+                sections.append(topic_lookup[topic_key])
+                order_counter += 1
+
+            topic = topic_lookup[topic_key]
+            if page_number is not None:
+                if topic["page_from"] is None or page_number < topic["page_from"]:
+                    topic["page_from"] = page_number
+                if topic["page_to"] is None or page_number > topic["page_to"]:
+                    topic["page_to"] = page_number
+            topic_summaries.setdefault(topic["section_key"], []).append(chunk.get("chunk_text", ""))
+
+        for section in sections:
+            summary_chunks = topic_summaries.get(section["section_key"], [])
+            if summary_chunks:
+                section["summary"] = " ".join(summary_chunks)[:300]
+
+        return sections
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
