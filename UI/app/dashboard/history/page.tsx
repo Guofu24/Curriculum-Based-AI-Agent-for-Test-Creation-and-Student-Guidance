@@ -111,10 +111,6 @@ export default function HistoryPage() {
     switch (type) {
       case "mcq":
         return "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800"
-      case "essay":
-        return "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800"
-      case "mixed":
-        return "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950 dark:text-indigo-400 dark:border-indigo-800"
       default:
         return ""
     }
@@ -169,8 +165,6 @@ export default function HistoryPage() {
                   <SelectContent>
                     <SelectItem value="all">All Types</SelectItem>
                     <SelectItem value="mcq">Multiple Choice</SelectItem>
-                    <SelectItem value="essay">Essay</SelectItem>
-                    <SelectItem value="mixed">Mixed</SelectItem>
                   </SelectContent>
                 </Select>
                 <Select

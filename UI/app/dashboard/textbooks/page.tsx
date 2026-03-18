@@ -92,7 +92,7 @@ export default function TextbooksPage() {
   const [error, setError] = useState("");
   const [creatingCourse, setCreatingCourse] = useState(false);
   const [courseName, setCourseName] = useState("");
-  const [courseSubject, setCourseSubject] = useState("");
+  const [courseSubject, setCourseSubject] = useState("Vật lý");
   const [courseLevel, setCourseLevel] = useState("");
   const [courseDescription, setCourseDescription] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -261,7 +261,7 @@ export default function TextbooksPage() {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".pdf,.docx,.doc,.pptx,.ppt"
+          accept=".pdf"
           className="hidden"
           onChange={(event) => handleFileSelect(event.target.files)}
         />
@@ -289,9 +289,10 @@ export default function TextbooksPage() {
                   <Label htmlFor="course-subject">Subject</Label>
                   <Input
                     id="course-subject"
-                    placeholder="Physics"
+                    placeholder="Vật lý"
                     value={courseSubject}
                     onChange={(event) => setCourseSubject(event.target.value)}
+                    readOnly
                   />
                 </div>
               </div>
@@ -404,7 +405,7 @@ export default function TextbooksPage() {
                           : "Upload into your personal library"}
                       </p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        Supports PDF, DOCX, and PPTX. Structured curriculum and retrieval evidence will be built from this source.
+                        Supports PDF only. Structured curriculum and retrieval evidence will be built from this source.
                       </p>
                     </div>
                     <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>

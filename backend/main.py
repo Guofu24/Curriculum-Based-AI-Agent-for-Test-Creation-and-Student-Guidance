@@ -1,18 +1,12 @@
 """
-ExamAI Backend — FastAPI Application
+ExamAI Backend - FastAPI Application
 
-Multi-Agent AI system for automated exam generation from textbooks.
+Current MVP runtime:
+  upload PDF -> parse -> curriculum tree -> scoped retrieval
+  -> exam spec -> blueprint -> generate MCQ -> verify -> review/version
 
-Architecture:
-  FastAPI ─→ ExamService ─→ LangGraph Orchestrator
-                                    │
-                    ┌───────────────┼───────────────┐
-                    │               │               │
-              BlueprintAgent  RetrievalAgent  QuestionGenerator
-                                    │               │
-                              ChromaDB (RAG)   ValidatorAgent
-                                                    │
-                                              ReviewerAgent
+Legacy multi-agent modules may still exist on disk for compatibility,
+but the active API path is now grounded around the narrow Physics PDF MVP.
 """
 import logging
 from contextlib import asynccontextmanager
@@ -27,9 +21,7 @@ from routers import (
     courses_router,
     documents_router,
     exams_router,
-    export_router,
     generation_router,
-    guidance_router,
     textbooks_router,
 )
 
@@ -67,7 +59,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title=settings.APP_NAME,
-    description="Multi-Agent AI system for automated exam generation from textbooks",
+    description="Grounded exam generation MVP for Physics PDFs",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -88,8 +80,6 @@ app.include_router(documents_router, prefix=settings.API_PREFIX)
 app.include_router(textbooks_router, prefix=settings.API_PREFIX)
 app.include_router(exams_router, prefix=settings.API_PREFIX)
 app.include_router(generation_router, prefix=settings.API_PREFIX)
-app.include_router(export_router, prefix=settings.API_PREFIX)
-app.include_router(guidance_router, prefix=settings.API_PREFIX)
 
 
 @app.get("/")

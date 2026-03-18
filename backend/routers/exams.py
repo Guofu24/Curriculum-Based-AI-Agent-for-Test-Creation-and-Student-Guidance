@@ -1,14 +1,14 @@
 """
 Exams Router
 
-Handles exam CRUD operations (list, get, delete).
-Generation is handled by the generation router.
+Handles exam CRUD operations and publishing.
+Generation and review edits live under the generation router.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from models.user import User
+from models.user import User, UserRole
 from routers.auth import get_current_user
 from schemas.exam import (
     EditOperationResponse,
@@ -20,7 +20,6 @@ from schemas.exam import (
 )
 from services.exam_service import ExamService
 from utils.security import require_roles
-from models.user import UserRole
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
@@ -30,7 +29,6 @@ def _enum_value(value):
 
 
 def _format_question(q) -> QuestionResponse:
-    """Convert DB question to response schema."""
     options = None
     if q.options and isinstance(q.options, list):
         options = [
@@ -144,7 +142,6 @@ async def list_exams(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List all exams for the current user."""
     service = ExamService(db)
     exams = await service.get_exams(current_user.id)
     return [
@@ -173,13 +170,10 @@ async def get_exam(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get exam details with all questions."""
     service = ExamService(db)
     exam = await service.get_exam(exam_id, current_user.id)
-
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
-
     return _format_exam(exam)
 
 
@@ -217,68 +211,8 @@ async def delete_exam(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.LECTURER, UserRole.TEACHING_ASSISTANT)),
 ):
-    """Delete an exam."""
     service = ExamService(db)
     deleted = await service.delete_exam(exam_id, current_user.id)
-
     if not deleted:
         raise HTTPException(status_code=404, detail="Exam not found")
-
     return {"message": "Exam deleted successfully"}
-
-
-class EditByPromptRequest:
-    """Inline request model for edit-by-prompt."""
-
-    def __init__(self, prompt: str):
-        self.prompt = prompt
-
-
-@router.post("/{exam_id}/edit-by-prompt", response_model=ExamResponse)
-async def edit_exam_by_prompt(
-    exam_id: str,
-    body: dict,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.LECTURER, UserRole.TEACHING_ASSISTANT)),
-):
-    """
-    Edit an exam using a natural language prompt.
-
-    The prompt describes what changes to make (e.g., "Tăng độ khó các câu trắc nghiệm").
-    The backend converts this into partial regeneration edits.
-
-    Spec reference: §6.12
-    """
-    prompt = body.get("prompt", "")
-    if not prompt or not prompt.strip():
-        raise HTTPException(status_code=400, detail="Prompt is required")
-
-    service = ExamService(db)
-    exam = await service.get_exam(exam_id, current_user.id)
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-
-    # Convert prompt to a partial regeneration call
-    # This delegates to the existing generation infrastructure
-    from services.generation_service import GenerationService
-
-    gen_service = GenerationService(db)
-    try:
-        updated_exam = await gen_service.partial_regenerate(
-            exam_id=exam_id,
-            user_id=current_user.id,
-            edits=[{
-                "question_ids": [],
-                "edit_type": "regenerate",
-                "edit_prompt": prompt.strip(),
-            }],
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Edit failed: {str(e)}")
-
-    # Reload and return full exam
-    refreshed = await service.get_exam(exam_id, current_user.id)
-    if not refreshed:
-        raise HTTPException(status_code=404, detail="Exam not found after edit")
-
-    return _format_exam(refreshed)

@@ -35,6 +35,7 @@ class DifficultyLevel(str, enum.Enum):
 class ExamStatus(str, enum.Enum):
     GENERATING = "generating"
     GENERATED = "generated"
+    FAILED = "failed"
     REVIEWED = "reviewed"
     PUBLISHED = "published"
 
@@ -133,11 +134,14 @@ class ExamSpecRecord(Base):
     )
     exam_id: Mapped[str] = mapped_column(ForeignKey("exams.id"), nullable=False, unique=True)
     course_id: Mapped[str] = mapped_column(ForeignKey("courses.id"), nullable=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("textbooks.id"), nullable=True)
     creator_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
     exam_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    question_type: Mapped[str] = mapped_column(String(50), nullable=False, default="mcq_single_answer")
     time_limit_minutes: Mapped[int] = mapped_column(Integer, nullable=True)
     language: Mapped[str] = mapped_column(String(20), nullable=False, default="vi")
     instructions: Mapped[str] = mapped_column(Text, nullable=True, default="")
+    normalized_instructions: Mapped[str] = mapped_column(Text, nullable=True, default="")
     strict_scope_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     bloom_distribution_json: Mapped[dict] = mapped_column(JSON, nullable=True)
     question_mix_json: Mapped[dict] = mapped_column(JSON, nullable=True)
@@ -154,11 +158,37 @@ class ExamSpecRecord(Base):
     )
 
     exam = relationship("Exam", back_populates="exam_spec_record")
+    scopes = relationship(
+        "ExamSpecScopeRecord",
+        back_populates="exam_spec",
+        cascade="all, delete-orphan",
+    )
     blueprint_cells = relationship(
         "BlueprintCellRecord",
         back_populates="exam_spec",
         cascade="all, delete-orphan",
     )
+
+
+class ExamSpecScopeRecord(Base):
+    __tablename__ = "exam_spec_scopes"
+
+    id: Mapped[str] = mapped_column(
+        String,
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    exam_spec_id: Mapped[str] = mapped_column(ForeignKey("exam_specs.id"), nullable=False)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), nullable=True)
+    scope_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    scope_type: Mapped[str] = mapped_column(String(50), nullable=False, default="topic")
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    chapter_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    page_from: Mapped[int] = mapped_column(Integer, nullable=True)
+    page_to: Mapped[int] = mapped_column(Integer, nullable=True)
+    tags_json: Mapped[list] = mapped_column(JSON, nullable=True)
+
+    exam_spec = relationship("ExamSpecRecord", back_populates="scopes")
 
 
 class BlueprintCellRecord(Base):
@@ -170,6 +200,7 @@ class BlueprintCellRecord(Base):
         default=lambda: str(uuid.uuid4()),
     )
     exam_spec_id: Mapped[str] = mapped_column(ForeignKey("exam_specs.id"), nullable=False)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), nullable=True)
     cell_key: Mapped[str] = mapped_column(String(255), nullable=False)
     scope_unit_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     question_type: Mapped[str] = mapped_column(String(50), nullable=False)

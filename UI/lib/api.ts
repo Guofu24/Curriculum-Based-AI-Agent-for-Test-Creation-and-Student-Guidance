@@ -243,6 +243,8 @@ export interface ProviderLog {
 }
 
 export interface SourceEvidence {
+  document_id?: string | null;
+  section_id?: string | null;
   chunk_id: string;
   chapter_number?: number | null;
   page?: number | null;
@@ -317,7 +319,7 @@ export interface Exam {
   questions: Question[];
   exam_spec?: Record<string, unknown> | null;
   blueprint?: Record<string, unknown> | null;
-  selected_scope?: Record<string, unknown>[] | null;
+  selected_scope?: ScopeUnitPayload[] | null;
   quality_scores?: QualityScoreDetail[] | null;
   grounding_reports?: GroundingReportDetail[] | null;
   duplicate_groups?: DuplicateGroup[] | null;
@@ -352,6 +354,7 @@ export interface DifficultyDistribution {
 
 export interface ScopeUnitPayload {
   scope_id?: string;
+  section_id?: string;
   scope_type: string;
   title?: string;
   chapter_number: number;
@@ -368,14 +371,17 @@ export interface ExamGenerationRequest {
   chapters: number[];
   scope: ScopeUnitPayload[];
   prompt: string;
-  exam_type: string;
-  difficulty: string;
-  question_distribution: {
+  instructions?: string;
+  total_questions: number;
+  question_type?: string;
+  exam_type?: string;
+  difficulty?: string;
+  question_distribution?: {
     mcq: DifficultyDistribution;
     essay: DifficultyDistribution;
   };
-  num_variants: number;
-  gradually_increasing: boolean;
+  num_variants?: number;
+  gradually_increasing?: boolean;
   constraints: {
     strict_grounding: boolean;
     allow_applied_questions: boolean;
@@ -385,7 +391,6 @@ export interface ExamGenerationRequest {
     bloom_levels: string[];
     max_concurrency?: number;
   };
-  instructions?: string;
   time_limit_minutes?: number;
   output_language?: string;
   bloom_distribution?: Record<string, number>;
@@ -406,8 +411,9 @@ export interface PartialEditRequest {
   edit_prompt?: string;
   range_start?: number;
   range_end?: number;
-  edit_type: "regenerate" | "edit_text" | "edit_answer" | "edit_bloom" | "lock" | "unlock" | "delete";
+  edit_type: "regenerate" | "edit_text" | "edit_options" | "edit_answer" | "edit_bloom" | "lock" | "unlock" | "delete";
   new_content?: string;
+  new_options?: MCQOption[];
   new_correct_answer?: string;
   new_bloom_level?: string;
 }
@@ -552,88 +558,6 @@ export const exams = {
   delete(id: string) {
     return request<{ message: string }>(`/exams/${encodeURIComponent(id)}`, {
       method: "DELETE",
-    });
-  },
-
-  async exportDocx(id: string, filename: string, options?: { includeAnswers?: boolean; includeRubric?: boolean; includeExplanation?: boolean }) {
-    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    const headers: Record<string, string> = {};
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-
-    const params = new URLSearchParams();
-    if (options?.includeAnswers) params.set("include_answers", "true");
-    if (options?.includeRubric) params.set("include_rubric", "true");
-    if (options?.includeExplanation) params.set("include_explanation", "true");
-    const qs = params.toString() ? `?${params.toString()}` : "";
-
-    const res = await fetch(`${API_URL}/export/${encodeURIComponent(id)}/docx${qs}`, {
-      method: "GET",
-      headers,
-    });
-
-    if (!res.ok) throw new Error("Failed to export exam");
-
-    const blob = await res.blob();
-    const url = window.URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    document.body.appendChild(anchor);
-    anchor.click();
-    window.URL.revokeObjectURL(url);
-    document.body.removeChild(anchor);
-  },
-
-  async exportAnswerKey(id: string, filename: string) {
-    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    const headers: Record<string, string> = {};
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-
-    const res = await fetch(`${API_URL}/export/${encodeURIComponent(id)}/docx-key`, {
-      method: "GET",
-      headers,
-    });
-
-    if (!res.ok) throw new Error("Failed to export answer key");
-
-    const blob = await res.blob();
-    const url = window.URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    document.body.appendChild(anchor);
-    anchor.click();
-    window.URL.revokeObjectURL(url);
-    document.body.removeChild(anchor);
-  },
-
-  async exportJson(id: string, filename: string) {
-    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    const headers: Record<string, string> = {};
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-
-    const res = await fetch(`${API_URL}/export/${encodeURIComponent(id)}/json`, {
-      method: "GET",
-      headers,
-    });
-
-    if (!res.ok) throw new Error("Failed to export exam JSON");
-
-    const blob = await res.blob();
-    const url = window.URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    document.body.appendChild(anchor);
-    anchor.click();
-    window.URL.revokeObjectURL(url);
-    document.body.removeChild(anchor);
-  },
-
-  editByPrompt(id: string, prompt: string) {
-    return request<Exam>(`/exams/${encodeURIComponent(id)}/edit-by-prompt`, {
-      method: "POST",
-      body: JSON.stringify({ prompt }),
     });
   },
 };

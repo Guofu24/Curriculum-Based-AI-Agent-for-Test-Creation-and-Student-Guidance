@@ -2,6 +2,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from core.mvp import normalize_physics_subject
 from models.course import Course, CourseMembership, CourseRole
 
 
@@ -17,6 +18,7 @@ class CourseService:
         academic_level: str | None = None,
         description: str | None = None,
     ) -> Course:
+        subject = normalize_physics_subject(subject)
         course = Course(
             owner_user_id=owner_user_id,
             course_name=course_name,

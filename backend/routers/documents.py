@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from core.mvp import normalize_mvp_language, require_pdf_extension
 from database import get_db
 from models.user import User
 from routers.auth import get_current_user
@@ -16,8 +17,6 @@ from utils.security import require_roles
 from models.user import UserRole
 
 router = APIRouter(tags=["documents"])
-
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".pptx", ".ppt"}
 
 
 def _build_curriculum_nodes(tree: list[dict]) -> list[CurriculumNodeResponse]:
@@ -72,11 +71,11 @@ async def upload_document(
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.LECTURER, UserRole.TEACHING_ASSISTANT)),
 ):
     file_ext = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-    if file_ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
-        )
+    try:
+        file_ext = require_pdf_extension(file_ext)
+        language = normalize_mvp_language(language)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     content = await file.read()
     max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024

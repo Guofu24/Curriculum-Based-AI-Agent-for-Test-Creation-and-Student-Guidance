@@ -3,19 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { DashboardHeader } from "@/components/dashboard-header";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -31,19 +21,24 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import {
   AlertTriangle,
   Check,
-  Download,
   Eye,
-  FileCheck,
-  FileJson,
   FileText,
-  Filter,
   Layers,
   Loader2,
   Lock,
-  MessageSquare,
   MoreVertical,
   Pencil,
   RefreshCw,
@@ -57,26 +52,31 @@ import {
   exams as examsApi,
   generation as generationApi,
   type Exam,
+  type MCQOption,
   type Question,
 } from "@/lib/api";
 
 type EditState = {
   questionId: string;
   content: string;
+  options: MCQOption[];
   correctAnswer: string;
   bloomLevel: string;
 };
 
 type RegenerateState = {
-  type: "single" | "from";
-  questionId: string;
-  questionNumber: number;
+  type: "single" | "from" | "all";
+  questionId?: string;
+  questionNumber?: number;
 } | null;
 
+const BLOOM_LEVELS = ["remember", "understand", "apply", "analyze", "evaluate", "create"];
+const DEFAULT_OPTION_LABELS = ["A", "B", "C", "D"];
+
 function formatDate(iso: string) {
-  return new Date(iso).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
+  return new Date(iso).toLocaleString("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
@@ -93,6 +93,19 @@ function useActiveVersion(exam: Exam | null, selectedVersionId: string) {
   }, [exam, selectedVersionId]);
 }
 
+function getEditableOptions(question: Question): MCQOption[] {
+  const indexed = new Map<string, string>();
+  for (const option of question.options || []) {
+    if (!option?.label) continue;
+    indexed.set(option.label.toUpperCase(), option.text || "");
+  }
+
+  return DEFAULT_OPTION_LABELS.map((label) => ({
+    label,
+    text: indexed.get(label) || "",
+  }));
+}
+
 export default function ExamReviewPage() {
   const params = useParams();
   const examId = params.id as string;
@@ -105,11 +118,7 @@ export default function ExamReviewPage() {
   const [savingQuestionId, setSavingQuestionId] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState("");
-  const [exportLoading, setExportLoading] = useState(false);
-  const [promptEdit, setPromptEdit] = useState("");
-  const [promptEditLoading, setPromptEditLoading] = useState(false);
   const [filterBloom, setFilterBloom] = useState("all");
-  const [filterType, setFilterType] = useState("all");
 
   useEffect(() => {
     if (!examId) return;
@@ -120,13 +129,18 @@ export default function ExamReviewPage() {
         setSelectedVersionId(result.current_version?.id || result.versions?.[result.versions.length - 1]?.id || "");
       })
       .catch((loadError: unknown) => {
-        setError(loadError instanceof Error ? loadError.message : "Failed to load exam");
+        setError(loadError instanceof Error ? loadError.message : "Không tải được đề thi");
       })
       .finally(() => setLoading(false));
   }, [examId]);
 
   const activeVersion = useActiveVersion(exam, selectedVersionId);
   const questions = activeVersion?.questions || exam?.questions || [];
+
+  const filteredQuestions = questions.filter((question) => {
+    if (filterBloom !== "all" && question.bloom_level !== filterBloom) return false;
+    return true;
+  });
 
   const applyAndRefresh = async (action: () => Promise<Exam>, questionId?: string) => {
     setError("");
@@ -139,14 +153,41 @@ export default function ExamReviewPage() {
       setRegenerateState(null);
       setRegeneratePrompt("");
     } catch (actionError: unknown) {
-      setError(actionError instanceof Error ? actionError.message : "Action failed");
+      setError(actionError instanceof Error ? actionError.message : "Thao tác thất bại");
     } finally {
       if (questionId) setSavingQuestionId(null);
     }
   };
 
+  const handleStartEdit = (question: Question) => {
+    setEditState({
+      questionId: question.id,
+      content: question.content,
+      options: getEditableOptions(question),
+      correctAnswer: question.correct_answer || "A",
+      bloomLevel: question.bloom_level,
+    });
+  };
+
   const handleSaveEdit = async () => {
     if (!exam || !editState) return;
+
+    const normalizedOptions = editState.options.map((option, index) => ({
+      label: DEFAULT_OPTION_LABELS[index],
+      text: option.text.trim(),
+    }));
+
+    const missingOption = normalizedOptions.find((option) => !option.text);
+    if (missingOption) {
+      setError("Mỗi câu hỏi phải có đủ 4 phương án A-D.");
+      return;
+    }
+
+    if (!DEFAULT_OPTION_LABELS.includes(editState.correctAnswer)) {
+      setError("Đáp án đúng phải là một trong các lựa chọn A-D.");
+      return;
+    }
+
     await applyAndRefresh(
       () =>
         generationApi.partialRegenerate({
@@ -155,7 +196,12 @@ export default function ExamReviewPage() {
             {
               question_ids: [editState.questionId],
               edit_type: "edit_text",
-              new_content: editState.content,
+              new_content: editState.content.trim(),
+            },
+            {
+              question_ids: [editState.questionId],
+              edit_type: "edit_options",
+              new_options: normalizedOptions,
             },
             {
               question_ids: [editState.questionId],
@@ -192,25 +238,33 @@ export default function ExamReviewPage() {
 
   const handleRegenerate = async () => {
     if (!exam || !regenerateState) return;
+
+    const edit =
+      regenerateState.type === "single"
+        ? {
+            question_ids: regenerateState.questionId ? [regenerateState.questionId] : [],
+            edit_type: "regenerate" as const,
+            edit_prompt: regeneratePrompt.trim() || undefined,
+          }
+        : regenerateState.type === "from"
+          ? {
+              question_ids: [],
+              range_start: regenerateState.questionNumber,
+              range_end: questions.length,
+              edit_type: "regenerate" as const,
+              edit_prompt: regeneratePrompt.trim() || undefined,
+            }
+          : {
+              question_ids: [],
+              edit_type: "regenerate" as const,
+              edit_prompt: regeneratePrompt.trim() || undefined,
+            };
+
     await applyAndRefresh(
       () =>
         generationApi.partialRegenerate({
           exam_id: exam.id,
-          edits: [
-            regenerateState.type === "single"
-              ? {
-                  question_ids: [regenerateState.questionId],
-                  edit_type: "regenerate",
-                  edit_prompt: regeneratePrompt || undefined,
-                }
-              : {
-                  question_ids: [],
-                  range_start: regenerateState.questionNumber,
-                  range_end: questions.length,
-                  edit_type: "regenerate",
-                  edit_prompt: regeneratePrompt || undefined,
-                },
-          ],
+          edits: [edit],
         }),
       regenerateState.questionId,
     );
@@ -225,76 +279,16 @@ export default function ExamReviewPage() {
       setExam(updated);
       setSelectedVersionId(updated.current_version?.id || updated.versions?.[updated.versions.length - 1]?.id || "");
     } catch (publishError: unknown) {
-      setError(publishError instanceof Error ? publishError.message : "Publish failed");
+      setError(publishError instanceof Error ? publishError.message : "Publish thất bại");
     } finally {
       setPublishing(false);
     }
   };
 
-  const handleExport = async (format: "docx" | "docx-answers" | "docx-key" | "json") => {
-    if (!exam) return;
-    setExportLoading(true);
-    setError("");
-    try {
-      const slug = exam.title.replace(/[^\w]/g, "_").toLowerCase().slice(0, 50);
-      switch (format) {
-        case "docx":
-          await examsApi.exportDocx(exam.id, `${slug}.docx`);
-          break;
-        case "docx-answers":
-          await examsApi.exportDocx(exam.id, `${slug}_dap_an.docx`, {
-            includeAnswers: true,
-            includeRubric: true,
-            includeExplanation: true,
-          });
-          break;
-        case "docx-key":
-          await examsApi.exportAnswerKey(exam.id, `${slug}_bang_dap_an.docx`);
-          break;
-        case "json":
-          await examsApi.exportJson(exam.id, `${slug}.json`);
-          break;
-      }
-    } catch (exportError: unknown) {
-      setError(exportError instanceof Error ? exportError.message : "Export failed");
-    } finally {
-      setExportLoading(false);
-    }
-  };
-
-  const handlePromptEdit = async () => {
-    if (!exam || !promptEdit.trim()) return;
-    setPromptEditLoading(true);
-    setError("");
-    try {
-      const updated = await generationApi.partialRegenerate({
-        exam_id: exam.id,
-        edits: [{
-          question_ids: [],
-          edit_type: "regenerate",
-          edit_prompt: promptEdit,
-        }],
-      });
-      setExam(updated);
-      setSelectedVersionId(updated.current_version?.id || updated.versions?.[updated.versions.length - 1]?.id || "");
-      setPromptEdit("");
-    } catch (editError: unknown) {
-      setError(editError instanceof Error ? editError.message : "Edit failed");
-    } finally {
-      setPromptEditLoading(false);
-    }
-  };
-
-  const filteredQuestions = questions.filter((q) => {
-    if (filterBloom !== "all" && q.bloom_level !== filterBloom) return false;
-    if (filterType !== "all" && q.question_type !== filterType) return false;
-    return true;
-  });
-
   if (loading) {
     return (
       <>
-        <DashboardHeader title="Exam Review" />
+        <DashboardHeader title="Review đề thi" />
         <div className="flex flex-1 items-center justify-center">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
@@ -305,9 +299,9 @@ export default function ExamReviewPage() {
   if (!exam) {
     return (
       <>
-        <DashboardHeader title="Exam Review" />
+        <DashboardHeader title="Review đề thi" />
         <div className="flex flex-1 items-center justify-center">
-          <p className="text-muted-foreground">Exam not found</p>
+          <p className="text-muted-foreground">Không tìm thấy đề thi</p>
         </div>
       </>
     );
@@ -315,92 +309,57 @@ export default function ExamReviewPage() {
 
   return (
     <>
-      <DashboardHeader title="Exam Review" />
-      <div className="flex flex-1 flex-col gap-6 p-6 max-w-6xl">
+      <DashboardHeader title="Review đề thi" />
+      <div className="flex flex-1 flex-col gap-6 p-6">
         {error && (
           <div className="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {error}
           </div>
         )}
 
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="space-y-2">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-2xl font-semibold tracking-tight text-foreground">{exam.title}</h2>
               <Badge variant="secondary" className="capitalize">
                 {exam.status}
               </Badge>
-              {exam.published_at && <Badge>Published</Badge>}
+              {exam.published_at ? <Badge>Đã publish</Badge> : null}
             </div>
             <p className="text-sm text-muted-foreground">
-              {exam.total_questions} questions · created {formatDate(exam.created_at)}
-              {exam.updated_at ? ` · updated ${formatDate(exam.updated_at)}` : ""}
+              {exam.total_questions} câu trắc nghiệm một đáp án đúng · tạo lúc {formatDate(exam.created_at)}
+              {exam.updated_at ? ` · cập nhật ${formatDate(exam.updated_at)}` : ""}
             </p>
             <div className="flex flex-wrap gap-2">
-              <Badge variant="outline" className="capitalize">
-                {exam.exam_type}
-              </Badge>
-              <Badge variant="outline" className="capitalize">
-                {exam.difficulty.replaceAll("_", " ")}
-              </Badge>
-              <Badge variant="outline">
-                {exam.strict_scope_flag ? "Strict scope" : "Flexible scope"}
-              </Badge>
-              <Badge variant="outline">
-                {exam.output_language.toUpperCase()}
-              </Badge>
+              <Badge variant="outline">Vật lý</Badge>
+              <Badge variant="outline">Tiếng Việt</Badge>
+              <Badge variant="outline">PDF scoped generation</Badge>
+              <Badge variant="outline">{exam.strict_scope_flag ? "Strict scope" : "Non-strict scope"}</Badge>
             </div>
           </div>
 
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            {(exam.versions?.length || 0) > 0 && (
-              <div className="min-w-52">
+            {(exam.versions?.length || 0) > 0 ? (
+              <div className="min-w-56">
                 <Select value={selectedVersionId} onValueChange={setSelectedVersionId}>
                   <SelectTrigger className="h-10">
-                    <SelectValue placeholder="Choose version" />
+                    <SelectValue placeholder="Chọn version" />
                   </SelectTrigger>
                   <SelectContent>
                     {(exam.versions || []).map((version) => (
                       <SelectItem key={version.id} value={version.id}>
-                        Version {version.version_number} · {version.status}
+                        Phiên bản {version.version_number} · {version.status}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
               </div>
-            )}
+            ) : null}
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" disabled={exportLoading}>
-                  {exportLoading ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Download className="mr-2 h-4 w-4" />
-                  )}
-                  Export
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuItem onClick={() => void handleExport("docx")}>
-                  <FileText className="mr-2 h-4 w-4" />
-                  DOCX (đề thi)
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => void handleExport("docx-answers")}>
-                  <FileCheck className="mr-2 h-4 w-4" />
-                  DOCX (kèm đáp án)
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => void handleExport("docx-key")}>
-                  <FileText className="mr-2 h-4 w-4" />
-                  DOCX (bảng đáp án)
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => void handleExport("json")}>
-                  <FileJson className="mr-2 h-4 w-4" />
-                  JSON (file data)
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <Button variant="outline" onClick={() => setRegenerateState({ type: "all" })}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Regenerate toàn bộ
+            </Button>
 
             <Button onClick={handlePublish} disabled={publishing || !!exam.published_at}>
               {publishing ? (
@@ -408,120 +367,75 @@ export default function ExamReviewPage() {
               ) : (
                 <Send className="mr-2 h-4 w-4" />
               )}
-              {exam.published_at ? "Published" : "Publish exam"}
+              {exam.published_at ? "Đã publish" : "Publish review"}
             </Button>
           </div>
         </div>
 
         <div className="grid gap-4 md:grid-cols-4">
           <SummaryCard
-            title="Active version"
+            title="Version hiện tại"
             value={activeVersion ? `v${activeVersion.version_number}` : "N/A"}
-            note={activeVersion?.change_summary || "Current working version"}
+            note={activeVersion?.change_summary || "Bản review đang mở"}
             icon={Layers}
           />
           <SummaryCard
             title="Blueprint cells"
             value={String(Array.isArray(exam.blueprint?.cells) ? exam.blueprint.cells.length : 0)}
-            note="Planned scope/question allocations"
+            note="Phân bổ câu theo chapter/lesson/topic"
             icon={FileText}
           />
           <SummaryCard
-            title="Warnings"
-            value={String(questions.reduce((sum, question) => sum + (question.warnings?.length || 0), 0))}
-            note="Question-level verification warnings"
-            icon={AlertTriangle}
+            title="Đã verify"
+            value={`${questions.filter((question) => question.is_validated).length}/${questions.length}`}
+            note="Câu đã qua basic verifier"
+            icon={ShieldCheck}
           />
           <SummaryCard
-            title="Validated"
-            value={`${questions.filter((question) => question.is_validated).length}/${questions.length}`}
-            note="Questions that passed validation"
-            icon={ShieldCheck}
+            title="Cảnh báo"
+            value={String(questions.reduce((sum, question) => sum + (question.warnings?.length || 0), 0))}
+            note="Cần xem lại trước khi publish"
+            icon={AlertTriangle}
           />
         </div>
 
-        {exam.selected_scope && exam.selected_scope.length > 0 && (
+        {exam.selected_scope && exam.selected_scope.length > 0 ? (
           <Card className="rounded-2xl shadow-sm">
             <CardHeader className="pb-4">
-              <CardTitle className="text-base">Selected Scope</CardTitle>
+              <CardTitle className="text-base">Scope đã chọn</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-wrap gap-2">
               {exam.selected_scope.map((scope, index) => (
-                <Badge key={`${scope.scope_id || scope.title || index}`} variant="outline">
-                  {String(scope.title || scope.scope_id || `Scope ${index + 1}`)}
+                <Badge key={`${String(scope.scope_id || scope.section_id || index)}`} variant="outline">
+                  {String(scope.title || scope.scope_id || scope.section_id || `Scope ${index + 1}`)}
                 </Badge>
               ))}
             </CardContent>
           </Card>
-        )}
+        ) : null}
 
-        {/* Global Prompt Edit */}
-        <Card className="rounded-2xl shadow-sm">
-          <CardContent className="p-4">
-            <div className="flex items-start gap-3">
-              <MessageSquare className="mt-1 h-4 w-4 text-muted-foreground shrink-0" />
-              <div className="flex-1 space-y-2">
-                <Textarea
-                  value={promptEdit}
-                  onChange={(e) => setPromptEdit(e.target.value)}
-                  placeholder="Nhập prompt để chỉnh sửa toàn bộ đề... Ví dụ: Tăng độ khó các câu trắc nghiệm, thêm câu hỏi phân tích cho chương 3"
-                  className="min-h-16 resize-none"
-                />
-                <div className="flex justify-end">
-                  <Button
-                    size="sm"
-                    onClick={() => void handlePromptEdit()}
-                    disabled={promptEditLoading || !promptEdit.trim()}
-                  >
-                    {promptEditLoading ? (
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    ) : (
-                      <Sparkles className="mr-2 h-4 w-4" />
-                    )}
-                    Áp dụng chỉnh sửa
-                  </Button>
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Question Filters */}
-        <div className="flex flex-wrap gap-3">
-          <div className="flex items-center gap-2">
-            <Filter className="h-4 w-4 text-muted-foreground" />
-            <Select value={filterBloom} onValueChange={setFilterBloom}>
-              <SelectTrigger className="h-8 w-40 text-xs">
-                <SelectValue placeholder="Bloom level" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Bloom levels</SelectItem>
-                {["remember", "understand", "apply", "analyze", "evaluate", "create"].map((level) => (
-                  <SelectItem key={level} value={level} className="capitalize">
-                    {level}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={filterType} onValueChange={setFilterType}>
-              <SelectTrigger className="h-8 w-36 text-xs">
-                <SelectValue placeholder="Question type" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All types</SelectItem>
-                <SelectItem value="mcq">MCQ</SelectItem>
-                <SelectItem value="essay">Essay</SelectItem>
-              </SelectContent>
-            </Select>
-            {(filterBloom !== "all" || filterType !== "all") && (
-              <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={() => { setFilterBloom("all"); setFilterType("all"); }}>
-                Clear filters
-              </Button>
-            )}
-            <Badge variant="outline" className="text-xs">
-              {filteredQuestions.length}/{questions.length} questions
-            </Badge>
-          </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <Select value={filterBloom} onValueChange={setFilterBloom}>
+            <SelectTrigger className="h-9 w-48 text-sm">
+              <SelectValue placeholder="Lọc theo Bloom" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Tất cả Bloom level</SelectItem>
+              {BLOOM_LEVELS.map((level) => (
+                <SelectItem key={level} value={level} className="capitalize">
+                  {level}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {filterBloom !== "all" ? (
+            <Button variant="ghost" size="sm" onClick={() => setFilterBloom("all")}>
+              Bỏ lọc
+            </Button>
+          ) : null}
+          <Badge variant="outline" className="text-xs">
+            {filteredQuestions.length}/{questions.length} câu
+          </Badge>
         </div>
 
         <div className="space-y-4">
@@ -532,15 +446,17 @@ export default function ExamReviewPage() {
               isEditing={editState?.questionId === question.id}
               saving={savingQuestionId === question.id}
               editState={editState}
-              onStartEdit={() =>
-                setEditState({
-                  questionId: question.id,
-                  content: question.content,
-                  correctAnswer: question.correct_answer,
-                  bloomLevel: question.bloom_level,
+              onStartEdit={() => handleStartEdit(question)}
+              onEditChange={(next) => setEditState((current) => (current ? { ...current, ...next } : current))}
+              onOptionChange={(index, text) =>
+                setEditState((current) => {
+                  if (!current) return current;
+                  const options = current.options.map((option, optionIndex) =>
+                    optionIndex === index ? { ...option, text } : option,
+                  );
+                  return { ...current, options };
                 })
               }
-              onEditChange={(next) => setEditState((current) => (current ? { ...current, ...next } : current))}
               onCancelEdit={() => setEditState(null)}
               onSaveEdit={() => void handleSaveEdit()}
               onRegenerate={(type) =>
@@ -556,30 +472,41 @@ export default function ExamReviewPage() {
           ))}
         </div>
 
-        <Dialog open={!!regenerateState} onOpenChange={() => setRegenerateState(null)}>
+        <Dialog open={!!regenerateState} onOpenChange={(open) => {
+          if (!open) {
+            setRegenerateState(null);
+            setRegeneratePrompt("");
+          }
+        }}>
           <DialogContent className="sm:max-w-lg">
             <DialogHeader>
               <DialogTitle>
                 {regenerateState?.type === "single"
-                  ? `Regenerate question ${regenerateState.questionNumber}`
-                  : `Regenerate from question ${regenerateState?.questionNumber}`}
+                  ? `Regenerate câu ${regenerateState.questionNumber}`
+                  : regenerateState?.type === "from"
+                    ? `Regenerate từ câu ${regenerateState.questionNumber}`
+                    : "Regenerate toàn bộ đề"}
               </DialogTitle>
               <DialogDescription>
-                The backend will keep existing constraints, preserve scope, and create a new exam version after regeneration.
+                Hệ thống sẽ giữ scope hiện tại, truy hồi lại evidence trong scope và tạo version mới trước khi review tiếp.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-3 py-2">
-              <Label>Optional correction prompt</Label>
+              <Label htmlFor="regenerate-prompt">Prompt hiệu chỉnh tùy chọn</Label>
               <Textarea
+                id="regenerate-prompt"
                 value={regeneratePrompt}
                 onChange={(event) => setRegeneratePrompt(event.target.value)}
-                placeholder="Example: Make this question more applied, shorten the wording, and keep it in the same scope."
+                placeholder="Ví dụ: giữ nguyên scope nhưng làm câu ngắn hơn và tăng nhẹ độ phân hóa."
                 className="min-h-28"
               />
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setRegenerateState(null)}>
-                Cancel
+              <Button variant="outline" onClick={() => {
+                setRegenerateState(null);
+                setRegeneratePrompt("");
+              }}>
+                Hủy
               </Button>
               <Button onClick={() => void handleRegenerate()} disabled={savingQuestionId === regenerateState?.questionId}>
                 {savingQuestionId === regenerateState?.questionId ? (
@@ -629,6 +556,7 @@ function QuestionCard({
   editState,
   onStartEdit,
   onEditChange,
+  onOptionChange,
   onCancelEdit,
   onSaveEdit,
   onRegenerate,
@@ -641,6 +569,7 @@ function QuestionCard({
   editState: EditState | null;
   onStartEdit: () => void;
   onEditChange: (next: Partial<EditState>) => void;
+  onOptionChange: (index: number, text: string) => void;
   onCancelEdit: () => void;
   onSaveEdit: () => void;
   onRegenerate: (type: "single" | "from") => void;
@@ -653,34 +582,32 @@ function QuestionCard({
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="secondary">Q{question.question_number}</Badge>
-              <Badge variant="outline" className="capitalize">
-                {question.question_type}
-              </Badge>
+              <Badge variant="secondary">Câu {question.question_number}</Badge>
+              <Badge variant="outline">MCQ 1 đáp án</Badge>
               <Badge variant="outline" className="capitalize">
                 {question.bloom_level}
               </Badge>
-              {question.verification_status && (
+              {question.verification_status ? (
                 <Badge variant={question.verification_status === "passed" ? "secondary" : "outline"}>
                   {question.verification_status}
                 </Badge>
-              )}
-              {question.is_locked && (
+              ) : null}
+              {question.is_locked ? (
                 <Badge>
                   <Lock className="mr-1 h-3 w-3" />
                   Locked
                 </Badge>
-              )}
-              {question.is_human_edited && (
+              ) : null}
+              {question.is_human_edited ? (
                 <Badge variant="outline">
                   <Pencil className="mr-1 h-3 w-3" />
-                  Human edited
+                  Đã sửa tay
                 </Badge>
-              )}
+              ) : null}
             </div>
-            {question.blueprint_cell_key && (
+            {question.blueprint_cell_key ? (
               <p className="text-xs text-muted-foreground">Blueprint cell: {question.blueprint_cell_key}</p>
-            )}
+            ) : null}
           </div>
 
           <DropdownMenu>
@@ -692,33 +619,33 @@ function QuestionCard({
             <DropdownMenuContent align="end" className="w-56">
               <DropdownMenuItem onClick={onStartEdit}>
                 <Pencil className="mr-2 h-4 w-4" />
-                Edit content, answer, Bloom
+                Sửa câu hỏi và đáp án
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => onRegenerate("single")}>
                 <RefreshCw className="mr-2 h-4 w-4" />
-                Regenerate this question
+                Regenerate câu này
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => onRegenerate("from")}>
                 <Sparkles className="mr-2 h-4 w-4" />
-                Regenerate from here onward
+                Regenerate từ đây trở đi
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={onLockToggle}>
                 {question.is_locked ? (
                   <>
                     <Unlock className="mr-2 h-4 w-4" />
-                    Unlock question
+                    Unlock câu hỏi
                   </>
                 ) : (
                   <>
                     <Lock className="mr-2 h-4 w-4" />
-                    Lock question
+                    Lock câu hỏi
                   </>
                 )}
               </DropdownMenuItem>
               <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={onDelete}>
                 <Trash2 className="mr-2 h-4 w-4" />
-                Delete question
+                Xóa câu hỏi
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -727,21 +654,40 @@ function QuestionCard({
         {isEditing && editState ? (
           <div className="mt-4 space-y-4">
             <div className="space-y-2">
-              <Label>Question content</Label>
+              <Label>Nội dung câu hỏi</Label>
               <Textarea
                 value={editState.content}
                 onChange={(event) => onEditChange({ content: event.target.value })}
                 className="min-h-28"
               />
             </div>
-            <div className="grid gap-4 md:grid-cols-[1fr_220px]">
+
+            <div className="grid gap-3 md:grid-cols-2">
+              {editState.options.map((option, index) => (
+                <div key={`${question.id}-${option.label}`} className="space-y-2">
+                  <Label>Phương án {option.label}</Label>
+                  <Input value={option.text} onChange={(event) => onOptionChange(index, event.target.value)} />
+                </div>
+              ))}
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-[220px_220px]">
               <div className="space-y-2">
-                <Label>Correct answer</Label>
-                <Input
-                  value={editState.correctAnswer}
-                  onChange={(event) => onEditChange({ correctAnswer: event.target.value })}
-                />
+                <Label>Đáp án đúng</Label>
+                <Select value={editState.correctAnswer} onValueChange={(value) => onEditChange({ correctAnswer: value })}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DEFAULT_OPTION_LABELS.map((label) => (
+                      <SelectItem key={label} value={label}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
+
               <div className="space-y-2">
                 <Label>Bloom level</Label>
                 <Select value={editState.bloomLevel} onValueChange={(value) => onEditChange({ bloomLevel: value })}>
@@ -749,7 +695,7 @@ function QuestionCard({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {["remember", "understand", "apply", "analyze", "evaluate", "create"].map((level) => (
+                    {BLOOM_LEVELS.map((level) => (
                       <SelectItem key={level} value={level}>
                         {level}
                       </SelectItem>
@@ -758,9 +704,10 @@ function QuestionCard({
                 </Select>
               </div>
             </div>
+
             <div className="flex justify-end gap-2">
               <Button variant="outline" onClick={onCancelEdit}>
-                Cancel
+                Hủy
               </Button>
               <Button onClick={onSaveEdit} disabled={saving}>
                 {saving ? (
@@ -768,7 +715,7 @@ function QuestionCard({
                 ) : (
                   <Check className="mr-2 h-4 w-4" />
                 )}
-                Save as new version
+                Lưu thành version mới
               </Button>
             </div>
           </div>
@@ -776,65 +723,47 @@ function QuestionCard({
           <div className="mt-4 space-y-4">
             <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{question.content}</p>
 
-            {question.options && question.options.length > 0 && (
-              <div className="space-y-2">
-                {question.options.map((option) => (
-                  <div
-                    key={`${question.id}-${option.label}`}
-                    className={`flex items-start gap-3 rounded-lg border px-3 py-2 text-sm ${
-                      option.label === question.correct_answer
-                        ? "border-emerald-300 bg-emerald-50 text-emerald-800"
-                        : "border-border bg-background text-foreground"
-                    }`}
-                  >
-                    <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs font-medium">
-                      {option.label}
-                    </span>
-                    <span className="flex-1">{option.text}</span>
-                    {option.label === question.correct_answer && <Check className="h-4 w-4 shrink-0" />}
-                  </div>
-                ))}
-              </div>
-            )}
+            <div className="space-y-2">
+              {(question.options || []).map((option) => (
+                <div
+                  key={`${question.id}-${option.label}`}
+                  className={`flex items-start gap-3 rounded-lg border px-3 py-2 text-sm ${
+                    option.label === question.correct_answer
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+                      : "border-border bg-background text-foreground"
+                  }`}
+                >
+                  <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs font-medium">
+                    {option.label}
+                  </span>
+                  <span className="flex-1">{option.text}</span>
+                  {option.label === question.correct_answer ? <Check className="h-4 w-4 shrink-0" /> : null}
+                </div>
+              ))}
+            </div>
 
-            {!question.options?.length && (
-              <div className="rounded-lg bg-muted/30 p-3 text-sm">
-                <span className="font-medium text-foreground">Answer: </span>
-                <span className="text-muted-foreground">{question.correct_answer}</span>
-              </div>
-            )}
-
-            {question.explanation && (
+            {question.explanation ? (
               <div className="rounded-xl border bg-muted/20 p-4">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Explanation</p>
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Giải thích</p>
                 <p className="mt-2 text-sm text-foreground">{question.explanation}</p>
               </div>
-            )}
+            ) : null}
 
-            {question.rubric && (
-              <div className="rounded-xl border bg-muted/20 p-4">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Rubric</p>
-                <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-sm text-foreground">
-                  {JSON.stringify(question.rubric, null, 2)}
-                </pre>
-              </div>
-            )}
-
-            {question.warnings?.length > 0 && (
+            {question.warnings?.length > 0 ? (
               <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
                 <div className="flex items-center gap-2 text-sm font-medium text-amber-800">
                   <AlertTriangle className="h-4 w-4" />
-                  Verification warnings
+                  Cảnh báo từ verifier
                 </div>
                 <ul className="mt-2 space-y-1 text-sm text-amber-700">
                   {question.warnings.map((warning) => (
-                    <li key={warning}>• {warning}</li>
+                    <li key={warning}>- {warning}</li>
                   ))}
                 </ul>
               </div>
-            )}
+            ) : null}
 
-            {question.source_evidence && question.source_evidence.length > 0 && (
+            {question.source_evidence && question.source_evidence.length > 0 ? (
               <div className="rounded-xl border bg-muted/20 p-4">
                 <div className="flex items-center gap-2 text-sm font-medium text-foreground">
                   <Eye className="h-4 w-4" />
@@ -845,20 +774,26 @@ function QuestionCard({
                     <div key={`${question.id}-${evidence.chunk_id}`} className="rounded-lg border bg-background p-3">
                       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         <Badge variant="outline">{evidence.chunk_id}</Badge>
-                        {evidence.chapter_number ? <Badge variant="secondary">Chapter {evidence.chapter_number}</Badge> : null}
-                        {evidence.page ? <Badge variant="outline">Page {evidence.page}</Badge> : null}
+                        {evidence.document_id ? <Badge variant="outline">Doc {evidence.document_id}</Badge> : null}
+                        {evidence.section_id ? <Badge variant="outline">Section {evidence.section_id}</Badge> : null}
+                        {evidence.chapter_number ? <Badge variant="secondary">Chương {evidence.chapter_number}</Badge> : null}
+                        {evidence.page ? <Badge variant="outline">Trang {evidence.page}</Badge> : null}
                         {evidence.parent_heading ? <Badge variant="outline">{evidence.parent_heading}</Badge> : null}
                       </div>
-                      {evidence.text_preview && (
+                      {evidence.text_preview ? (
                         <p className="mt-2 text-sm text-foreground">{evidence.text_preview}</p>
-                      )}
+                      ) : null}
                     </div>
                   ))}
                 </div>
               </div>
+            ) : (
+              <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+                Câu hỏi này chưa có source evidence hợp lệ.
+              </div>
             )}
 
-            {question.scope_tags?.length > 0 && (
+            {question.scope_tags?.length > 0 ? (
               <div className="flex flex-wrap gap-2">
                 {question.scope_tags.map((tag) => (
                   <Badge key={tag} variant="outline">
@@ -866,7 +801,7 @@ function QuestionCard({
                   </Badge>
                 ))}
               </div>
-            )}
+            ) : null}
           </div>
         )}
       </CardContent>

@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from agents.document_processor import DocumentProcessorAgent
 from config import settings
+from core.mvp import normalize_mvp_language, normalize_physics_subject, require_pdf_extension
 from models.course import CourseMembership
 from models.curriculum import LearningObjective, Section
 from models.textbook import ProcessingStatus, Textbook, TextbookChapter, TextbookChunk
@@ -39,6 +40,13 @@ class TextbookService:
         """Upload and process a document, persisting curriculum structure."""
         if course_id and not await self.course_service.has_course_access(course_id, user_id):
             raise ValueError("Course not found or access denied")
+        require_pdf_extension(file_type)
+        language = normalize_mvp_language(language)
+        if course_id:
+            course = await self.course_service.get_course(course_id, user_id)
+            if not course:
+                raise ValueError("Course not found or access denied")
+            normalize_physics_subject(course.subject)
 
         file_hash = hashlib.sha256(file_content).hexdigest()
         duplicate = await self._find_duplicate_document(

@@ -6,6 +6,7 @@ Handles textbook upload, listing, details, and deletion.
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.mvp import normalize_mvp_language, require_pdf_extension
 from database import get_db
 from models.user import User
 from routers.auth import get_current_user
@@ -16,8 +17,6 @@ from utils.security import require_roles
 from models.user import UserRole
 
 router = APIRouter(prefix="/textbooks", tags=["textbooks"])
-
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".pptx", ".ppt"}
 
 
 @router.post("/upload", response_model=TextbookResponse)
@@ -30,13 +29,12 @@ async def upload_textbook(
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.LECTURER, UserRole.TEACHING_ASSISTANT)),
 ):
     """Upload a textbook file for processing."""
-    # Validate file type
     file_ext = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-    if file_ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
-        )
+    try:
+        file_ext = require_pdf_extension(file_ext)
+        language = normalize_mvp_language(language)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     # Validate file size
     content = await file.read()

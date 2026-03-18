@@ -212,11 +212,11 @@ class BlueprintAgent:
         return f"{scope_type}:{title}"
 
     def _build_question_mix(self, question_distribution: dict) -> dict[str, int]:
-        mix = {}
-        for question_type in ("mcq", "essay"):
-            dist = question_distribution.get(question_type, {}) or {}
-            mix[question_type] = int(dist.get("easy", 0)) + int(dist.get("medium", 0)) + int(dist.get("hard", 0))
-        return mix
+        dist = question_distribution.get("mcq", {}) or {}
+        return {
+            "mcq": int(dist.get("easy", 0)) + int(dist.get("medium", 0)) + int(dist.get("hard", 0)),
+            "essay": 0,
+        }
 
     def _normalize_bloom_distribution(
         self,
@@ -239,13 +239,12 @@ class BlueprintAgent:
             allowed = list(BLOOM_DIFFICULTY_SCORE)
 
         bloom_counts = defaultdict(int)
-        for question_type in ("mcq", "essay"):
-            dist = question_distribution.get(question_type, {}) or {}
-            for difficulty_bucket, blooms in DIFFICULTY_TO_BLOOM.items():
-                count = int(dist.get(difficulty_bucket, 0))
-                active_blooms = [bloom for bloom in blooms if bloom in allowed] or list(blooms)
-                for offset in range(count):
-                    bloom_counts[active_blooms[offset % len(active_blooms)]] += 1
+        dist = question_distribution.get("mcq", {}) or {}
+        for difficulty_bucket, blooms in DIFFICULTY_TO_BLOOM.items():
+            count = int(dist.get(difficulty_bucket, 0))
+            active_blooms = [bloom for bloom in blooms if bloom in allowed] or list(blooms)
+            for offset in range(count):
+                bloom_counts[active_blooms[offset % len(active_blooms)]] += 1
 
         return dict(bloom_counts)
 
@@ -260,41 +259,40 @@ class BlueprintAgent:
         cells: list[BlueprintCell] = []
         priority = 1
 
-        for question_type in ("mcq", "essay"):
-            difficulty_dist = question_distribution.get(question_type, {}) or {}
-            for difficulty_bucket in ("easy", "medium", "hard"):
-                requested = int(difficulty_dist.get(difficulty_bucket, 0))
-                if requested <= 0:
-                    continue
+        difficulty_dist = question_distribution.get("mcq", {}) or {}
+        for difficulty_bucket in ("easy", "medium", "hard"):
+            requested = int(difficulty_dist.get(difficulty_bucket, 0))
+            if requested <= 0:
+                continue
 
-                bloom_targets = self._split_count_evenly(
-                    requested,
-                    DIFFICULTY_TO_BLOOM[difficulty_bucket],
+            bloom_targets = self._split_count_evenly(
+                requested,
+                DIFFICULTY_TO_BLOOM[difficulty_bucket],
+            )
+            for bloom_level, bloom_count in bloom_targets.items():
+                scope_targets = self._split_count_evenly_for_sequence(
+                    bloom_count,
+                    exam_spec.selected_scope,
                 )
-                for bloom_level, bloom_count in bloom_targets.items():
-                    scope_targets = self._split_count_evenly_for_sequence(
-                        bloom_count,
-                        exam_spec.selected_scope,
-                    )
-                    for scope_unit, target_count in scope_targets:
-                        if target_count <= 0:
-                            continue
-                        cell_id = f"{scope_unit.scope_id}|{question_type}|{bloom_level}"
-                        cells.append(
-                            BlueprintCell(
-                                cell_id=cell_id,
-                                scope_unit=scope_unit,
-                                question_type=question_type,
-                                bloom_level=bloom_level,
-                                target_count=target_count,
-                                priority=priority,
-                                overgenerate_count=max(
-                                    target_count,
-                                    math.ceil(target_count * OVERGENERATION_FACTOR),
-                                ),
-                            )
+                for scope_unit, target_count in scope_targets:
+                    if target_count <= 0:
+                        continue
+                    cell_id = f"{scope_unit.scope_id}|mcq|{bloom_level}"
+                    cells.append(
+                        BlueprintCell(
+                            cell_id=cell_id,
+                            scope_unit=scope_unit,
+                            question_type="mcq",
+                            bloom_level=bloom_level,
+                            target_count=target_count,
+                            priority=priority,
+                            overgenerate_count=max(
+                                target_count,
+                                math.ceil(target_count * OVERGENERATION_FACTOR),
+                            ),
                         )
-                        priority += 1
+                    )
+                    priority += 1
 
         return cells
 
@@ -349,8 +347,6 @@ class BlueprintAgent:
         return slots
 
     def _choose_chunk_mode(self, bloom_level: str, question_type: str) -> str:
-        if question_type == "essay":
-            return "multi"
         if bloom_level in {"apply", "analyze", "evaluate", "create"}:
             return "multi"
         return "single"

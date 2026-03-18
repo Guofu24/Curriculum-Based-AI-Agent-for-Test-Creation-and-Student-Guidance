@@ -11,7 +11,6 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -23,16 +22,12 @@ import {
 import {
   AlertCircle,
   BookOpen,
-  Brain,
   ChevronRight,
   FileText,
   GraduationCap,
-  Hash,
   Layers,
   Loader2,
   ShieldCheck,
-  Sliders,
-  Sparkles,
   Wand2,
 } from "lucide-react";
 import {
@@ -49,28 +44,23 @@ import {
   type TextbookListItem,
 } from "@/lib/api";
 
-const bloomLevels = [
-  "remember",
-  "understand",
-  "apply",
-  "analyze",
-  "evaluate",
-  "create",
-] as const;
-
 function flattenNodes(nodes: CurriculumNode[]): CurriculumNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children || [])]);
 }
 
 function buildScopePayload(node: CurriculumNode): ScopeUnitPayload {
+  const scopeId =
+    node.id || `${node.section_type}:${node.chapter_number}:${node.section_order}:${node.title}`;
   return {
-    scope_id: node.id || `${node.section_type}:${node.chapter_number}:${node.section_order}:${node.title}`,
+    scope_id: scopeId,
+    section_id: node.id || undefined,
     scope_type: node.section_type || "topic",
     title: node.title,
     chapter_number: node.chapter_number || 0,
     page_from: node.page_from ?? null,
     page_to: node.page_to ?? null,
     tags: [
+      `section:${node.id || scopeId}`,
       node.scope_label || `${node.section_type || "topic"}:${node.chapter_number || 0}`,
       ...(node.chapter_number ? [`chapter:${node.chapter_number}`] : []),
     ],
@@ -87,20 +77,10 @@ export default function GenerateExamPage() {
   const [curriculumTree, setCurriculumTree] = useState<CurriculumNode[]>([]);
   const [loadingTree, setLoadingTree] = useState(false);
   const [selectedScopeIds, setSelectedScopeIds] = useState<string[]>([]);
+  const [totalQuestions, setTotalQuestions] = useState("10");
+  const [timeLimit, setTimeLimit] = useState("45");
   const [prompt, setPrompt] = useState("");
   const [instructions, setInstructions] = useState("");
-  const [questionType, setQuestionType] = useState("mixed");
-  const [mcqCounts, setMcqCounts] = useState({ easy: 5, medium: 3, hard: 2 });
-  const [essayCounts, setEssayCounts] = useState({ easy: 1, medium: 1, hard: 1 });
-  const [timeLimit, setTimeLimit] = useState("45");
-  const [examCount, setExamCount] = useState(1);
-  const [gradualDifficulty, setGradualDifficulty] = useState(false);
-  const [strictGrounding, setStrictGrounding] = useState(true);
-  const [strictScope, setStrictScope] = useState(true);
-  const [appliedQuestions, setAppliedQuestions] = useState(true);
-  const [gradeLevelScope, setGradeLevelScope] = useState("undergraduate");
-  const [creativityLevel, setCreativityLevel] = useState([30]);
-  const [bloomLevel, setBloomLevel] = useState<string>("apply");
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationSteps, setGenerationSteps] = useState<GenerationStep[]>([]);
   const [generationError, setGenerationError] = useState("");
@@ -191,11 +171,7 @@ export default function GenerateExamPage() {
   );
 
   const selectedDocumentItem = readyDocuments.find((document) => document.id === selectedDocument) || null;
-
-  const totalMcq = mcqCounts.easy + mcqCounts.medium + mcqCounts.hard;
-  const totalEssay = essayCounts.easy + essayCounts.medium + essayCounts.hard;
-  const totalQuestions =
-    questionType === "mcq" ? totalMcq : questionType === "essay" ? totalEssay : totalMcq + totalEssay;
+  const parsedQuestionCount = Number(totalQuestions) || 0;
 
   const toggleScope = useCallback((scopeId: string, checked: boolean) => {
     setSelectedScopeIds((current) => {
@@ -212,19 +188,8 @@ export default function GenerateExamPage() {
     setSelectedScopeIds([]);
   }, []);
 
-  const updateCount = (
-    setter: React.Dispatch<React.SetStateAction<{ easy: number; medium: number; hard: number }>>,
-    level: "easy" | "medium" | "hard",
-    delta: number,
-  ) => {
-    setter((previous) => ({
-      ...previous,
-      [level]: Math.max(0, Math.min(50, previous[level] + delta)),
-    }));
-  };
-
   const handleGenerate = useCallback(() => {
-    if (!selectedDocumentItem || totalQuestions === 0) return;
+    if (!selectedDocumentItem || parsedQuestionCount <= 0) return;
 
     setIsGenerating(true);
     setGenerationError("");
@@ -240,31 +205,28 @@ export default function GenerateExamPage() {
       document_id: selectedDocumentItem.id,
       chapters,
       scope: selectedScope,
-      prompt:
-        prompt.trim() ||
-        `Generate a ${questionType} exam grounded in ${selectedDocumentItem.title}${
-          selectedScope.length ? ` using ${selectedScope.length} selected scope units` : ""
-        }.`,
-      exam_type: questionType,
-      difficulty: "custom",
-      question_distribution: {
-        mcq: questionType === "essay" ? { easy: 0, medium: 0, hard: 0 } : mcqCounts,
-        essay: questionType === "mcq" ? { easy: 0, medium: 0, hard: 0 } : essayCounts,
-      },
-      num_variants: examCount,
-      gradually_increasing: gradualDifficulty,
-      constraints: {
-        strict_grounding: strictGrounding,
-        allow_applied_questions: appliedQuestions,
-        strict_scope: strictScope,
-        grade_level_scope: gradeLevelScope || undefined,
-        creativity_level: creativityLevel[0] / 100,
-        bloom_levels: [bloomLevel],
-      },
+      prompt: prompt.trim(),
       instructions: instructions.trim() || undefined,
+      total_questions: parsedQuestionCount,
+      question_type: "mcq_single_answer",
+      exam_type: "mcq",
+      num_variants: 1,
+      gradually_increasing: false,
+      constraints: {
+        strict_grounding: true,
+        allow_applied_questions: false,
+        strict_scope: true,
+        creativity_level: 0,
+        bloom_levels: ["remember", "understand", "apply", "analyze"],
+        max_concurrency: 1,
+      },
       time_limit_minutes: Number(timeLimit) || undefined,
       output_language: "vi",
-      strict_scope: strictScope,
+      strict_scope: true,
+      formatting_preferences: {
+        subject: "physics",
+        language: "vi",
+      },
     };
 
     generationApi.generateStream(
@@ -285,25 +247,7 @@ export default function GenerateExamPage() {
         setIsGenerating(false);
       },
     );
-  }, [
-    appliedQuestions,
-    bloomLevel,
-    creativityLevel,
-    essayCounts,
-    examCount,
-    gradualDifficulty,
-    instructions,
-    mcqCounts,
-    prompt,
-    questionType,
-    selectedDocumentItem,
-    selectedScope,
-    strictGrounding,
-    strictScope,
-    timeLimit,
-    totalQuestions,
-    gradeLevelScope,
-  ]);
+  }, [instructions, parsedQuestionCount, prompt, selectedDocumentItem, selectedScope, timeLimit]);
 
   useEffect(() => {
     if (!generatedExamId) return;
@@ -333,9 +277,7 @@ export default function GenerateExamPage() {
           <GenerationStepper
             steps={generationSteps}
             onComplete={() => {
-              if (!generatedExamId) {
-                setIsGenerating(false);
-              }
+              if (!generatedExamId) setIsGenerating(false);
             }}
           />
         )}
@@ -359,9 +301,9 @@ export default function GenerateExamPage() {
       <DashboardHeader title="Generate Exam" />
       <div className="flex flex-1 flex-col gap-6 p-6 max-w-6xl">
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight text-foreground">Blueprint-first exam generation</h2>
+          <h2 className="text-2xl font-semibold tracking-tight text-foreground">Grounded exam generation</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Select a document, choose the exact curriculum scope, and generate an exam that stays grounded in the uploaded material.
+            Generate one Physics exam in Vietnamese from PDF content only. The system will parse your request into an exam spec, build a blueprint, retrieve evidence inside the selected scope, and save a reviewable version.
           </p>
         </div>
 
@@ -370,9 +312,9 @@ export default function GenerateExamPage() {
             <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
               <AlertCircle className="h-8 w-8 text-muted-foreground" />
               <div>
-                <p className="text-base font-semibold text-foreground">No ready documents found</p>
+                <p className="text-base font-semibold text-foreground">No ready PDF documents found</p>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Upload and process at least one document before generating an exam.
+                  Upload and process at least one PDF before generating an exam.
                 </p>
               </div>
               <Button asChild>
@@ -419,7 +361,7 @@ export default function GenerateExamPage() {
                       <Label>Select document</Label>
                       <Select value={selectedDocument} onValueChange={setSelectedDocument}>
                         <SelectTrigger className="h-11">
-                          <SelectValue placeholder="Choose a processed document" />
+                          <SelectValue placeholder="Choose a processed PDF" />
                         </SelectTrigger>
                         <SelectContent>
                           {filteredDocuments.map((document) => (
@@ -433,8 +375,16 @@ export default function GenerateExamPage() {
                   </div>
 
                   <div className="grid gap-3 sm:grid-cols-3">
-                    <MiniStat label="Course" value={selectedDocumentItem?.course_id ? courses.find((course) => course.id === selectedDocumentItem.course_id)?.course_name || "Assigned" : "Personal"} icon={GraduationCap} />
-                    <MiniStat label="Pages/Slides" value={String(selectedDocumentItem?.total_pages_or_slides || 0)} icon={FileText} />
+                    <MiniStat
+                      label="Course"
+                      value={
+                        selectedDocumentItem?.course_id
+                          ? courses.find((course) => course.id === selectedDocumentItem.course_id)?.course_name || "Assigned"
+                          : "Personal"
+                      }
+                      icon={GraduationCap}
+                    />
+                    <MiniStat label="Pages" value={String(selectedDocumentItem?.total_pages_or_slides || 0)} icon={FileText} />
                     <MiniStat label="Chunks" value={String(selectedDocumentItem?.total_chunks || 0)} icon={Layers} />
                   </div>
 
@@ -443,7 +393,7 @@ export default function GenerateExamPage() {
                       <div>
                         <p className="text-sm font-medium text-foreground">Curriculum scope</p>
                         <p className="mt-1 text-xs text-muted-foreground">
-                          Leave everything unchecked to generate from the whole document, or select specific units for strict scope.
+                          Select chapter, lesson, topic, or subtopic. Retrieval will stay inside these sections only.
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -486,23 +436,28 @@ export default function GenerateExamPage() {
               <Card className="rounded-2xl shadow-sm">
                 <CardHeader className="pb-4">
                   <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                    <Sliders className="h-4 w-4 text-primary" />
-                    Exam Controls
+                    <ShieldCheck className="h-4 w-4 text-primary" />
+                    MVP Controls
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="flex flex-col gap-5">
+                  <div className="flex flex-wrap gap-2">
+                    <Badge variant="secondary">Vật lý</Badge>
+                    <Badge variant="outline">Tiếng Việt</Badge>
+                    <Badge variant="outline">PDF only</Badge>
+                    <Badge variant="outline">MCQ single-answer</Badge>
+                    <Badge variant="outline">Strict scope</Badge>
+                  </div>
+
                   <div className="space-y-2">
-                    <Label>Exam type</Label>
-                    <Select value={questionType} onValueChange={setQuestionType}>
-                      <SelectTrigger className="h-11">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="mixed">Mixed</SelectItem>
-                        <SelectItem value="mcq">Multiple choice</SelectItem>
-                        <SelectItem value="essay">Essay</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <Label>Total questions</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={totalQuestions}
+                      onChange={(event) => setTotalQuestions(event.target.value)}
+                    />
                   </div>
 
                   <div className="space-y-2">
@@ -511,11 +466,11 @@ export default function GenerateExamPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label>Generation prompt</Label>
+                    <Label>Teacher request</Label>
                     <Textarea
                       value={prompt}
                       onChange={(event) => setPrompt(event.target.value)}
-                      placeholder="Example: Create a midterm focused on core concepts with more application questions in later sections."
+                      placeholder="Example: Tập trung nhiều hơn vào phần định luật bảo toàn và tránh câu quá dài."
                       className="min-h-24"
                     />
                   </div>
@@ -525,115 +480,13 @@ export default function GenerateExamPage() {
                     <Textarea
                       value={instructions}
                       onChange={(event) => setInstructions(event.target.value)}
-                      placeholder="Example: Answer all questions. Show your work for essay items."
+                      placeholder="Example: Chọn 1 đáp án đúng cho mỗi câu."
                       className="min-h-20"
                     />
                   </div>
-                </CardContent>
-              </Card>
-            </div>
 
-            <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-              <Card className="rounded-2xl shadow-sm">
-                <CardHeader className="pb-4">
-                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                    <Hash className="h-4 w-4 text-primary" />
-                    Question Mix
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-5">
-                  {(questionType === "mcq" || questionType === "mixed") && (
-                    <DistributionEditor
-                      title="Multiple choice"
-                      counts={mcqCounts}
-                      onChange={(level, delta) => updateCount(setMcqCounts, level, delta)}
-                    />
-                  )}
-                  {(questionType === "essay" || questionType === "mixed") && (
-                    <DistributionEditor
-                      title="Essay"
-                      counts={essayCounts}
-                      onChange={(level, delta) => updateCount(setEssayCounts, level, delta)}
-                    />
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card className="rounded-2xl shadow-sm">
-                <CardHeader className="pb-4">
-                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                    <ShieldCheck className="h-4 w-4 text-primary" />
-                    Constraints
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-5">
-                  <ToggleRow
-                    label="Strict grounding"
-                    description="Force the generator to stay close to retrieved evidence."
-                    checked={strictGrounding}
-                    onChange={setStrictGrounding}
-                  />
-                  <ToggleRow
-                    label="Strict scope"
-                    description="Do not step outside the selected curriculum units."
-                    checked={strictScope}
-                    onChange={setStrictScope}
-                  />
-                  <ToggleRow
-                    label="Allow applied questions"
-                    description="Permit reasoning and application while staying grounded."
-                    checked={appliedQuestions}
-                    onChange={setAppliedQuestions}
-                  />
-                  <ToggleRow
-                    label="Gradually increase difficulty"
-                    description="Arrange items from easier to harder over the exam."
-                    checked={gradualDifficulty}
-                    onChange={setGradualDifficulty}
-                  />
-
-                  <div className="space-y-2">
-                    <Label>Target Bloom level</Label>
-                    <Select value={bloomLevel} onValueChange={setBloomLevel}>
-                      <SelectTrigger className="h-11">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {bloomLevels.map((level) => (
-                          <SelectItem key={level} value={level}>
-                            {level}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label>Academic level</Label>
-                    <Input
-                      value={gradeLevelScope}
-                      onChange={(event) => setGradeLevelScope(event.target.value)}
-                      placeholder="undergraduate"
-                    />
-                  </div>
-
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <Label>Creativity level</Label>
-                      <span className="text-xs text-muted-foreground">{creativityLevel[0]}%</span>
-                    </div>
-                    <Slider value={creativityLevel} onValueChange={setCreativityLevel} max={100} step={5} />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label>Variants</Label>
-                    <Input
-                      type="number"
-                      min={1}
-                      max={10}
-                      value={examCount}
-                      onChange={(event) => setExamCount(Number(event.target.value) || 1)}
-                    />
+                  <div className="rounded-xl border bg-muted/20 p-4 text-sm text-muted-foreground">
+                    The generator will always parse your request into an exam spec first, then build a section-level blueprint before any question generation starts.
                   </div>
                 </CardContent>
               </Card>
@@ -643,17 +496,22 @@ export default function GenerateExamPage() {
               <CardContent className="flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between">
                 <div className="space-y-2">
                   <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="secondary">{totalQuestions} questions</Badge>
+                    <Badge variant="secondary">{parsedQuestionCount} questions</Badge>
                     <Badge variant="outline">
                       {selectedScope.length > 0 ? `${selectedScope.length} scope units selected` : "Whole document scope"}
                     </Badge>
                     <Badge variant="outline">{selectedDocumentItem?.title || "No document"}</Badge>
                   </div>
                   <p className="text-sm text-muted-foreground">
-                    The generator will create an exam blueprint first, retrieve only relevant evidence, and then generate questions per blueprint cell.
+                    Each question will include source evidence linked to the selected document and scoped sections before it reaches review.
                   </p>
                 </div>
-                <Button size="lg" className="h-11 md:min-w-56" disabled={!selectedDocumentItem || totalQuestions === 0} onClick={handleGenerate}>
+                <Button
+                  size="lg"
+                  className="h-11 md:min-w-56"
+                  disabled={!selectedDocumentItem || parsedQuestionCount <= 0}
+                  onClick={handleGenerate}
+                >
                   <Wand2 className="mr-2 h-4 w-4" />
                   Generate exam
                 </Button>
@@ -737,61 +595,5 @@ function ScopeTreeNode({
         </div>
       )}
     </div>
-  );
-}
-
-function DistributionEditor({
-  title,
-  counts,
-  onChange,
-}: {
-  title: string;
-  counts: { easy: number; medium: number; hard: number };
-  onChange: (level: "easy" | "medium" | "hard", delta: number) => void;
-}) {
-  return (
-    <div className="rounded-xl border p-4">
-      <p className="text-sm font-medium text-foreground">{title}</p>
-      <div className="mt-4 grid gap-3 sm:grid-cols-3">
-        {(["easy", "medium", "hard"] as const).map((level) => (
-          <div key={level} className="rounded-lg bg-muted/30 p-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs uppercase tracking-wide text-muted-foreground">{level}</span>
-              <span className="text-lg font-semibold text-foreground">{counts[level]}</span>
-            </div>
-            <div className="mt-3 flex gap-2">
-              <Button variant="outline" size="sm" className="flex-1" onClick={() => onChange(level, -1)}>
-                -
-              </Button>
-              <Button variant="outline" size="sm" className="flex-1" onClick={() => onChange(level, 1)}>
-                +
-              </Button>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ToggleRow({
-  label,
-  description,
-  checked,
-  onChange,
-}: {
-  label: string;
-  description: string;
-  checked: boolean;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <label className="flex cursor-pointer items-start justify-between gap-4 rounded-xl border p-4">
-      <div>
-        <p className="text-sm font-medium text-foreground">{label}</p>
-        <p className="mt-1 text-xs text-muted-foreground">{description}</p>
-      </div>
-      <Checkbox checked={checked} onCheckedChange={(value) => onChange(value === true)} />
-    </label>
   );
 }

@@ -16,6 +16,7 @@ from typing import Any, TypedDict
 @dataclass
 class ScopeUnit:
     scope_id: str
+    section_id: str | None = None
     scope_type: str = "chapter"
     title: str = ""
     chapter_number: int = 0
@@ -28,11 +29,16 @@ class ScopeUnit:
 class ExamSpec:
     exam_type: str
     total_questions: int
+    course_id: str | None = None
+    document_id: str | None = None
+    question_type: str = "mcq_single_answer"
     time_limit_minutes: int | None = None
     output_language: str = "vi"
     instructions: str = ""
+    normalized_instructions: str = ""
     strict_scope_flag: bool = True
     selected_scope: list[ScopeUnit] = field(default_factory=list)
+    selected_section_ids: list[str] = field(default_factory=list)
     bloom_distribution: dict[str, int] = field(default_factory=dict)
     question_mix: dict[str, int] = field(default_factory=dict)
     formatting_preferences: dict[str, Any] = field(default_factory=dict)

@@ -1,7 +1,7 @@
 """
 Generation Router
 
-Handles exam generation and partial regeneration with SSE progress streaming.
+Handles MVP exam generation and scoped partial regeneration.
 """
 import json
 import asyncio
@@ -149,11 +149,11 @@ async def generate_exam(
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.LECTURER, UserRole.TEACHING_ASSISTANT)),
 ):
     """
-    Generate a new exam using the multi-agent pipeline.
+    Generate a new exam with the explicit MVP pipeline.
 
-    This runs the full LangGraph workflow:
-    1. Parse textbook → 2. Create blueprint → 3. Retrieve context →
-    4. Generate questions → 5. Validate → 6. Finalize
+    Flow:
+    1. Resolve scope -> 2. Build exam spec -> 3. Plan blueprint
+    4. Retrieve evidence -> 5. Generate MCQ -> 6. Verify -> 7. Save version
     """
     service = ExamService(db)
 
@@ -177,9 +177,6 @@ async def generate_exam_stream(
 ):
     """
     Generate exam with Server-Sent Events (SSE) progress updates.
-
-    The frontend's GenerationStepper component can subscribe to this
-    to show real-time progress.
     """
     async def event_stream():
         steps = [
@@ -258,12 +255,7 @@ async def partial_regenerate(
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.LECTURER, UserRole.TEACHING_ASSISTANT)),
 ):
     """
-    Regenerate specific questions in an existing exam.
-
-    Supports:
-    - Regenerating specific questions by ID
-    - Regenerating a range of questions (from X to Y)
-    - Custom edit prompts per question
+    Regenerate specific questions in an existing exam version.
     """
     service = ExamService(db)
 

@@ -8,12 +8,12 @@ from models.exam import (
     Exam,
     ExamQuestion,
     ExamSpecRecord,
+    ExamSpecScopeRecord,
     ExamStatus,
     ExamType,
     ExamVersion,
     QuestionType,
 )
-from models.student import MasteryProfile, StudentSubmission
 from models.textbook import ProcessingStatus, Textbook, TextbookChapter, TextbookChunk
 from models.token_blacklist import TokenBlacklist
 from models.user import User, UserRole
@@ -29,15 +29,14 @@ __all__ = [
     "Exam",
     "ExamQuestion",
     "ExamSpecRecord",
+    "ExamSpecScopeRecord",
     "ExamStatus",
     "ExamType",
     "ExamVersion",
     "LearningObjective",
-    "MasteryProfile",
     "ProcessingStatus",
     "QuestionType",
     "Section",
-    "StudentSubmission",
     "Textbook",
     "TextbookChapter",
     "TextbookChunk",

@@ -1,7 +1,9 @@
 """
 Exam Service
 
-Coordinates generation, versioning, and audit-friendly persistence for exams.
+Explicit MVP pipeline:
+upload -> parse -> curriculum -> scope -> exam spec -> blueprint ->
+scoped retrieval -> generate -> verify -> review/edit -> versioning
 """
 import logging
 import uuid
@@ -12,18 +14,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from agents.blueprint import BlueprintAgent
-from agents.dedup_filter import DedupFilterAgent
+from agents.blueprint import BlueprintAgent, assign_chunks_to_slots
 from agents.grounding_checker import GroundingChecker
 from agents.llm_router import create_llm
-from agents.orchestrator import create_exam_generation_graph
-from agents.pruning import PruningAgent
-from agents.quality_judge import QualityJudgeAgent
-from agents.question_generator import QuestionGeneratorAgent
 from agents.retrieval import RetrievalAgent
-from agents.reviewer import ReviewerAgent
-from agents.state import AgentState, GeneratedQuestion
-from agents.validator import ValidatorAgent
+from agents.state import BlueprintCell, ExamBlueprint, ExamSpec, GeneratedQuestion, ScopeUnit
+from models.course import CourseMembership
 from models.exam import (
     BloomLevel,
     BlueprintCellRecord,
@@ -32,15 +28,23 @@ from models.exam import (
     Exam,
     ExamQuestion,
     ExamSpecRecord,
+    ExamSpecScopeRecord,
     ExamStatus,
     ExamType,
     ExamVersion,
     QuestionType,
 )
-from models.course import CourseMembership
+from repositories.document_repository import DocumentRepository
 from schemas.exam import ExamGenerationRequest, ExamPartialRegenerateRequest
+from services.curriculum.scope_service import CurriculumScopeService
+from services.editing.review_edit_service import ReviewEditService
+from services.exam_planning.spec_service import ExamSpecService
+from services.generation.mcq_generation_service import MCQGenerationService
 from services.rag_service import RAGService
+from services.retrieval.scoped_retrieval_service import ScopedRetrievalService
 from services.textbook_service import TextbookService
+from services.verification.mcq_verifier_service import MCQVerifierService
+from agents.validator import ValidatorAgent
 
 logger = logging.getLogger(__name__)
 
@@ -48,36 +52,6 @@ logger = logging.getLogger(__name__)
 class ExamService:
     def __init__(self, db: AsyncSession):
         self.db = db
-
-    def _get_llm(self):
-        return create_llm()
-
-    def _normalize_question_id_to_slot(
-        self,
-        raw_id: str,
-        id_to_slot: dict[str, int],
-    ) -> int | None:
-        if raw_id in id_to_slot:
-            return id_to_slot[raw_id]
-        try:
-            slot = int(raw_id)
-            return slot if slot > 0 else None
-        except (TypeError, ValueError):
-            return None
-
-    def _serialize_scope(self, request: ExamGenerationRequest) -> list[dict]:
-        if request.scope:
-            return [item.model_dump() for item in request.scope]
-        return [
-            {
-                "scope_id": f"chapter:{chapter}",
-                "scope_type": "chapter",
-                "title": f"Chapter {chapter}",
-                "chapter_number": int(chapter),
-                "tags": [f"chapter:{int(chapter)}"],
-            }
-            for chapter in request.chapters
-        ]
 
     def _serialize_dataclass(self, value):
         if value is None:
@@ -93,6 +67,18 @@ class ExamService:
             return value
         return asdict(value)
 
+    def _scope_to_dict(self, scope_unit: ScopeUnit) -> dict:
+        return {
+            "scope_id": scope_unit.scope_id,
+            "section_id": scope_unit.section_id,
+            "scope_type": scope_unit.scope_type,
+            "title": scope_unit.title,
+            "chapter_number": scope_unit.chapter_number,
+            "page_from": scope_unit.page_from,
+            "page_to": scope_unit.page_to,
+            "tags": list(scope_unit.tags or []),
+        }
+
     def _question_snapshot(self, question: GeneratedQuestion | ExamQuestion) -> dict:
         if isinstance(question, GeneratedQuestion):
             return {
@@ -101,6 +87,7 @@ class ExamService:
                 "question_type": question.question_type,
                 "bloom_level": question.bloom_level,
                 "correct_answer": question.correct_answer,
+                "options": question.options,
                 "rubric": question.rubric,
                 "explanation": question.explanation,
                 "source_chunks": list(question.source_chunks or []),
@@ -114,6 +101,7 @@ class ExamService:
             "question_type": question.question_type.value,
             "bloom_level": question.bloom_level.value,
             "correct_answer": question.correct_answer,
+            "options": question.options,
             "rubric": question.rubric_json,
             "explanation": question.explanation,
             "source_chunks": list(question.source_chunks or []),
@@ -136,7 +124,7 @@ class ExamService:
             exam_version_id=exam_version_id,
             question_number=question.slot_number,
             blueprint_cell_key=question.blueprint_cell_key or None,
-            question_type=QuestionType(question.question_type),
+            question_type=QuestionType.MCQ,
             bloom_level=BloomLevel(question.bloom_level),
             difficulty_score=question.difficulty_score,
             content=question.content,
@@ -186,6 +174,19 @@ class ExamService:
             is_validated=bool(question.is_validated),
             validation_notes=question.validation_notes or "",
         )
+
+    def _normalize_question_id_to_slot(
+        self,
+        raw_id: str,
+        id_to_slot: dict[str, int],
+    ) -> int | None:
+        if raw_id in id_to_slot:
+            return id_to_slot[raw_id]
+        try:
+            slot = int(raw_id)
+            return slot if slot > 0 else None
+        except (TypeError, ValueError):
+            return None
 
     async def _resolve_textbook(
         self,
@@ -242,20 +243,21 @@ class ExamService:
         exam: Exam,
         user_id: str,
         course_id: str | None,
-        exam_spec,
-        blueprint,
+        document_id: str,
+        exam_spec: ExamSpec,
+        blueprint: ExamBlueprint,
     ) -> None:
-        if not exam_spec:
-            return
-
         spec_record = ExamSpecRecord(
             exam_id=exam.id,
             course_id=course_id,
+            document_id=document_id,
             creator_user_id=user_id,
             exam_type=exam_spec.exam_type,
+            question_type=exam_spec.question_type,
             time_limit_minutes=exam_spec.time_limit_minutes,
             language=exam_spec.output_language,
             instructions=exam_spec.instructions,
+            normalized_instructions=exam_spec.normalized_instructions,
             strict_scope_flag=exam_spec.strict_scope_flag,
             bloom_distribution_json=exam_spec.bloom_distribution,
             question_mix_json=exam_spec.question_mix,
@@ -268,10 +270,26 @@ class ExamService:
         self.db.add(spec_record)
         await self.db.flush()
 
+        for scope_item in exam_spec.selected_scope:
+            self.db.add(
+                ExamSpecScopeRecord(
+                    exam_spec_id=spec_record.id,
+                    section_id=scope_item.section_id,
+                    scope_id=scope_item.scope_id,
+                    scope_type=scope_item.scope_type,
+                    title=scope_item.title,
+                    chapter_number=int(scope_item.chapter_number or 0),
+                    page_from=scope_item.page_from,
+                    page_to=scope_item.page_to,
+                    tags_json=list(scope_item.tags or []),
+                )
+            )
+
         for cell in blueprint.cells:
             self.db.add(
                 BlueprintCellRecord(
                     exam_spec_id=spec_record.id,
+                    section_id=cell.scope_unit.section_id,
                     cell_key=cell.cell_id,
                     scope_unit_json=self._serialize_dataclass(cell.scope_unit),
                     question_type=cell.question_type,
@@ -303,7 +321,8 @@ class ExamService:
                     continue
             if edit.get("range_start") is not None and edit.get("range_end") is not None:
                 for slot in range(int(edit["range_start"]), int(edit["range_end"]) + 1):
-                    targeted_slots.add(slot)
+                    if slot > 0:
+                        targeted_slots.add(slot)
 
             old_values = [
                 self._question_snapshot(old_by_slot[slot])
@@ -328,31 +347,229 @@ class ExamService:
                 )
             )
 
-    def _build_agents(self, textbook_id: str):
+    def _get_llm(self):
+        return create_llm(temperature=0.2)
+
+    def _build_pipeline(
+        self,
+        document_id: str,
+        section_by_id: dict[str, object],
+    ):
         llm = self._get_llm()
         rag = RAGService.get_instance()
-        vector_store = rag.get_vector_store(namespace=textbook_id)
-
+        vector_store = rag.get_vector_store(namespace=document_id)
+        document_repository = DocumentRepository(self.db)
+        scope_service = CurriculumScopeService(document_repository)
         retrieval_agent = RetrievalAgent(vector_store, db_session=self.db)
-        blueprint_agent = BlueprintAgent()
-        question_generator = QuestionGeneratorAgent(llm)
-        grounding_checker = GroundingChecker()
-        validator = ValidatorAgent(grounding_checker=grounding_checker)
-        reviewer = ReviewerAgent(question_generator, retrieval_agent)
-        pruning_agent = PruningAgent()
-        quality_judge = QualityJudgeAgent(grounding_checker=grounding_checker)
-        dedup_filter = DedupFilterAgent()
+        retrieval_service = ScopedRetrievalService(
+            retrieval_agent=retrieval_agent,
+            repository=document_repository,
+            scope_service=scope_service,
+            section_by_id=section_by_id,
+        )
+        generation_service = MCQGenerationService(llm)
+        verifier_service = MCQVerifierService(
+            ValidatorAgent(grounding_checker=GroundingChecker())
+        )
+        return scope_service, retrieval_service, generation_service, verifier_service
 
+    def _enrich_source_evidence(
+        self,
+        questions: list[GeneratedQuestion],
+        chunk_metadata_index: dict[str, dict],
+        document_id: str,
+    ) -> None:
+        for question in questions:
+            enriched_items: list[dict] = []
+            inferred_section_id = self._infer_section_id(question.scope_tags)
+            for item in question.source_evidence or []:
+                if not isinstance(item, dict):
+                    continue
+                chunk_id = str(item.get("chunk_id") or "")
+                metadata = dict(chunk_metadata_index.get(chunk_id) or {})
+                enriched_item = dict(item)
+                enriched_item["document_id"] = document_id
+                if metadata.get("section_id") and not enriched_item.get("section_id"):
+                    enriched_item["section_id"] = metadata.get("section_id")
+                if inferred_section_id and not enriched_item.get("section_id"):
+                    enriched_item["section_id"] = inferred_section_id
+                for key in ("chapter_number", "page", "parent_heading"):
+                    if metadata.get(key) is not None and enriched_item.get(key) is None:
+                        enriched_item[key] = metadata.get(key)
+                enriched_items.append(enriched_item)
+            question.source_evidence = enriched_items
+
+    def _select_final_questions(
+        self,
+        questions: list[GeneratedQuestion],
+        blueprint: ExamBlueprint,
+    ) -> list[GeneratedQuestion]:
+        grouped: dict[str, list[GeneratedQuestion]] = {}
+        for question in questions:
+            grouped.setdefault(question.blueprint_cell_key, []).append(question)
+
+        selected: list[GeneratedQuestion] = []
+        for cell in blueprint.cells:
+            candidates = grouped.get(cell.cell_id, [])
+            candidates.sort(
+                key=lambda item: (
+                    not item.is_validated,
+                    len(item.warnings or []),
+                    item.slot_number,
+                )
+            )
+            chosen = candidates[: cell.target_count]
+            cell.generated_count = len(chosen)
+            selected.extend(chosen)
+
+        selected.sort(key=lambda item: item.slot_number)
+        for index, question in enumerate(selected, start=1):
+            question.slot_number = index
+        blueprint.total_questions = len(selected)
+        return selected
+
+    def _quality_map(self, payload: list[dict]) -> dict[int, dict]:
         return {
-            "_retrieval_agent": retrieval_agent,
-            "_blueprint_agent": blueprint_agent,
-            "_question_generator": question_generator,
-            "_validator": validator,
-            "_reviewer": reviewer,
-            "_pruning_agent": pruning_agent,
-            "_quality_judge": quality_judge,
-            "_dedup_filter": dedup_filter,
+            int(item["slot_number"]): item
+            for item in payload
+            if isinstance(item, dict) and item.get("slot_number") is not None
         }
+
+    def _grounding_map(self, payload: list[dict]) -> dict[int, dict]:
+        return {
+            int(item["slot_number"]): item
+            for item in payload
+            if isinstance(item, dict) and item.get("slot_number") is not None
+        }
+
+    def _normalize_edit_requests(
+        self,
+        current_questions: list[ExamQuestion],
+        request: ExamPartialRegenerateRequest,
+    ) -> list[dict]:
+        id_to_slot = {str(question.id): int(question.question_number) for question in current_questions}
+        edit_requests: list[dict] = []
+
+        for edit in request.edits:
+            normalized_ids: list[str] = []
+            for raw_id in edit.question_ids:
+                slot = self._normalize_question_id_to_slot(raw_id, id_to_slot)
+                if slot is not None:
+                    normalized_ids.append(str(slot))
+
+            range_start = edit.range_start
+            range_end = edit.range_end
+            if isinstance(range_start, int) and isinstance(range_end, int) and range_start > range_end:
+                range_start, range_end = range_end, range_start
+
+            edit_requests.append(
+                {
+                    "question_ids": normalized_ids,
+                    "range_start": range_start,
+                    "range_end": range_end,
+                    "edit_prompt": edit.edit_prompt,
+                    "edit_type": edit.edit_type,
+                    "new_content": edit.new_content,
+                    "new_options": [item.model_dump() for item in edit.new_options] if edit.new_options else None,
+                    "new_correct_answer": edit.new_correct_answer,
+                    "new_bloom_level": edit.new_bloom_level,
+                }
+            )
+
+        return edit_requests
+
+    def _infer_section_id(self, scope_tags: list[str]) -> str | None:
+        for tag in scope_tags or []:
+            if not isinstance(tag, str) or not tag.startswith("section:"):
+                continue
+            _, _, section_id = tag.partition(":")
+            if section_id:
+                return section_id
+        return None
+
+    def _restore_blueprint(
+        self,
+        exam: Exam,
+        questions: list[GeneratedQuestion],
+    ) -> ExamBlueprint:
+        blueprint_json = dict(exam.blueprint_json or {})
+        raw_cells = list(blueprint_json.get("cells") or [])
+        if raw_cells:
+            cells: list[BlueprintCell] = []
+            for raw_cell in raw_cells:
+                raw_scope = raw_cell.get("scope_unit") or {}
+                cells.append(
+                    BlueprintCell(
+                        cell_id=raw_cell.get("cell_id") or raw_cell.get("cell_key") or "",
+                        scope_unit=ScopeUnit(
+                            scope_id=raw_scope.get("scope_id") or raw_scope.get("section_id") or "",
+                            section_id=raw_scope.get("section_id"),
+                            scope_type=raw_scope.get("scope_type", "topic"),
+                            title=raw_scope.get("title") or "Untitled Section",
+                            chapter_number=int(raw_scope.get("chapter_number") or 0),
+                            page_from=raw_scope.get("page_from"),
+                            page_to=raw_scope.get("page_to"),
+                            tags=list(raw_scope.get("tags") or []),
+                        ),
+                        question_type=raw_cell.get("question_type", "mcq"),
+                        bloom_level=raw_cell.get("bloom_level", "understand"),
+                        target_count=int(raw_cell.get("target_count") or 1),
+                        generated_count=int(raw_cell.get("generated_count") or 0),
+                        priority=int(raw_cell.get("priority") or 0),
+                        overgenerate_count=int(raw_cell.get("overgenerate_count") or 1),
+                    )
+                )
+            spec = ExamSpec(
+                exam_type="mcq",
+                total_questions=len(questions),
+                question_type="mcq_single_answer",
+            )
+            return ExamBlueprint(
+                title=blueprint_json.get("title") or exam.title,
+                exam_spec=spec,
+                total_questions=len(questions),
+                cells=cells,
+            )
+
+        cells_by_key: dict[str, BlueprintCell] = {}
+        for question in questions:
+            section_id = self._infer_section_id(question.scope_tags)
+            chapter_number = 0
+            for tag in question.scope_tags:
+                if isinstance(tag, str) and tag.startswith("chapter:") and tag.partition(":")[2].isdigit():
+                    chapter_number = int(tag.partition(":")[2])
+                    break
+            cell_key = question.blueprint_cell_key or f"slot:{question.slot_number}"
+            if cell_key in cells_by_key:
+                continue
+            cells_by_key[cell_key] = BlueprintCell(
+                cell_id=cell_key,
+                scope_unit=ScopeUnit(
+                    scope_id=section_id or cell_key,
+                    section_id=section_id,
+                    scope_type="topic",
+                    title=section_id or cell_key,
+                    chapter_number=chapter_number,
+                    tags=list(question.scope_tags or []),
+                ),
+                question_type="mcq",
+                bloom_level=question.bloom_level,
+                target_count=1,
+                generated_count=1,
+                priority=question.slot_number,
+                overgenerate_count=1,
+            )
+        spec = ExamSpec(
+            exam_type="mcq",
+            total_questions=len(questions),
+            question_type="mcq_single_answer",
+        )
+        return ExamBlueprint(
+            title=exam.title,
+            exam_spec=spec,
+            total_questions=len(questions),
+            cells=list(cells_by_key.values()),
+        )
 
     async def generate_exam(
         self,
@@ -360,12 +577,20 @@ class ExamService:
         request: ExamGenerationRequest,
     ) -> Exam:
         textbook_id, course_id, textbook_metadata = await self._resolve_textbook(user_id, request)
-        serialized_scope = self._serialize_scope(request)
-        selected_chapters = request.chapters or [
-            int(item.get("chapter_number", 0))
-            for item in serialized_scope
-            if int(item.get("chapter_number", 0)) > 0
-        ]
+        document_repository = DocumentRepository(self.db)
+        scope_service = CurriculumScopeService(document_repository)
+        resolved_scope = await scope_service.resolve_scope(
+            document_id=textbook_id,
+            requested_scope=[item.model_dump() for item in request.scope],
+            requested_chapters=list(request.chapters or []),
+        )
+        spec_service = ExamSpecService()
+        exam_spec = spec_service.build_exam_spec(
+            request=request,
+            course_id=course_id,
+            document_id=textbook_id,
+            resolved_scope=resolved_scope,
+        )
 
         exam = Exam(
             id=str(uuid.uuid4()),
@@ -373,85 +598,75 @@ class ExamService:
             course_id=course_id,
             textbook_id=textbook_id,
             title=f"Exam - {textbook_metadata.get('title', 'Untitled')}",
-            exam_type=ExamType(request.exam_type),
-            difficulty=DifficultyLevel(request.difficulty),
+            exam_type=ExamType.MCQ,
+            difficulty=DifficultyLevel.CUSTOM,
             status=ExamStatus.GENERATING,
-            chapters=selected_chapters,
+            chapters=list(resolved_scope.chapter_numbers),
             config=request.model_dump(),
-            instructions=request.instructions,
-            output_language=request.output_language,
-            strict_scope_flag=bool(request.strict_scope),
-            selected_scope_json=serialized_scope,
+            instructions=exam_spec.instructions,
+            output_language=exam_spec.output_language,
+            strict_scope_flag=bool(exam_spec.strict_scope_flag),
+            selected_scope_json=[self._scope_to_dict(item) for item in exam_spec.selected_scope],
             edit_history_json=[],
         )
         self.db.add(exam)
         await self.db.flush()
 
-        initial_state: AgentState = {
-            "user_id": user_id,
-            "textbook_id": textbook_id,
-            "chapters": selected_chapters,
-            "prompt": request.prompt,
-            "exam_type": request.exam_type,
-            "difficulty": request.difficulty,
-            "question_distribution": request.question_distribution.model_dump(),
-            "num_variants": request.num_variants,
-            "gradually_increasing": request.gradually_increasing,
-            "constraints": request.constraints.model_dump(),
-            "textbook_metadata": textbook_metadata,
-            "processing_status": "ready",
-            "exam_spec": None,
-            "blueprint": None,
-            "retrieved_contexts": [],
-            "generated_questions": [],
-            "validated_questions": [],
-            "validation_summary": {},
-            "judged_questions": [],
-            "quality_scores": [],
-            "grounding_reports": [],
-            "duplicate_groups": [],
-            "final_questions": [],
-            "current_step": "parsing",
-            "step_progress": 0.0,
-            "error": None,
-            "chunk_assignments": [],
-            "chunk_assignment_payloads": [],
-            "question_chunk_metadata": [],
-            "original_quota": {},
-            "edit_requests": None,
-            "is_partial_edit": False,
-            "edit_impact_level": None,
-            "refreshed_contexts": [],
-            "provider_logs": [],
-            "scope": serialized_scope,
-            "time_limit_minutes": request.time_limit_minutes,
-            "output_language": request.output_language,
-            "instructions": request.instructions,
-            "bloom_distribution": request.bloom_distribution,
-            "formatting_preferences": request.formatting_preferences,
-            "strict_scope": request.strict_scope,
-            "_db_session": self.db,
-            "_retry_attempted": False,
-            **self._build_agents(textbook_id),
-        }
-
         try:
-            graph = create_exam_generation_graph()
-            final_state = await graph.ainvoke(initial_state)
+            blueprint_agent = BlueprintAgent()
+            blueprint, _ = await blueprint_agent.create_blueprint(
+                prompt=exam_spec.source_prompt,
+                exam_type="mcq",
+                difficulty="custom",
+                chapters=list(resolved_scope.chapter_numbers),
+                question_distribution=spec_service.build_question_distribution(exam_spec.total_questions),
+                gradually_increasing=False,
+                constraints={
+                    "strict_scope": exam_spec.strict_scope_flag,
+                    "strict_grounding": True,
+                    "allow_applied_questions": False,
+                    "max_concurrency": 1,
+                    "bloom_levels": list(exam_spec.bloom_distribution) or ["remember", "understand", "apply", "analyze"],
+                },
+                textbook_metadata=textbook_metadata,
+                scope=[self._scope_to_dict(item) for item in exam_spec.selected_scope],
+                time_limit_minutes=exam_spec.time_limit_minutes,
+                output_language=exam_spec.output_language,
+                instructions=exam_spec.normalized_instructions,
+                bloom_distribution=exam_spec.bloom_distribution,
+                formatting_preferences=exam_spec.formatting_preferences,
+                strict_scope=exam_spec.strict_scope_flag,
+            )
 
-            validated_questions = final_state.get("validated_questions", [])
-            quality_scores = final_state.get("quality_scores", [])
-            grounding_reports = final_state.get("grounding_reports", [])
-            qs_by_slot = {
-                item["slot_number"]: item
-                for item in quality_scores
-                if isinstance(item, dict) and "slot_number" in item
-            }
-            gr_by_slot = {
-                item["slot_number"]: item
-                for item in grounding_reports
-                if isinstance(item, dict) and "slot_number" in item
-            }
+            _, retrieval_service, generation_service, verifier_service = self._build_pipeline(
+                document_id=textbook_id,
+                section_by_id=resolved_scope.section_by_id,
+            )
+            retrieved_contexts, chunk_metadata_index = await retrieval_service.retrieve_for_blueprint(
+                blueprint=blueprint,
+                document_id=textbook_id,
+                strict_scope=exam_spec.strict_scope_flag,
+            )
+            chunk_assignments = await assign_chunks_to_slots(blueprint, retrieved_contexts)
+            if not chunk_assignments:
+                raise ValueError("No scoped evidence available for the selected curriculum units")
+
+            generated_questions = await generation_service.generate(
+                chunk_assignments=chunk_assignments,
+                strict_scope=exam_spec.strict_scope_flag,
+            )
+            self._enrich_source_evidence(generated_questions, chunk_metadata_index, textbook_id)
+            verified_questions, _, _, _, _ = await verifier_service.verify(
+                questions=generated_questions,
+                blueprint=blueprint,
+                resolved_scope=resolved_scope,
+            )
+            final_questions = self._select_final_questions(verified_questions, blueprint)
+            final_questions, validation_summary, quality_scores, grounding_reports, duplicate_groups = await verifier_service.verify(
+                questions=final_questions,
+                blueprint=blueprint,
+                resolved_scope=resolved_scope,
+            )
 
             version = await self._create_exam_version(
                 exam=exam,
@@ -460,15 +675,16 @@ class ExamService:
                 status="generated",
                 change_summary="Initial generation",
             )
-
-            for question in validated_questions:
+            quality_by_slot = self._quality_map(quality_scores)
+            grounding_by_slot = self._grounding_map(grounding_reports)
+            for question in final_questions:
                 self.db.add(
                     self._question_to_db(
                         exam_id=exam.id,
                         exam_version_id=version.id,
                         question=question,
-                        quality_by_slot=qs_by_slot,
-                        grounding_by_slot=gr_by_slot,
+                        quality_by_slot=quality_by_slot,
+                        grounding_by_slot=grounding_by_slot,
                     )
                 )
 
@@ -476,30 +692,24 @@ class ExamService:
                 exam=exam,
                 user_id=user_id,
                 course_id=course_id,
-                exam_spec=final_state.get("exam_spec"),
-                blueprint=final_state.get("blueprint"),
+                document_id=textbook_id,
+                exam_spec=exam_spec,
+                blueprint=blueprint,
             )
 
             exam.current_version_id = version.id
             exam.status = ExamStatus.GENERATED
-            exam.total_questions = len(validated_questions)
-            exam.exam_spec_json = self._serialize_dataclass(final_state.get("exam_spec"))
-            exam.blueprint_json = self._serialize_dataclass(final_state.get("blueprint"))
-            exam.quality_score = final_state.get("validation_summary", {}).get("pass_rate", 0.0) * 100
+            exam.total_questions = len(final_questions)
+            exam.exam_spec_json = self._serialize_dataclass(exam_spec)
+            exam.blueprint_json = self._serialize_dataclass(blueprint)
+            exam.quality_score = validation_summary.get("pass_rate", 0.0) * 100
             exam.quality_scores_json = quality_scores or None
             exam.grounding_reports_json = grounding_reports or None
-            exam.duplicate_groups_json = final_state.get("duplicate_groups") or None
-            exam.provider_logs_json = final_state.get("provider_logs") or None
-            exam.edit_impact_level = final_state.get("edit_impact_level")
-
-            logger.info(
-                "Exam generated: %s, questions=%s, version=%s",
-                exam.id,
-                exam.total_questions,
-                version.version_number,
-            )
+            exam.duplicate_groups_json = duplicate_groups or None
+            exam.provider_logs_json = None
+            exam.edit_impact_level = None
         except Exception as exc:
-            exam.status = ExamStatus.GENERATING
+            exam.status = ExamStatus.FAILED
             logger.error("Exam generation failed: %s", exc)
             raise
 
@@ -520,102 +730,63 @@ class ExamService:
         if not current_questions:
             raise ValueError("Exam has no questions to edit")
 
-        existing = [self._db_question_to_generated(question) for question in current_questions]
-        id_to_slot = {str(question.id): int(question.question_number) for question in current_questions}
+        edit_requests = self._normalize_edit_requests(current_questions, request)
+        existing_generated = [self._db_question_to_generated(question) for question in current_questions]
+        original_by_slot = {question.slot_number: question for question in existing_generated}
 
-        edit_requests: list[dict] = []
-        for edit in request.edits:
-            normalized_ids: list[str] = []
-            for raw_id in edit.question_ids:
-                slot = self._normalize_question_id_to_slot(raw_id, id_to_slot)
-                if slot is not None:
-                    normalized_ids.append(str(slot))
+        edit_service = ReviewEditService()
+        question_map, regenerate_targets = edit_service.apply_edits(
+            existing_questions=existing_generated,
+            edit_requests=edit_requests,
+        )
 
-            range_start = edit.range_start
-            range_end = edit.range_end
-            if isinstance(range_start, int) and isinstance(range_end, int) and range_start > range_end:
-                range_start, range_end = range_end, range_start
+        document_repository = DocumentRepository(self.db)
+        scope_service = CurriculumScopeService(document_repository)
+        resolved_scope = await scope_service.resolve_scope(
+            document_id=exam.textbook_id,
+            requested_scope=list(exam.selected_scope_json or []),
+            requested_chapters=list(exam.chapters or []),
+        )
+        blueprint = self._restore_blueprint(exam, list(question_map.values()) or existing_generated)
+        _, retrieval_service, generation_service, verifier_service = self._build_pipeline(
+            document_id=exam.textbook_id,
+            section_by_id=resolved_scope.section_by_id,
+        )
 
-            has_target_ids = bool(normalized_ids)
-            has_target_range = isinstance(range_start, int) and isinstance(range_end, int)
-            if not has_target_ids and not has_target_range:
+        chunk_metadata_index: dict[str, dict] = {}
+        for slot_number, edit_prompt in sorted(regenerate_targets):
+            current_question = question_map.get(slot_number)
+            original_question = original_by_slot.get(slot_number)
+            if current_question is None or original_question is None:
+                continue
+            if current_question.is_locked:
                 continue
 
-            edit_requests.append(
-                {
-                    "question_ids": normalized_ids,
-                    "range_start": range_start,
-                    "range_end": range_end,
-                    "edit_prompt": edit.edit_prompt,
-                    "edit_type": edit.edit_type,
-                    "new_content": edit.new_content,
-                    "new_correct_answer": edit.new_correct_answer,
-                    "new_bloom_level": edit.new_bloom_level,
-                }
+            query = f"{original_question.content}\n{original_question.bloom_level}\nmcq"
+            context, metadata_index = await retrieval_service.retrieve_for_single_question(
+                query=query,
+                document_id=exam.textbook_id,
+                scope_tags=list(current_question.scope_tags or original_question.scope_tags or []),
+                strict_scope=True,
             )
+            chunk_metadata_index.update(metadata_index)
+            regenerated = await generation_service.regenerate_question(
+                original_question=original_question,
+                context=context,
+                edit_prompt=edit_prompt,
+            )
+            regenerated.is_locked = current_question.is_locked
+            regenerated.scope_tags = list(current_question.scope_tags or original_question.scope_tags or [])
+            regenerated.blueprint_cell_key = original_question.blueprint_cell_key
+            question_map[slot_number] = regenerated
 
-        if not edit_requests:
-            raise ValueError("No valid target questions to edit")
-
-        agents = self._build_agents(exam.textbook_id)
-        constraints = dict(exam.config.get("constraints", {}) or {})
-        initial_state: AgentState = {
-            "user_id": user_id,
-            "textbook_id": exam.textbook_id,
-            "chapters": list(exam.chapters or []),
-            "prompt": "",
-            "exam_type": exam.exam_type.value,
-            "difficulty": exam.difficulty.value,
-            "question_distribution": {},
-            "num_variants": 1,
-            "gradually_increasing": False,
-            "constraints": constraints,
-            "textbook_metadata": {},
-            "processing_status": "ready",
-            "exam_spec": None,
-            "blueprint": None,
-            "retrieved_contexts": [],
-            "generated_questions": [],
-            "validated_questions": existing,
-            "validation_summary": {},
-            "judged_questions": [],
-            "quality_scores": [],
-            "grounding_reports": [],
-            "duplicate_groups": [],
-            "final_questions": [],
-            "current_step": "editing",
-            "step_progress": 0.0,
-            "error": None,
-            "chunk_assignments": [],
-            "chunk_assignment_payloads": [],
-            "question_chunk_metadata": [],
-            "original_quota": {},
-            "edit_requests": edit_requests,
-            "is_partial_edit": True,
-            "edit_impact_level": None,
-            "refreshed_contexts": [],
-            "provider_logs": [],
-            "_db_session": self.db,
-            "_retry_attempted": False,
-            **agents,
-        }
-
-        graph = create_exam_generation_graph()
-        final_state = await graph.ainvoke(initial_state)
-
-        new_questions = final_state.get("validated_questions", [])
-        quality_scores = final_state.get("quality_scores", [])
-        grounding_reports = final_state.get("grounding_reports", [])
-        qs_by_slot = {
-            item["slot_number"]: item
-            for item in quality_scores
-            if isinstance(item, dict) and "slot_number" in item
-        }
-        gr_by_slot = {
-            item["slot_number"]: item
-            for item in grounding_reports
-            if isinstance(item, dict) and "slot_number" in item
-        }
+        final_questions = edit_service.renumber(question_map)
+        self._enrich_source_evidence(final_questions, chunk_metadata_index, exam.textbook_id)
+        final_questions, validation_summary, quality_scores, grounding_reports, duplicate_groups = await verifier_service.verify(
+            questions=final_questions,
+            blueprint=blueprint,
+            resolved_scope=resolved_scope,
+        )
 
         new_version = await self._create_exam_version(
             exam=exam,
@@ -623,17 +794,18 @@ class ExamService:
             version_number=(exam.current_version.version_number or 0) + 1,
             status="generated",
             parent_version_id=exam.current_version.id,
-            change_summary="Partial review/edit update",
+            change_summary="Review/edit update",
         )
-
-        for question in new_questions:
+        quality_by_slot = self._quality_map(quality_scores)
+        grounding_by_slot = self._grounding_map(grounding_reports)
+        for question in final_questions:
             self.db.add(
                 self._question_to_db(
                     exam_id=exam.id,
                     exam_version_id=new_version.id,
                     question=question,
-                    quality_by_slot=qs_by_slot,
-                    grounding_by_slot=gr_by_slot,
+                    quality_by_slot=quality_by_slot,
+                    grounding_by_slot=grounding_by_slot,
                 )
             )
 
@@ -642,29 +814,26 @@ class ExamService:
             user_id=user_id,
             edit_requests=edit_requests,
             old_questions=current_questions,
-            new_questions=new_questions,
+            new_questions=final_questions,
         )
 
-        edit_log = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "request": request.model_dump(),
-            "parent_version_id": exam.current_version.id,
-            "new_version_id": new_version.id,
-            "replaced_questions": [self._question_snapshot(question) for question in current_questions],
-        }
         history = list(exam.edit_history_json or [])
-        history.append(edit_log)
+        history.append(
+            {
+                "timestamp": datetime.utcnow().isoformat(),
+                "request": request.model_dump(),
+                "parent_version_id": exam.current_version.id,
+                "new_version_id": new_version.id,
+            }
+        )
         exam.edit_history_json = history
-
         exam.current_version_id = new_version.id
         exam.status = ExamStatus.GENERATED
-        exam.total_questions = len(new_questions)
-        exam.quality_score = final_state.get("validation_summary", {}).get("pass_rate", 0.0) * 100
+        exam.total_questions = len(final_questions)
+        exam.quality_score = validation_summary.get("pass_rate", 0.0) * 100
         exam.quality_scores_json = quality_scores or None
         exam.grounding_reports_json = grounding_reports or None
-        exam.duplicate_groups_json = final_state.get("duplicate_groups") or None
-        exam.provider_logs_json = final_state.get("provider_logs") or None
-        exam.edit_impact_level = final_state.get("edit_impact_level")
+        exam.duplicate_groups_json = duplicate_groups or None
 
         return await self.get_exam(exam.id, user_id)
 
@@ -674,6 +843,7 @@ class ExamService:
             .where(CourseMembership.user_id == user_id)
         )
         options = [
+            selectinload(Exam.exam_spec_record).selectinload(ExamSpecRecord.scopes),
             selectinload(Exam.exam_spec_record).selectinload(ExamSpecRecord.blueprint_cells),
             selectinload(Exam.current_version).selectinload(ExamVersion.questions),
             selectinload(Exam.current_version).selectinload(ExamVersion.edit_operations),

@@ -115,42 +115,29 @@ class DocumentProcessorAgent:
         """
         Partition the document into structured elements using `unstructured`.
 
-        Supports PDF, DOCX, PPTX via automatic format detection.
-        Uses "fast" strategy (pypdf) — no system dependencies needed.
-        Switch to "hi_res" for OCR + layout detection (requires Tesseract + Poppler).
+        MVP currently only supports PDF documents.
         """
         ext = Path(file_path).suffix.lower()
-
-        if ext == ".pdf":
-            from unstructured.partition.pdf import partition_pdf
-
-            kwargs = {
-                "filename": file_path,
-                "strategy": STRATEGY,
-                "include_page_breaks": True,
-            }
-
-            # hi_res extras: image/table extraction
-            if STRATEGY == "hi_res":
-                os.makedirs(IMAGE_OUTPUT_DIR, exist_ok=True)
-                kwargs.update({
-                    "infer_table_structure": True,
-                    "extract_image_block_types": ["Image", "Table"],
-                    "extract_image_block_output_dir": IMAGE_OUTPUT_DIR,
-                })
-
-            return partition_pdf(**kwargs)
-
-        elif ext == ".docx":
-            from unstructured.partition.docx import partition_docx
-            return partition_docx(filename=file_path)
-
-        elif ext in (".pptx", ".ppt"):
-            from unstructured.partition.pptx import partition_pptx
-            return partition_pptx(filename=file_path)
-
-        else:
+        if ext != ".pdf":
             raise ValueError(f"Unsupported file type: {ext}")
+
+        from unstructured.partition.pdf import partition_pdf
+
+        kwargs = {
+            "filename": file_path,
+            "strategy": STRATEGY,
+            "include_page_breaks": True,
+        }
+
+        if STRATEGY == "hi_res":
+            os.makedirs(IMAGE_OUTPUT_DIR, exist_ok=True)
+            kwargs.update({
+                "infer_table_structure": True,
+                "extract_image_block_types": ["Image", "Table"],
+                "extract_image_block_output_dir": IMAGE_OUTPUT_DIR,
+            })
+
+        return partition_pdf(**kwargs)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # Step 2: Cleaning (Noise Reduction)
@@ -393,7 +380,7 @@ class DocumentProcessorAgent:
         return len(pages) or 1
 
     def _derive_sections(self, formatted_chunks: list[dict], chapters: list[dict]) -> list[dict]:
-        """Derive curriculum sections from chapter-aware chunk metadata."""
+        """Derive curriculum sections from chunk metadata with chapter/lesson/topic hierarchy."""
         chapter_nodes: dict[int, dict] = {}
         sections: list[dict] = []
         order_counter = 1
@@ -416,8 +403,8 @@ class DocumentProcessorAgent:
             sections.append(section)
             order_counter += 1
 
-        topic_lookup: dict[tuple[int, str], dict] = {}
-        topic_summaries: dict[str, list[str]] = {}
+        heading_lookup: dict[tuple[int, str], dict] = {}
+        heading_summaries: dict[str, list[str]] = {}
 
         for chunk in formatted_chunks:
             metadata = chunk.get("metadata") or {}
@@ -452,40 +439,87 @@ class DocumentProcessorAgent:
             if not heading:
                 continue
 
-            topic_key = (chapter_number, heading.lower())
-            if topic_key not in topic_lookup:
-                topic_lookup[topic_key] = {
-                    "section_key": f"topic:{chapter_number}:{len(topic_lookup) + 1}",
-                    "parent_key": chapter_section["section_key"],
-                    "section_title": heading,
-                    "section_type": "topic",
-                    "section_order": order_counter,
-                    "page_from": page_number,
-                    "page_to": page_number,
-                    "scope_label": heading,
-                    "summary": None,
-                    "metadata": {
-                        "chapter_number": chapter_number,
-                        "parent_heading": heading,
-                    },
-                }
-                sections.append(topic_lookup[topic_key])
-                order_counter += 1
+            parent_key = chapter_section["section_key"]
+            heading_chain = self._infer_heading_chain(
+                heading=heading,
+                chapter_number=chapter_number,
+                page_number=page_number,
+                order_counter=order_counter,
+            )
 
-            topic = topic_lookup[topic_key]
-            if page_number is not None:
-                if topic["page_from"] is None or page_number < topic["page_from"]:
-                    topic["page_from"] = page_number
-                if topic["page_to"] is None or page_number > topic["page_to"]:
-                    topic["page_to"] = page_number
-            topic_summaries.setdefault(topic["section_key"], []).append(chunk.get("chunk_text", ""))
+            for index, node in enumerate(heading_chain):
+                node_key = (chapter_number, str(node["section_title"]).lower())
+                if node_key not in heading_lookup:
+                    heading_lookup[node_key] = {
+                        **node,
+                        "section_key": f"{node['section_type']}:{chapter_number}:{len(heading_lookup) + 1}",
+                        "parent_key": parent_key,
+                    }
+                    sections.append(heading_lookup[node_key])
+                    order_counter += 1
+
+                current = heading_lookup[node_key]
+                if page_number is not None:
+                    if current["page_from"] is None or page_number < current["page_from"]:
+                        current["page_from"] = page_number
+                    if current["page_to"] is None or page_number > current["page_to"]:
+                        current["page_to"] = page_number
+
+                parent_key = current["section_key"]
+                if index == len(heading_chain) - 1:
+                    heading_summaries.setdefault(current["section_key"], []).append(chunk.get("chunk_text", ""))
 
         for section in sections:
-            summary_chunks = topic_summaries.get(section["section_key"], [])
+            summary_chunks = heading_summaries.get(section["section_key"], [])
             if summary_chunks:
                 section["summary"] = " ".join(summary_chunks)[:300]
 
         return sections
+
+    def _infer_heading_chain(
+        self,
+        heading: str,
+        chapter_number: int,
+        page_number: int | None,
+        order_counter: int,
+    ) -> list[dict]:
+        normalized = re.sub(r"\s+", " ", heading.strip())
+        if not normalized:
+            return []
+
+        section_type = self._classify_heading(normalized)
+        metadata = {
+            "chapter_number": chapter_number,
+            "parent_heading": normalized,
+        }
+        return [
+            {
+                "section_title": normalized,
+                "section_type": section_type,
+                "section_order": order_counter,
+                "page_from": page_number,
+                "page_to": page_number,
+                "scope_label": normalized,
+                "summary": None,
+                "metadata": metadata,
+            }
+        ]
+
+    def _classify_heading(self, heading: str) -> str:
+        lowered = heading.lower()
+        if re.search(r"^(bài|lesson)\s+\d+", lowered):
+            return "lesson"
+        if re.search(r"^(mục|topic)\s+\d+", lowered):
+            return "topic"
+        if re.search(r"^(tiểu mục|subtopic)\s+\d+", lowered):
+            return "subtopic"
+        if re.search(r"^\d+\.\d+\.\d+", lowered):
+            return "subtopic"
+        if re.search(r"^\d+\.\d+", lowered):
+            return "topic"
+        if len(lowered.split()) <= 2:
+            return "unknown"
+        return "topic"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

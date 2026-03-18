@@ -3,6 +3,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from core.mvp import normalize_physics_subject
+
 
 class CourseCreateRequest(BaseModel):
     course_name: str
@@ -17,6 +19,11 @@ class CourseCreateRequest(BaseModel):
         if not cleaned:
             raise ValueError("field cannot be empty")
         return cleaned
+
+    @field_validator("subject")
+    @classmethod
+    def validate_subject(cls, value: str) -> str:
+        return normalize_physics_subject(value)
 
 
 class CourseMembershipResponse(BaseModel):
