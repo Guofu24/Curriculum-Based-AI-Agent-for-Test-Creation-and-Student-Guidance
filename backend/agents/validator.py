@@ -198,10 +198,6 @@ class ValidatorAgent:
                         f"correct_answer '{question.correct_answer}' "
                         f"not in option labels {labels}"
                     )
-        elif question.question_type == "essay":
-            if not question.rubric and (not question.explanation or len(question.explanation.strip()) < 10):
-                issues.append("Essay question should include rubric guidance or grading notes")
-
         return issues
 
     # ── Grounding interpretation ────────────────────────────────────

@@ -19,6 +19,7 @@ from schemas.exam import (
     ExamPartialRegenerateRequest,
     ExamResponse,
     ExamVersionResponse,
+    FeedbackEventResponse,
     GenerationStep,
     QuestionResponse,
     MCQOption,
@@ -77,9 +78,21 @@ def _get_active_version(exam):
     return max(versions, key=lambda version: version.version_number)
 
 
+def _format_feedback_event(event) -> dict:
+    return FeedbackEventResponse(
+        id=event.id,
+        signal_type=_enum_value(event.signal_type),
+        severity=event.severity,
+        question_id=event.question_id,
+        payload=event.payload_json,
+        created_at=event.created_at,
+    ).model_dump()
+
+
 def _format_version(version) -> dict:
     questions = sorted(version.questions or [], key=lambda question: question.question_number)
     operations = sorted(version.edit_operations or [], key=lambda operation: operation.created_at)
+    feedback_events = sorted(version.feedback_events or [], key=lambda event: event.created_at)
     return ExamVersionResponse(
         id=version.id,
         version_number=version.version_number,
@@ -99,6 +112,7 @@ def _format_version(version) -> dict:
             )
             for operation in operations
         ],
+        feedback_events=[_format_feedback_event(event) for event in feedback_events],
     ).model_dump()
 
 
@@ -112,7 +126,7 @@ def _format_exam(full_exam) -> ExamResponse:
     return ExamResponse(
         id=full_exam.id,
         title=full_exam.title,
-        textbook_id=full_exam.textbook_id,
+        document_id=full_exam.textbook_id,
         course_id=full_exam.course_id,
         exam_type=_enum_value(full_exam.exam_type),
         difficulty=_enum_value(full_exam.difficulty),
@@ -137,6 +151,10 @@ def _format_exam(full_exam) -> ExamResponse:
         provider_logs=full_exam.provider_logs_json,
         edit_impact_level=full_exam.edit_impact_level,
         edit_history=full_exam.edit_history_json,
+        feedback_events=[
+            _format_feedback_event(event)
+            for event in sorted(list(full_exam.feedback_events or []), key=lambda item: item.created_at)
+        ],
         current_version=_format_version(active_version) if active_version else None,
         versions=[_format_version(version) for version in versions],
     )

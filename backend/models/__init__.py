@@ -1,5 +1,11 @@
 from models.course import Course, CourseMembership, CourseRole
 from models.curriculum import LearningObjective, Section
+from models.document import (
+    DocumentChunkRecord,
+    DocumentChapterRecord,
+    DocumentProcessingStatus,
+    DocumentRecord,
+)
 from models.exam import (
     BloomLevel,
     BlueprintCellRecord,
@@ -12,6 +18,8 @@ from models.exam import (
     ExamStatus,
     ExamType,
     ExamVersion,
+    FeedbackEvent,
+    FeedbackSignalType,
     QuestionType,
 )
 from models.textbook import ProcessingStatus, Textbook, TextbookChapter, TextbookChunk
@@ -24,6 +32,10 @@ __all__ = [
     "Course",
     "CourseMembership",
     "CourseRole",
+    "DocumentChunkRecord",
+    "DocumentChapterRecord",
+    "DocumentProcessingStatus",
+    "DocumentRecord",
     "DifficultyLevel",
     "EditOperation",
     "Exam",
@@ -33,6 +45,8 @@ __all__ = [
     "ExamStatus",
     "ExamType",
     "ExamVersion",
+    "FeedbackEvent",
+    "FeedbackSignalType",
     "LearningObjective",
     "ProcessingStatus",
     "QuestionType",

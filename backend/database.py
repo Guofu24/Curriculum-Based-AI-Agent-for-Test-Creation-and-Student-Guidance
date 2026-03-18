@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 # Older local databases were sometimes created with create_all() and then skipped
 # later migrations, leaving existing tables without newer columns. These ALTERs
 # are idempotent and keep dev databases compatible with the current models.
+#
+# Note: the active runtime is document-first, but compatibility statements still
+# target historical `textbooks` / `textbook_chunks` tables until a dedicated
+# persistence rename is scheduled.
 SCHEMA_COMPATIBILITY_STATEMENTS = (
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) NOT NULL DEFAULT 'lecturer'",
     "ALTER TABLE textbooks ADD COLUMN IF NOT EXISTS course_id VARCHAR NULL",
@@ -22,6 +26,7 @@ SCHEMA_COMPATIBILITY_STATEMENTS = (
     "ALTER TABLE textbooks ADD COLUMN IF NOT EXISTS total_pages_or_slides INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE textbooks ADD COLUMN IF NOT EXISTS parse_error_message TEXT NULL",
     "ALTER TABLE textbooks ADD COLUMN IF NOT EXISTS curriculum_tree_json JSON NULL",
+    "ALTER TABLE textbook_chunks ADD COLUMN IF NOT EXISTS section_id VARCHAR NULL",
     "ALTER TABLE exams ADD COLUMN IF NOT EXISTS course_id VARCHAR NULL",
     "ALTER TABLE exams ADD COLUMN IF NOT EXISTS current_version_id VARCHAR NULL",
     "ALTER TABLE exams ADD COLUMN IF NOT EXISTS instructions TEXT NULL",

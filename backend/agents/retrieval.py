@@ -3,7 +3,7 @@ Retrieval Agent
 
 Responsibilities:
 - Hybrid search (vector similarity + BM25 keyword match)
-- Strict chapter/textbook filtering
+- Strict chapter/document filtering
 - Re-rank results for relevance
 - Return contextual chunks for each question slot
 """
@@ -23,7 +23,7 @@ from models.textbook import TextbookChunk
 
 class RetrievalAgent:
     """
-    Retrieves relevant textbook content for question generation.
+    Retrieves relevant document content for question generation.
     Uses hybrid search: Pinecone vector similarity + PostgreSQL BM25 keyword scoring.
     """
 
@@ -40,7 +40,7 @@ class RetrievalAgent:
     async def retrieve_for_blueprint(
         self,
         blueprint: ExamBlueprint,
-        textbook_id: str,
+        document_id: str,
         chapters: list[int],
         constraints: dict,
     ) -> list[RetrievedContext]:
@@ -52,7 +52,7 @@ class RetrievalAgent:
             async with semaphore:
                 return await self._retrieve_for_slot(
                     slot=slot,
-                    textbook_id=textbook_id,
+                    document_id=document_id,
                     chapters=chapters,
                     constraints=constraints,
                 )
@@ -62,7 +62,7 @@ class RetrievalAgent:
     async def _retrieve_for_slot(
         self,
         slot: QuestionSlot,
-        textbook_id: str,
+        document_id: str,
         chapters: list[int],
         constraints: dict,
     ) -> RetrievedContext:
@@ -80,7 +80,7 @@ class RetrievalAgent:
 
         bm25_results = await self._bm25_search(
             query=query,
-            textbook_id=textbook_id,
+            document_id=document_id,
             chapters=chapter_scope,
         )
 
@@ -150,7 +150,7 @@ class RetrievalAgent:
     async def _bm25_search(
         self,
         query: str,
-        textbook_id: str,
+        document_id: str,
         chapters: list[int],
     ) -> list[dict]:
         """BM25 keyword search over chunk text stored in PostgreSQL."""
@@ -158,12 +158,12 @@ class RetrievalAgent:
             return []
 
         scope_key = tuple(sorted(set(int(ch) for ch in chapters if isinstance(ch, int) and ch > 0)))
-        cache_key = (textbook_id, scope_key)
+        cache_key = (document_id, scope_key)
         payload = self._bm25_cache.get(cache_key)
 
         if payload is None:
             payload = await self._build_bm25_payload(
-                textbook_id=textbook_id,
+                document_id=document_id,
                 chapters=list(scope_key),
             )
             self._bm25_cache[cache_key] = payload
@@ -193,12 +193,12 @@ class RetrievalAgent:
 
     async def _build_bm25_payload(
         self,
-        textbook_id: str,
+        document_id: str,
         chapters: list[int],
     ) -> dict:
-        """Build and cache BM25 corpus by textbook + chapter scope."""
+        """Build and cache BM25 corpus by document + chapter scope."""
         result = await self.db_session.execute(
-            select(TextbookChunk).where(TextbookChunk.textbook_id == textbook_id)
+            select(TextbookChunk).where(TextbookChunk.textbook_id == document_id)
         )
         db_rows = list(result.scalars().all())
         if not db_rows:
@@ -286,7 +286,7 @@ class RetrievalAgent:
     async def retrieve_for_single_question(
         self,
         query: str,
-        textbook_id: str,
+        document_id: str,
         chapter: int = 0,
         chapters: list[int] | None = None,
         scope_tags: list[str] | None = None,
@@ -330,7 +330,7 @@ class RetrievalAgent:
         if len(chunks) < top_k:
             bm25_results = await self._bm25_search(
                 query=query,
-                textbook_id=textbook_id,
+                document_id=document_id,
                 chapters=chapter_scope,
             )
             existing_ids = {chunk["id"] for chunk in chunks}

@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -14,47 +15,46 @@ class DifficultyDistribution(BaseModel):
 
 class QuestionDistribution(BaseModel):
     mcq: DifficultyDistribution = Field(default_factory=DifficultyDistribution)
-    essay: DifficultyDistribution = Field(default_factory=DifficultyDistribution)
 
 
 class ScopeUnitPayload(BaseModel):
-    scope_id: Optional[str] = None
-    section_id: Optional[str] = None
+    scope_id: str | None = None
+    section_id: str | None = None
     scope_type: str = "chapter"
-    title: Optional[str] = None
+    title: str | None = None
     chapter_number: int = 0
-    page_from: Optional[int] = None
-    page_to: Optional[int] = None
+    page_from: int | None = None
+    page_to: int | None = None
     tags: list[str] = Field(default_factory=list)
 
 
 class AdvancedConstraints(BaseModel):
     strict_grounding: bool = True
     allow_applied_questions: bool = False
-    strict_scope: bool = True
-    grade_level_scope: Optional[str] = None
+    grade_level_scope: str | None = None
     creativity_level: float = Field(default=0.0, ge=0.0, le=1.0)
     bloom_levels: list[str] = Field(
-        default_factory=lambda: [
-            "remember",
-            "understand",
-            "apply",
-            "analyze",
-        ]
+        default_factory=lambda: ["remember", "understand", "apply", "analyze"]
     )
     max_concurrency: int = Field(default=1, ge=1, le=1)
 
+    @model_validator(mode="after")
+    def harden_mvp(self):
+        self.strict_grounding = True
+        self.allow_applied_questions = False
+        self.creativity_level = 0.0
+        self.max_concurrency = 1
+        return self
+
 
 class ExamGenerationRequest(BaseModel):
-    textbook_id: Optional[str] = None
-    document_id: Optional[str] = None
-    document_ids: list[str] = Field(default_factory=list)
-    course_id: Optional[str] = None
+    document_id: str | None = None
+    course_id: str | None = None
     chapters: list[int] = Field(default_factory=list)
     scope: list[ScopeUnitPayload] = Field(default_factory=list)
     prompt: str = ""
     instructions: str = ""
-    total_questions: Optional[int] = Field(default=None, ge=1, le=100)
+    total_questions: int | None = Field(default=None, ge=1, le=100)
     question_type: str = DEFAULT_QUESTION_TYPE
     exam_type: str = "mcq"
     difficulty: str = "custom"
@@ -62,18 +62,17 @@ class ExamGenerationRequest(BaseModel):
     num_variants: int = Field(default=1, ge=1, le=1)
     gradually_increasing: bool = False
     constraints: AdvancedConstraints = Field(default_factory=AdvancedConstraints)
-    time_limit_minutes: Optional[int] = None
+    time_limit_minutes: int | None = None
     output_language: str = DEFAULT_OUTPUT_LANGUAGE
     bloom_distribution: dict[str, int] = Field(default_factory=dict)
     formatting_preferences: dict = Field(default_factory=dict)
-    strict_scope: bool = True
 
     @field_validator("exam_type")
     @classmethod
     def validate_exam_type(cls, value: str) -> str:
         normalized = (value or "mcq").strip().lower()
         if normalized != "mcq":
-            raise ValueError("MVP hiện tại chỉ hỗ trợ exam_type='mcq'")
+            raise ValueError("MVP hien tai chi ho tro exam_type='mcq'")
         return normalized
 
     @field_validator("question_type")
@@ -81,7 +80,7 @@ class ExamGenerationRequest(BaseModel):
     def validate_question_type(cls, value: str) -> str:
         normalized = (value or DEFAULT_QUESTION_TYPE).strip().lower()
         if normalized not in {"mcq", DEFAULT_QUESTION_TYPE}:
-            raise ValueError("MVP hiện tại chỉ hỗ trợ trắc nghiệm 1 đáp án đúng")
+            raise ValueError("MVP hien tai chi ho tro trac nghiem 1 dap an dung")
         return DEFAULT_QUESTION_TYPE
 
     @field_validator("output_language")
@@ -94,25 +93,16 @@ class ExamGenerationRequest(BaseModel):
     def validate_difficulty(cls, value: str) -> str:
         normalized = (value or "custom").strip().lower()
         if normalized not in {"basic", "advanced", "application", "high_application", "custom"}:
-            raise ValueError("difficulty không hợp lệ")
+            raise ValueError("difficulty khong hop le")
         return normalized
 
     @model_validator(mode="after")
     def normalize_scope(self):
-        if not self.textbook_id:
-            if self.document_id:
-                self.textbook_id = self.document_id
-            elif len(self.document_ids) == 1:
-                self.textbook_id = self.document_ids[0]
-
-        if not self.textbook_id and not self.course_id:
-            raise ValueError("Provide textbook_id/document_id or course_id")
+        if not self.document_id and not self.course_id:
+            raise ValueError("Provide document_id or course_id")
 
         if self.num_variants != 1:
-            raise ValueError("MVP hiện tại chỉ hỗ trợ 1 exam version cho mỗi lần generate")
-
-        if self.question_distribution.essay.easy or self.question_distribution.essay.medium or self.question_distribution.essay.hard:
-            raise ValueError("MVP hiện tại chưa hỗ trợ essay")
+            raise ValueError("MVP hien tai chi ho tro 1 exam version cho moi lan generate")
 
         if not self.scope and self.chapters:
             self.scope = [
@@ -134,16 +124,46 @@ class ExamGenerationRequest(BaseModel):
                 + int(self.question_distribution.mcq.hard)
             )
             if total_mcq <= 0:
-                raise ValueError("total_questions phải lớn hơn 0")
+                raise ValueError("total_questions phai lon hon 0")
             self.total_questions = total_mcq
 
-        self.strict_scope = bool(self.strict_scope)
-        self.constraints.strict_scope = bool(self.strict_scope)
-        self.constraints.strict_grounding = True
-        self.constraints.allow_applied_questions = False
-        self.constraints.creativity_level = 0.0
         self.gradually_increasing = False
         return self
+
+    def to_mvp_runtime_payload(self) -> dict:
+        mcq_distribution = {
+            "easy": int(self.question_distribution.mcq.easy),
+            "medium": int(self.question_distribution.mcq.medium),
+            "hard": int(self.question_distribution.mcq.hard),
+        }
+        return {
+            "document_id": self.document_id,
+            "course_id": self.course_id,
+            "chapters": list(self.chapters or []),
+            "scope": [item.model_dump() for item in self.scope],
+            "prompt": self.prompt,
+            "instructions": self.instructions,
+            "total_questions": self.total_questions,
+            "question_type": DEFAULT_QUESTION_TYPE,
+            "exam_type": "mcq",
+            "difficulty": self.difficulty,
+            "question_distribution": {"mcq": mcq_distribution},
+            "num_variants": 1,
+            "gradually_increasing": False,
+            "constraints": {
+                "strict_grounding": True,
+                "allow_applied_questions": False,
+                "grade_level_scope": self.constraints.grade_level_scope,
+                "creativity_level": 0.0,
+                "bloom_levels": list(self.constraints.bloom_levels or []),
+                "max_concurrency": 1,
+            },
+            "time_limit_minutes": self.time_limit_minutes,
+            "output_language": DEFAULT_OUTPUT_LANGUAGE,
+            "bloom_distribution": dict(self.bloom_distribution or {}),
+            "formatting_preferences": dict(self.formatting_preferences or {}),
+            "strict_scope": True,
+        }
 
 
 class MCQOption(BaseModel):
@@ -152,46 +172,46 @@ class MCQOption(BaseModel):
 
 
 class SourceEvidenceResponse(BaseModel):
-    document_id: Optional[str] = None
-    section_id: Optional[str] = None
+    document_id: str | None = None
+    section_id: str | None = None
     chunk_id: str
-    chapter_number: Optional[int] = None
-    page: Optional[int] = None
-    parent_heading: Optional[str] = None
-    role: Optional[str] = None
-    score: Optional[float] = None
-    text_preview: Optional[str] = None
+    chapter_number: int | None = None
+    page: int | None = None
+    parent_heading: str | None = None
+    role: str | None = None
+    score: float | None = None
+    text_preview: str | None = None
 
 
 class QuestionResponse(BaseModel):
     id: str
     question_number: int
-    blueprint_cell_key: Optional[str] = None
+    blueprint_cell_key: str | None = None
     question_type: str
     bloom_level: str
     difficulty_score: float
     content: str
-    options: Optional[list[MCQOption]] = None
+    options: list[MCQOption] | None = None
     correct_answer: str
-    rubric: Optional[dict] = None
-    explanation: Optional[str] = None
-    source_citations: Optional[list[str]] = None
-    source_evidence: Optional[list[SourceEvidenceResponse]] = None
+    rubric: dict | None = None
+    explanation: str | None = None
+    source_citations: list[str] | None = None
+    source_evidence: list[SourceEvidenceResponse] | None = None
     scope_tags: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    verification_status: Optional[str] = None
+    verification_status: str | None = None
     is_human_edited: bool = False
     is_locked: bool = False
     is_validated: bool = False
-    quality_score_detail: Optional[dict] = None
-    grounding_report_detail: Optional[dict] = None
+    quality_score_detail: dict | None = None
+    grounding_report_detail: dict | None = None
 
     model_config = {"from_attributes": True}
 
 
 class BlueprintCellResponse(BaseModel):
     cell_id: str
-    section_id: Optional[str] = None
+    section_id: str | None = None
     scope_unit: dict
     question_type: str
     bloom_level: str
@@ -202,12 +222,12 @@ class BlueprintCellResponse(BaseModel):
 
 
 class ExamSpecResponse(BaseModel):
-    course_id: Optional[str] = None
-    document_id: Optional[str] = None
+    course_id: str | None = None
+    document_id: str | None = None
     exam_type: str
     question_type: str = DEFAULT_QUESTION_TYPE
     total_questions: int
-    time_limit_minutes: Optional[int] = None
+    time_limit_minutes: int | None = None
     output_language: str = DEFAULT_OUTPUT_LANGUAGE
     instructions: str = ""
     normalized_instructions: str = ""
@@ -231,33 +251,34 @@ class ExamBlueprintResponse(BaseModel):
 class ExamResponse(BaseModel):
     id: str
     title: str
-    textbook_id: str
-    course_id: Optional[str] = None
+    document_id: str
+    course_id: str | None = None
     exam_type: str
     difficulty: str
     status: str
     chapters: list[int] = Field(default_factory=list)
     variant_number: int
     total_questions: int
-    instructions: Optional[str] = None
+    instructions: str | None = None
     output_language: str = DEFAULT_OUTPUT_LANGUAGE
     strict_scope_flag: bool = True
-    quality_score: Optional[float] = None
+    quality_score: float | None = None
     created_at: datetime
-    updated_at: Optional[datetime] = None
-    published_at: Optional[datetime] = None
+    updated_at: datetime | None = None
+    published_at: datetime | None = None
     questions: list[QuestionResponse] = Field(default_factory=list)
-    exam_spec: Optional[dict] = None
-    blueprint: Optional[dict] = None
-    selected_scope: Optional[list[dict]] = None
-    quality_scores: Optional[list[dict]] = None
-    grounding_reports: Optional[list[dict]] = None
-    duplicate_groups: Optional[list[dict]] = None
-    provider_logs: Optional[list[dict]] = None
-    edit_impact_level: Optional[str] = None
-    edit_history: Optional[list[dict]] = None
-    current_version: Optional["ExamVersionResponse"] = None
-    versions: Optional[list["ExamVersionResponse"]] = None
+    exam_spec: dict | None = None
+    blueprint: dict | None = None
+    selected_scope: list[dict] | None = None
+    quality_scores: list[dict] | None = None
+    grounding_reports: list[dict] | None = None
+    duplicate_groups: list[dict] | None = None
+    provider_logs: list[dict] | None = None
+    edit_impact_level: str | None = None
+    edit_history: list[dict] | None = None
+    feedback_events: list[FeedbackEventResponse] | None = None
+    current_version: ExamVersionResponse | None = None
+    versions: list[ExamVersionResponse] | None = None
 
     model_config = {"from_attributes": True}
 
@@ -265,31 +286,31 @@ class ExamResponse(BaseModel):
 class ExamListResponse(BaseModel):
     id: str
     title: str
-    textbook_id: str
-    course_id: Optional[str] = None
+    document_id: str
+    course_id: str | None = None
     exam_type: str
     difficulty: str
     status: str
     chapters: list[int] = Field(default_factory=list)
     total_questions: int
     strict_scope_flag: bool = True
-    quality_score: Optional[float] = None
+    quality_score: float | None = None
     created_at: datetime
-    updated_at: Optional[datetime] = None
+    updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
 
 class QuestionEditRequest(BaseModel):
     question_ids: list[str] = Field(default_factory=list)
-    edit_prompt: Optional[str] = None
-    range_start: Optional[int] = None
-    range_end: Optional[int] = None
+    edit_prompt: str | None = None
+    range_start: int | None = None
+    range_end: int | None = None
     edit_type: str = "regenerate"
-    new_content: Optional[str] = None
-    new_options: Optional[list[MCQOption]] = None
-    new_correct_answer: Optional[str] = None
-    new_bloom_level: Optional[str] = None
+    new_content: str | None = None
+    new_options: list[MCQOption] | None = None
+    new_correct_answer: str | None = None
+    new_bloom_level: str | None = None
 
     @field_validator("edit_type")
     @classmethod
@@ -321,9 +342,13 @@ class QuestionEditRequest(BaseModel):
         if self.edit_type == "edit_options":
             if not self.new_options or len(self.new_options) != 4:
                 raise ValueError("new_options must contain exactly 4 options")
-        if self.edit_type == "edit_answer" and not (self.new_correct_answer and self.new_correct_answer.strip()):
+        if self.edit_type == "edit_answer" and not (
+            self.new_correct_answer and self.new_correct_answer.strip()
+        ):
             raise ValueError("new_correct_answer is required when edit_type is 'edit_answer'")
-        if self.edit_type == "edit_bloom" and not (self.new_bloom_level and self.new_bloom_level.strip()):
+        if self.edit_type == "edit_bloom" and not (
+            self.new_bloom_level and self.new_bloom_level.strip()
+        ):
             raise ValueError("new_bloom_level is required when edit_type is 'edit_bloom'")
         return self
 
@@ -336,8 +361,19 @@ class ExamPartialRegenerateRequest(BaseModel):
 class EditOperationResponse(BaseModel):
     id: str
     edit_type: str
-    target_question_id: Optional[str] = None
-    prompt_used: Optional[str] = None
+    target_question_id: str | None = None
+    prompt_used: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class FeedbackEventResponse(BaseModel):
+    id: str
+    signal_type: str
+    severity: str
+    question_id: str | None = None
+    payload: dict | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -348,11 +384,12 @@ class ExamVersionResponse(BaseModel):
     version_number: int
     status: str
     created_by: str
-    parent_version_id: Optional[str] = None
-    change_summary: Optional[str] = None
+    parent_version_id: str | None = None
+    change_summary: str | None = None
     created_at: datetime
     questions: list[QuestionResponse] = Field(default_factory=list)
     edit_operations: list[EditOperationResponse] = Field(default_factory=list)
+    feedback_events: list[FeedbackEventResponse] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -364,5 +401,5 @@ class GenerationStep(BaseModel):
     step: int
     name: str
     status: str
-    message: Optional[str] = None
-    progress: Optional[float] = None
+    message: str | None = None
+    progress: float | None = None

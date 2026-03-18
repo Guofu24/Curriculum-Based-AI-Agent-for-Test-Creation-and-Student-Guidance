@@ -102,7 +102,7 @@ class MCQVerifierService:
             return False
         expected_section_id = cell.scope_unit.section_id
         if not expected_section_id:
-            return True
+            return False
 
         evidence_items = list(question.source_evidence or [])
         if not evidence_items:

@@ -67,14 +67,14 @@ export function DashboardHeader({ title }: { title: string }) {
             </div>
             <DropdownMenuItem onClick={() => router.push("/dashboard/history")}>
               <div className="flex flex-col gap-0.5">
-                <span className="text-sm">Exam generated successfully</span>
-                <span className="text-xs text-muted-foreground">Data Structures - 2 hours ago</span>
+                <span className="text-sm">Exam version ready for review</span>
+                <span className="text-xs text-muted-foreground">Verifier results and evidence are available in review.</span>
               </div>
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => router.push("/dashboard/textbooks")}>
+            <DropdownMenuItem onClick={() => router.push("/dashboard/documents")}>
               <div className="flex flex-col gap-0.5">
-                <span className="text-sm">Textbook processed</span>
-                <span className="text-xs text-muted-foreground">Document structured and indexed - 5 hours ago</span>
+                <span className="text-sm">Document processed</span>
+                <span className="text-xs text-muted-foreground">PDF parsing, sectioning, and indexing completed.</span>
               </div>
             </DropdownMenuItem>
           </DropdownMenuContent>

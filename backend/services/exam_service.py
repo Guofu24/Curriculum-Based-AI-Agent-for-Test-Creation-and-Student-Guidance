@@ -37,12 +37,13 @@ from models.exam import (
 from repositories.document_repository import DocumentRepository
 from schemas.exam import ExamGenerationRequest, ExamPartialRegenerateRequest
 from services.curriculum.scope_service import CurriculumScopeService
+from services.document_service import DocumentService
 from services.editing.review_edit_service import ReviewEditService
 from services.exam_planning.spec_service import ExamSpecService
+from services.feedback.feedback_event_service import FeedbackEventService
 from services.generation.mcq_generation_service import MCQGenerationService
 from services.rag_service import RAGService
 from services.retrieval.scoped_retrieval_service import ScopedRetrievalService
-from services.textbook_service import TextbookService
 from services.verification.mcq_verifier_service import MCQVerifierService
 from agents.validator import ValidatorAgent
 
@@ -188,32 +189,54 @@ class ExamService:
         except (TypeError, ValueError):
             return None
 
-    async def _resolve_textbook(
+    def _enum_value(self, value) -> str:
+        return value.value if hasattr(value, "value") else value
+
+    def _ensure_mvp_exam_runtime(self, exam: Exam) -> None:
+        exam_type = str(self._enum_value(exam.exam_type) or "").strip().lower()
+        if exam_type != "mcq":
+            raise ValueError("Legacy non-MCQ exams are outside the active MVP runtime")
+        if not bool(exam.strict_scope_flag):
+            raise ValueError("Legacy exams without strict_scope=true are outside the active MVP runtime")
+        if str(exam.output_language or "").strip().lower() not in {"", "vi"}:
+            raise ValueError("Legacy exams with non-Vietnamese output are outside the active MVP runtime")
+        selected_scope = [
+            item for item in (exam.selected_scope_json or [])
+            if isinstance(item, dict)
+        ]
+        if not selected_scope or any(not str(item.get("section_id") or "").strip() for item in selected_scope):
+            raise ValueError("Legacy exams without persisted section_id scope are outside the active MVP runtime")
+        for question in (exam.current_version.questions if exam.current_version else []) or []:
+            question_type = str(self._enum_value(question.question_type) or "").strip().lower()
+            if question_type != "mcq":
+                raise ValueError("Legacy non-MCQ question versions cannot be edited in the MVP runtime")
+
+    async def _resolve_document(
         self,
         user_id: str,
         request: ExamGenerationRequest,
     ) -> tuple[str, str | None, dict]:
-        textbook_svc = TextbookService(self.db)
+        document_service = DocumentService(self.db)
 
-        if request.textbook_id:
-            metadata = await textbook_svc.get_textbook_metadata(request.textbook_id, user_id)
+        if request.document_id:
+            metadata = await document_service.get_document_metadata(request.document_id, user_id)
             if not metadata:
                 raise ValueError("Document not found or not processed")
             course_id = request.course_id or metadata.get("course_id")
-            return request.textbook_id, course_id, metadata
+            return request.document_id, course_id, metadata
 
         if request.course_id:
-            documents = await textbook_svc.get_textbooks(user_id=user_id, course_id=request.course_id)
+            documents = await document_service.list_documents(user_id=user_id, course_id=request.course_id)
             processed = [
                 document for document in documents
                 if document.status.value in {"indexed", "processed"}
             ]
             if len(processed) == 1:
-                metadata = await textbook_svc.get_textbook_metadata(processed[0].id, user_id)
+                metadata = await document_service.get_document_metadata(processed[0].id, user_id)
                 return processed[0].id, request.course_id, metadata
             if not processed:
                 raise ValueError("No processed documents found for course")
-            raise ValueError("Course has multiple documents; provide document_id/textbook_id")
+            raise ValueError("Course has multiple documents; provide document_id")
 
         raise ValueError("Document not found or not processed")
 
@@ -442,6 +465,13 @@ class ExamService:
             if isinstance(item, dict) and item.get("slot_number") is not None
         }
 
+    def _question_id_by_slot(self, questions: list[ExamQuestion]) -> dict[int, str]:
+        return {
+            int(question.question_number): question.id
+            for question in questions
+            if question.question_number is not None and question.id
+        }
+
     def _normalize_edit_requests(
         self,
         current_questions: list[ExamQuestion],
@@ -503,7 +533,7 @@ class ExamService:
                         cell_id=raw_cell.get("cell_id") or raw_cell.get("cell_key") or "",
                         scope_unit=ScopeUnit(
                             scope_id=raw_scope.get("scope_id") or raw_scope.get("section_id") or "",
-                            section_id=raw_scope.get("section_id"),
+                            section_id=raw_scope.get("section_id") or self._infer_section_id(raw_scope.get("tags") or []),
                             scope_type=raw_scope.get("scope_type", "topic"),
                             title=raw_scope.get("title") or "Untitled Section",
                             chapter_number=int(raw_scope.get("chapter_number") or 0),
@@ -576,19 +606,21 @@ class ExamService:
         user_id: str,
         request: ExamGenerationRequest,
     ) -> Exam:
-        textbook_id, course_id, textbook_metadata = await self._resolve_textbook(user_id, request)
+        document_id, course_id, document_metadata = await self._resolve_document(user_id, request)
         document_repository = DocumentRepository(self.db)
         scope_service = CurriculumScopeService(document_repository)
         resolved_scope = await scope_service.resolve_scope(
-            document_id=textbook_id,
+            document_id=document_id,
             requested_scope=[item.model_dump() for item in request.scope],
             requested_chapters=list(request.chapters or []),
         )
+        if not resolved_scope.selected_section_ids:
+            raise ValueError("Document must be reprocessed to persist curriculum sections before MVP generation")
         spec_service = ExamSpecService()
         exam_spec = spec_service.build_exam_spec(
             request=request,
             course_id=course_id,
-            document_id=textbook_id,
+            document_id=document_id,
             resolved_scope=resolved_scope,
         )
 
@@ -596,16 +628,16 @@ class ExamService:
             id=str(uuid.uuid4()),
             owner_id=user_id,
             course_id=course_id,
-            textbook_id=textbook_id,
-            title=f"Exam - {textbook_metadata.get('title', 'Untitled')}",
+            textbook_id=document_id,
+            title=f"Exam - {document_metadata.get('title', 'Untitled')}",
             exam_type=ExamType.MCQ,
             difficulty=DifficultyLevel.CUSTOM,
             status=ExamStatus.GENERATING,
             chapters=list(resolved_scope.chapter_numbers),
-            config=request.model_dump(),
+            config=request.to_mvp_runtime_payload(),
             instructions=exam_spec.instructions,
             output_language=exam_spec.output_language,
-            strict_scope_flag=bool(exam_spec.strict_scope_flag),
+            strict_scope_flag=True,
             selected_scope_json=[self._scope_to_dict(item) for item in exam_spec.selected_scope],
             edit_history_json=[],
         )
@@ -622,30 +654,29 @@ class ExamService:
                 question_distribution=spec_service.build_question_distribution(exam_spec.total_questions),
                 gradually_increasing=False,
                 constraints={
-                    "strict_scope": exam_spec.strict_scope_flag,
+                    "strict_scope": True,
                     "strict_grounding": True,
                     "allow_applied_questions": False,
                     "max_concurrency": 1,
                     "bloom_levels": list(exam_spec.bloom_distribution) or ["remember", "understand", "apply", "analyze"],
                 },
-                textbook_metadata=textbook_metadata,
+                document_metadata=document_metadata,
                 scope=[self._scope_to_dict(item) for item in exam_spec.selected_scope],
                 time_limit_minutes=exam_spec.time_limit_minutes,
                 output_language=exam_spec.output_language,
                 instructions=exam_spec.normalized_instructions,
                 bloom_distribution=exam_spec.bloom_distribution,
                 formatting_preferences=exam_spec.formatting_preferences,
-                strict_scope=exam_spec.strict_scope_flag,
             )
 
             _, retrieval_service, generation_service, verifier_service = self._build_pipeline(
-                document_id=textbook_id,
+                document_id=document_id,
                 section_by_id=resolved_scope.section_by_id,
             )
-            retrieved_contexts, chunk_metadata_index = await retrieval_service.retrieve_for_blueprint(
+            retrieved_contexts, chunk_metadata_index, retrieval_stats = await retrieval_service.retrieve_for_blueprint(
                 blueprint=blueprint,
-                document_id=textbook_id,
-                strict_scope=exam_spec.strict_scope_flag,
+                document_id=document_id,
+                strict_scope=True,
             )
             chunk_assignments = await assign_chunks_to_slots(blueprint, retrieved_contexts)
             if not chunk_assignments:
@@ -653,9 +684,9 @@ class ExamService:
 
             generated_questions = await generation_service.generate(
                 chunk_assignments=chunk_assignments,
-                strict_scope=exam_spec.strict_scope_flag,
+                strict_scope=True,
             )
-            self._enrich_source_evidence(generated_questions, chunk_metadata_index, textbook_id)
+            self._enrich_source_evidence(generated_questions, chunk_metadata_index, document_id)
             verified_questions, _, _, _, _ = await verifier_service.verify(
                 questions=generated_questions,
                 blueprint=blueprint,
@@ -677,22 +708,44 @@ class ExamService:
             )
             quality_by_slot = self._quality_map(quality_scores)
             grounding_by_slot = self._grounding_map(grounding_reports)
+            persisted_questions: list[ExamQuestion] = []
             for question in final_questions:
-                self.db.add(
-                    self._question_to_db(
-                        exam_id=exam.id,
-                        exam_version_id=version.id,
-                        question=question,
-                        quality_by_slot=quality_by_slot,
-                        grounding_by_slot=grounding_by_slot,
-                    )
+                db_question = self._question_to_db(
+                    exam_id=exam.id,
+                    exam_version_id=version.id,
+                    question=question,
+                    quality_by_slot=quality_by_slot,
+                    grounding_by_slot=grounding_by_slot,
                 )
+                self.db.add(db_question)
+                persisted_questions.append(db_question)
+            await self.db.flush()
+
+            feedback_service = FeedbackEventService(self.db)
+            feedback_service.queue_retrieval_summary(
+                exam_id=exam.id,
+                exam_version_id=version.id,
+                actor_id=user_id,
+                payload={
+                    **retrieval_stats,
+                    "selected_scope_units": len(exam_spec.selected_scope or []),
+                    "selected_section_ids": list(exam_spec.selected_section_ids or []),
+                    "retrieved_contexts": len(retrieved_contexts),
+                    "chunk_assignments": len(chunk_assignments),
+                },
+            )
+            feedback_service.queue_verifier_events(
+                exam_id=exam.id,
+                exam_version_id=version.id,
+                actor_id=user_id,
+                questions=persisted_questions,
+            )
 
             await self._persist_exam_spec_records(
                 exam=exam,
                 user_id=user_id,
                 course_id=course_id,
-                document_id=textbook_id,
+                document_id=document_id,
                 exam_spec=exam_spec,
                 blueprint=blueprint,
             )
@@ -723,6 +776,7 @@ class ExamService:
         exam = await self.get_exam(request.exam_id, user_id)
         if not exam:
             raise ValueError("Exam not found")
+        self._ensure_mvp_exam_runtime(exam)
         if not exam.current_version:
             raise ValueError("Exam has no current version")
 
@@ -747,6 +801,8 @@ class ExamService:
             requested_scope=list(exam.selected_scope_json or []),
             requested_chapters=list(exam.chapters or []),
         )
+        if not resolved_scope.selected_section_ids:
+            raise ValueError("Document must have persisted curriculum sections before MVP review/regeneration")
         blueprint = self._restore_blueprint(exam, list(question_map.values()) or existing_generated)
         _, retrieval_service, generation_service, verifier_service = self._build_pipeline(
             document_id=exam.textbook_id,
@@ -754,6 +810,7 @@ class ExamService:
         )
 
         chunk_metadata_index: dict[str, dict] = {}
+        retrieval_summaries: list[dict] = []
         for slot_number, edit_prompt in sorted(regenerate_targets):
             current_question = question_map.get(slot_number)
             original_question = original_by_slot.get(slot_number)
@@ -763,13 +820,20 @@ class ExamService:
                 continue
 
             query = f"{original_question.content}\n{original_question.bloom_level}\nmcq"
-            context, metadata_index = await retrieval_service.retrieve_for_single_question(
+            context, metadata_index, retrieval_stats = await retrieval_service.retrieve_for_single_question(
                 query=query,
                 document_id=exam.textbook_id,
                 scope_tags=list(current_question.scope_tags or original_question.scope_tags or []),
                 strict_scope=True,
             )
             chunk_metadata_index.update(metadata_index)
+            retrieval_summaries.append(
+                {
+                    "slot_number": slot_number,
+                    "query": query,
+                    **retrieval_stats,
+                }
+            )
             regenerated = await generation_service.regenerate_question(
                 original_question=original_question,
                 context=context,
@@ -798,16 +862,18 @@ class ExamService:
         )
         quality_by_slot = self._quality_map(quality_scores)
         grounding_by_slot = self._grounding_map(grounding_reports)
+        persisted_questions: list[ExamQuestion] = []
         for question in final_questions:
-            self.db.add(
-                self._question_to_db(
-                    exam_id=exam.id,
-                    exam_version_id=new_version.id,
-                    question=question,
-                    quality_by_slot=quality_by_slot,
-                    grounding_by_slot=grounding_by_slot,
-                )
+            db_question = self._question_to_db(
+                exam_id=exam.id,
+                exam_version_id=new_version.id,
+                question=question,
+                quality_by_slot=quality_by_slot,
+                grounding_by_slot=grounding_by_slot,
             )
+            self.db.add(db_question)
+            persisted_questions.append(db_question)
+        await self.db.flush()
 
         await self._persist_edit_operations(
             exam_version_id=new_version.id,
@@ -815,6 +881,30 @@ class ExamService:
             edit_requests=edit_requests,
             old_questions=current_questions,
             new_questions=final_questions,
+        )
+        feedback_service = FeedbackEventService(self.db)
+        feedback_service.queue_retrieval_summary(
+            exam_id=exam.id,
+            exam_version_id=new_version.id,
+            actor_id=user_id,
+            payload={
+                "regenerated_slots": sorted(slot for slot, _ in regenerate_targets),
+                "retrieval_runs": retrieval_summaries,
+                "edited_question_count": len(final_questions),
+            },
+        )
+        feedback_service.queue_edit_events(
+            exam_id=exam.id,
+            exam_version_id=new_version.id,
+            actor_id=user_id,
+            edit_requests=edit_requests,
+            question_id_by_slot=self._question_id_by_slot(persisted_questions),
+        )
+        feedback_service.queue_verifier_events(
+            exam_id=exam.id,
+            exam_version_id=new_version.id,
+            actor_id=user_id,
+            questions=persisted_questions,
         )
 
         history = list(exam.edit_history_json or [])
@@ -845,14 +935,17 @@ class ExamService:
         options = [
             selectinload(Exam.exam_spec_record).selectinload(ExamSpecRecord.scopes),
             selectinload(Exam.exam_spec_record).selectinload(ExamSpecRecord.blueprint_cells),
+            selectinload(Exam.feedback_events),
             selectinload(Exam.current_version).selectinload(ExamVersion.questions),
             selectinload(Exam.current_version).selectinload(ExamVersion.edit_operations),
+            selectinload(Exam.current_version).selectinload(ExamVersion.feedback_events),
         ]
         if include_versions:
             options.extend(
                 [
                     selectinload(Exam.versions).selectinload(ExamVersion.questions),
                     selectinload(Exam.versions).selectinload(ExamVersion.edit_operations),
+                    selectinload(Exam.versions).selectinload(ExamVersion.feedback_events),
                 ]
             )
         return (
@@ -891,6 +984,7 @@ class ExamService:
         exam = await self.get_exam(exam_id, user_id)
         if not exam:
             raise ValueError("Exam not found")
+        self._ensure_mvp_exam_runtime(exam)
         if not exam.current_version:
             raise ValueError("Exam has no current version")
 
@@ -909,4 +1003,14 @@ class ExamService:
         exam.status = ExamStatus.PUBLISHED
         exam.published_at = datetime.utcnow()
         exam.current_version.status = "published"
+        FeedbackEventService(self.db).queue_publish_event(
+            exam_id=exam.id,
+            exam_version_id=exam.current_version.id,
+            actor_id=user_id,
+            payload={
+                "published_at": exam.published_at.isoformat(),
+                "question_count": len(questions),
+                "version_number": exam.current_version.version_number,
+            },
+        )
         return exam

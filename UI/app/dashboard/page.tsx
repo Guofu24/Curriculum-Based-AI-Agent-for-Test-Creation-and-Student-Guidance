@@ -18,7 +18,7 @@ import {
 import { useAuth } from "@/components/auth-provider"
 import {
   courses as coursesApi,
-  textbooks as textbooksApi,
+  documents as documentsApi,
   exams as examsApi,
   type ExamListItem,
 } from "@/lib/api"
@@ -50,16 +50,16 @@ export default function DashboardPage() {
       try {
         const [courseList, documentList, examList] = await Promise.all([
           coursesApi.list(),
-          textbooksApi.list(),
+          documentsApi.listAll(),
           examsApi.list(),
         ])
         setCourseCount(courseList.length)
         setDocumentCount(documentList.length)
         setExamCount(examList.length)
-        setTotalQuestions(examList.reduce((sum, e) => sum + e.total_questions, 0))
+        setTotalQuestions(examList.reduce((sum, exam) => sum + exam.total_questions, 0))
         setRecentExams(examList.slice(0, 3))
       } catch {
-        // silently fail — user sees zeros
+        // Empty dashboard state falls back to zero values.
       } finally {
         setLoading(false)
       }
@@ -81,7 +81,7 @@ export default function DashboardPage() {
       icon: BookOpen,
     },
     {
-      title: "Exams Generated",
+      title: "Exam Versions",
       value: examCount.toString(),
       icon: FileText,
     },
@@ -91,26 +91,25 @@ export default function DashboardPage() {
       icon: Sparkles,
     },
     {
-      title: "Avg. Quality Score",
-      value: "—",
+      title: "Eval Baseline",
+      value: "Ready",
       icon: TrendingUp,
     },
   ]
+
   return (
     <>
       <DashboardHeader title="Dashboard" />
       <div className="flex flex-1 flex-col gap-6 p-6">
-        {/* Welcome */}
         <div>
           <h2 className="text-2xl font-semibold tracking-tight text-foreground">
             Good morning, {firstName}
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            {"Here's what's happening with your exams today."}
+            Track the active Physics workflow from PDF documents to reviewed exam versions.
           </p>
         </div>
 
-        {/* Stats Grid */}
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
           {stats.map((stat) => (
             <Card key={stat.title} className="rounded-2xl shadow-sm">
@@ -131,36 +130,33 @@ export default function DashboardPage() {
           ))}
         </div>
 
-        {/* Quick Actions & Recent Exams */}
         <div className="grid gap-6 lg:grid-cols-3">
-          {/* Quick Actions */}
           <Card className="rounded-2xl shadow-sm">
             <CardHeader>
               <CardTitle className="text-base font-semibold text-foreground">Quick Actions</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
               <Button asChild className="w-full justify-start h-11" size="lg">
-                <Link href="/dashboard/generate">
-                  <Sparkles className="mr-2 h-4 w-4" />
-                  Generate New Exam
-                </Link>
-              </Button>
-              <Button asChild variant="outline" className="w-full justify-start h-11" size="lg">
-                <Link href="/dashboard/textbooks">
+                <Link href="/dashboard/documents">
                   <BookOpen className="mr-2 h-4 w-4" />
                   Manage Documents
                 </Link>
               </Button>
               <Button asChild variant="outline" className="w-full justify-start h-11" size="lg">
+                <Link href="/dashboard/generate">
+                  <Sparkles className="mr-2 h-4 w-4" />
+                  Generate Exam
+                </Link>
+              </Button>
+              <Button asChild variant="outline" className="w-full justify-start h-11" size="lg">
                 <Link href="/dashboard/history">
                   <Clock className="mr-2 h-4 w-4" />
-                  View Exam History
+                  View Version History
                 </Link>
               </Button>
             </CardContent>
           </Card>
 
-          {/* Recent Exams */}
           <Card className="lg:col-span-2 rounded-2xl shadow-sm">
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle className="text-base font-semibold text-foreground">Recent Exams</CardTitle>
@@ -179,7 +175,7 @@ export default function DashboardPage() {
                   </div>
                 ) : recentExams.length === 0 ? (
                   <p className="text-sm text-muted-foreground py-8 text-center">
-                    No exams yet. Generate your first exam!
+                    No exams yet. Upload a PDF and generate your first version.
                   </p>
                 ) : (
                   recentExams.map((exam) => (

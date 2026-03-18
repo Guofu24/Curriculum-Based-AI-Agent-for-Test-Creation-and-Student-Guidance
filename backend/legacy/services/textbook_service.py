@@ -310,13 +310,14 @@ class TextbookService:
         key_to_id: dict[str, str] = {}
         pending = []
         for section in sections:
-            section_id = str(uuid.uuid4())
-            key = section.get("section_key") or section_id
+            key = section.get("section_key") or section.get("id") or str(uuid.uuid4())
+            section_id = self._compose_section_id(textbook_id, key)
             key_to_id[key] = section_id
+            key_to_id[section_id] = section_id
             pending.append((section_id, section))
 
         for section_id, section in pending:
-            parent_key = section.get("parent_key")
+            parent_key = section.get("parent_section_id") or section.get("parent_key")
             self.db.add(
                 Section(
                     id=section_id,
@@ -414,7 +415,7 @@ class TextbookService:
         roots: list[dict] = []
 
         for section in sections:
-            key = section.get("section_key") or section.get("id") or str(uuid.uuid4())
+            key = section.get("section_id") or section.get("section_key") or section.get("id") or str(uuid.uuid4())
             nodes[key] = {
                 "id": key,
                 "title": section.get("section_title") or section.get("title") or "Untitled Section",
@@ -430,11 +431,18 @@ class TextbookService:
             }
 
         for section in sections:
-            key = section.get("section_key") or section.get("id")
-            parent_key = section.get("parent_key")
+            key = section.get("section_id") or section.get("section_key") or section.get("id")
+            parent_key = section.get("parent_section_id") or section.get("parent_key")
             if parent_key and parent_key in nodes:
                 nodes[parent_key]["children"].append(nodes[key])
             else:
                 roots.append(nodes[key])
 
         return roots
+
+    def _compose_section_id(self, textbook_id: str, section_key: str) -> str:
+        normalized_key = str(section_key or "").strip()
+        prefix = f"{textbook_id}:"
+        if normalized_key.startswith(prefix):
+            return normalized_key
+        return f"{prefix}{normalized_key}"

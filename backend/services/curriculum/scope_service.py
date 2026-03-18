@@ -61,6 +61,7 @@ class CurriculumScopeService:
             for chapter in (requested_chapters or [])
             if isinstance(chapter, int) and chapter > 0
         }
+        explicit_scope_requested = bool(requested_ids or requested_chapter_numbers)
 
         selected_roots: list[Section] = []
         if requested_ids:
@@ -88,7 +89,7 @@ class CurriculumScopeService:
                 seen.add(resolved.id)
                 generation_sections.append(resolved)
 
-        if not generation_sections:
+        if not generation_sections and not explicit_scope_requested:
             generation_sections = list(sections)
 
         scope_units = [self._section_to_scope_unit(section) for section in generation_sections]

@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import Link from "next/link"
 import { DashboardHeader } from "@/components/dashboard-header"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
@@ -26,7 +26,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -41,18 +40,13 @@ import {
   Search,
   MoreVertical,
   Eye,
-  Copy,
   Trash2,
   Filter,
   X,
   History,
-  FileText,
   Loader2,
 } from "lucide-react"
-import {
-  exams as examsApi,
-  type ExamListItem,
-} from "@/lib/api"
+import { exams as examsApi, type ExamListItem } from "@/lib/api"
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString("en-US", {
@@ -78,16 +72,13 @@ export default function HistoryPage() {
   }, [])
 
   const filtered = exams.filter((exam) => {
-    const matchesSearch =
-      exam.title.toLowerCase().includes(searchQuery.toLowerCase())
+    const matchesSearch = exam.title.toLowerCase().includes(searchQuery.toLowerCase())
     const matchesType = typeFilter === "all" || exam.exam_type === typeFilter
-    const matchesDifficulty =
-      difficultyFilter === "all" || exam.difficulty === difficultyFilter
+    const matchesDifficulty = difficultyFilter === "all" || exam.difficulty === difficultyFilter
     return matchesSearch && matchesType && matchesDifficulty
   })
 
-  const hasFilters =
-    searchQuery !== "" || typeFilter !== "all" || difficultyFilter !== "all"
+  const hasFilters = searchQuery !== "" || typeFilter !== "all" || difficultyFilter !== "all"
 
   const clearFilters = () => {
     setSearchQuery("")
@@ -96,15 +87,14 @@ export default function HistoryPage() {
   }
 
   const handleDelete = async () => {
-    if (deleteDialog) {
-      try {
-        await examsApi.delete(deleteDialog.id)
-        setExams((prev) => prev.filter((e) => e.id !== deleteDialog.id))
-      } catch {
-        // silently fail
-      }
-      setDeleteDialog(null)
+    if (!deleteDialog) return
+    try {
+      await examsApi.delete(deleteDialog.id)
+      setExams((prev) => prev.filter((exam) => exam.id !== deleteDialog.id))
+    } catch {
+      // Ignore delete failures in the lightweight history view.
     }
+    setDeleteDialog(null)
   }
 
   const typeBadgeVariant = (type: string) => {
@@ -133,17 +123,15 @@ export default function HistoryPage() {
     <>
       <DashboardHeader title="Exam History" />
       <div className="flex flex-1 flex-col gap-6 p-6">
-        {/* Page Header */}
         <div>
           <h2 className="text-2xl font-semibold tracking-tight text-foreground">
             Exam History
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            View, duplicate, and manage all your previously generated exams.
+            Review generated exams, inspect their status, and delete versions that are no longer needed.
           </p>
         </div>
 
-        {/* Filters */}
         <Card className="rounded-2xl shadow-sm">
           <CardContent className="py-4 px-5">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -153,7 +141,7 @@ export default function HistoryPage() {
                   placeholder="Search exams or documents..."
                   className="h-9 pl-9"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(event) => setSearchQuery(event.target.value)}
                 />
               </div>
               <div className="flex items-center gap-2">
@@ -167,10 +155,7 @@ export default function HistoryPage() {
                     <SelectItem value="mcq">Multiple Choice</SelectItem>
                   </SelectContent>
                 </Select>
-                <Select
-                  value={difficultyFilter}
-                  onValueChange={setDifficultyFilter}
-                >
+                <Select value={difficultyFilter} onValueChange={setDifficultyFilter}>
                   <SelectTrigger className="h-9 w-44">
                     <Filter className="mr-2 h-3.5 w-3.5 text-muted-foreground" />
                     <SelectValue placeholder="Difficulty" />
@@ -199,7 +184,6 @@ export default function HistoryPage() {
           </CardContent>
         </Card>
 
-        {/* Table */}
         {loading ? (
           <div className="flex justify-center py-16">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -253,12 +237,12 @@ export default function HistoryPage() {
                           {exam.title}
                         </Link>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          {exam.total_questions} questions · {exam.status}
+                          {exam.total_questions} questions - {exam.status}
                         </p>
                       </TableCell>
                       <TableCell className="hidden lg:table-cell">
                         <span className="text-sm text-muted-foreground">
-                          {exam.chapters.length > 0 ? `Ch. ${exam.chapters.join(", ")}` : "All"}
+                          {exam.chapters.length > 0 ? `Ch. ${exam.chapters.join(", ")}` : "Scoped"}
                         </span>
                       </TableCell>
                       <TableCell>
@@ -295,11 +279,6 @@ export default function HistoryPage() {
                                 View exam
                               </Link>
                             </DropdownMenuItem>
-                            <DropdownMenuItem>
-                              <Copy className="mr-2 h-4 w-4" />
-                              Duplicate
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
                             <DropdownMenuItem
                               className="text-destructive focus:text-destructive"
                               onClick={() => setDeleteDialog(exam)}
@@ -318,21 +297,19 @@ export default function HistoryPage() {
           </Card>
         )}
 
-        {/* Delete Dialog */}
         <Dialog open={!!deleteDialog} onOpenChange={() => setDeleteDialog(null)}>
-          <DialogContent className="sm:max-w-sm">
+          <DialogContent>
             <DialogHeader>
               <DialogTitle>Delete exam</DialogTitle>
               <DialogDescription>
-                Are you sure you want to delete &ldquo;{deleteDialog?.title}&rdquo;? This action cannot be undone.
+                This will remove the exam and all of its saved versions from the active workspace.
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
               <Button variant="outline" onClick={() => setDeleteDialog(null)}>
                 Cancel
               </Button>
-              <Button variant="destructive" onClick={handleDelete}>
-                <Trash2 className="mr-2 h-4 w-4" />
+              <Button variant="destructive" onClick={() => void handleDelete()}>
                 Delete
               </Button>
             </DialogFooter>

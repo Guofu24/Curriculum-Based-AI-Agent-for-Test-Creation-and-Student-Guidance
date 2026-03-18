@@ -13,9 +13,10 @@ class MCQGenerationService:
         chunk_assignments: list[ChunkAssignment],
         strict_scope: bool = True,
     ) -> list[GeneratedQuestion]:
+        _ = strict_scope
         constraints = {
             "strict_grounding": True,
-            "strict_scope": strict_scope,
+            "strict_scope": True,
             "allow_applied_questions": False,
             "max_concurrency": 1,
         }

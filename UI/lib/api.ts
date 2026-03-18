@@ -166,10 +166,9 @@ export interface DocumentListItem {
   updated_at?: string | null;
 }
 
-export type TextbookListItem = DocumentListItem;
-
-export interface Textbook extends Document {
-  chapters: Chapter[];
+interface DocumentUploadOptions {
+  course_id?: string;
+  language?: string;
 }
 
 export interface MCQOption {
@@ -286,6 +285,15 @@ export interface EditOperation {
   created_at: string;
 }
 
+export interface FeedbackEvent {
+  id: string;
+  signal_type: string;
+  severity: string;
+  question_id?: string | null;
+  payload?: Record<string, unknown> | null;
+  created_at: string;
+}
+
 export interface ExamVersion {
   id: string;
   version_number: number;
@@ -296,12 +304,13 @@ export interface ExamVersion {
   created_at: string;
   questions: Question[];
   edit_operations: EditOperation[];
+  feedback_events: FeedbackEvent[];
 }
 
 export interface Exam {
   id: string;
   title: string;
-  textbook_id: string;
+  document_id: string;
   course_id?: string | null;
   exam_type: string;
   difficulty: string;
@@ -326,6 +335,7 @@ export interface Exam {
   provider_logs?: ProviderLog[] | null;
   edit_impact_level?: "cosmetic" | "moderate" | "strong" | null;
   edit_history?: Record<string, unknown>[] | null;
+  feedback_events?: FeedbackEvent[] | null;
   current_version?: ExamVersion | null;
   versions?: ExamVersion[] | null;
 }
@@ -333,7 +343,7 @@ export interface Exam {
 export interface ExamListItem {
   id: string;
   title: string;
-  textbook_id: string;
+  document_id: string;
   course_id?: string | null;
   exam_type: string;
   difficulty: string;
@@ -364,9 +374,7 @@ export interface ScopeUnitPayload {
 }
 
 export interface ExamGenerationRequest {
-  textbook_id?: string;
   document_id?: string;
-  document_ids?: string[];
   course_id?: string;
   chapters: number[];
   scope: ScopeUnitPayload[];
@@ -378,14 +386,12 @@ export interface ExamGenerationRequest {
   difficulty?: string;
   question_distribution?: {
     mcq: DifficultyDistribution;
-    essay: DifficultyDistribution;
   };
   num_variants?: number;
   gradually_increasing?: boolean;
   constraints: {
     strict_grounding: boolean;
     allow_applied_questions: boolean;
-    strict_scope: boolean;
     grade_level_scope?: string;
     creativity_level: number;
     bloom_levels: string[];
@@ -395,7 +401,6 @@ export interface ExamGenerationRequest {
   output_language?: string;
   bloom_distribution?: Record<string, number>;
   formatting_preferences?: Record<string, unknown>;
-  strict_scope?: boolean;
 }
 
 export interface GenerationStep {
@@ -477,19 +482,37 @@ export const courses = {
 };
 
 export const documents = {
-  list(courseId: string) {
-    return request<Document[]>(`/courses/${encodeURIComponent(courseId)}/documents`);
+  listAll() {
+    return request<DocumentListItem[]>("/documents");
   },
 
-  upload(courseId: string, title: string, file: File, language = "vi") {
+  list(courseId?: string) {
+    if (!courseId) {
+      return request<DocumentListItem[]>("/documents");
+    }
+    return request<DocumentListItem[]>(`/courses/${encodeURIComponent(courseId)}/documents`);
+  },
+
+  get(documentId: string) {
+    return request<Document>(`/documents/${encodeURIComponent(documentId)}`);
+  },
+
+  upload(title: string, file: File, options?: DocumentUploadOptions) {
     const form = new FormData();
     form.append("title", title);
-    form.append("language", language);
+    form.append("language", options?.language || "vi");
     form.append("file", file);
-    return request<Document>(`/courses/${encodeURIComponent(courseId)}/documents/upload`, {
+    const path = options?.course_id
+      ? `/courses/${encodeURIComponent(options.course_id)}/documents/upload`
+      : "/documents/upload";
+    return request<Document>(path, {
       method: "POST",
       body: form,
     });
+  },
+
+  uploadToCourse(courseId: string, title: string, file: File, language = "vi") {
+    return documents.upload(title, file, { course_id: courseId, language });
   },
 
   status(documentId: string) {
@@ -506,31 +529,9 @@ export const documents = {
       body: JSON.stringify({ curriculum_tree: curriculumTree }),
     });
   },
-};
 
-export const textbooks = {
-  list() {
-    return request<TextbookListItem[]>("/textbooks/");
-  },
-
-  get(id: string) {
-    return request<Textbook>(`/textbooks/${encodeURIComponent(id)}`);
-  },
-
-  upload(title: string, file: File, options?: { course_id?: string; language?: string }) {
-    const form = new FormData();
-    form.append("title", title);
-    form.append("file", file);
-    if (options?.course_id) form.append("course_id", options.course_id);
-    if (options?.language) form.append("language", options.language);
-    return request<Textbook>("/textbooks/upload", {
-      method: "POST",
-      body: form,
-    });
-  },
-
-  delete(id: string) {
-    return request<{ message: string }>(`/textbooks/${encodeURIComponent(id)}`, {
+  delete(documentId: string) {
+    return request<{ message: string }>(`/documents/${encodeURIComponent(documentId)}`, {
       method: "DELETE",
     });
   },

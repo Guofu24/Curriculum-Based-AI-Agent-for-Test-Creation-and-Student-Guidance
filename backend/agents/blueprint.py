@@ -58,27 +58,26 @@ class BlueprintAgent:
         question_distribution: dict,
         gradually_increasing: bool,
         constraints: dict,
-        textbook_metadata: dict,
+        document_metadata: dict,
         scope: list[dict] | None = None,
         time_limit_minutes: int | None = None,
         output_language: str = "vi",
         instructions: str = "",
         bloom_distribution: dict | None = None,
         formatting_preferences: dict | None = None,
-        strict_scope: bool | None = None,
     ) -> tuple[ExamBlueprint, dict]:
+        if (exam_type or "").strip().lower() != "mcq":
+            raise ValueError("Active MVP runtime only supports MCQ blueprint generation")
+
         scope_units = self._build_scope_units(
             scope=scope or [],
             chapters=chapters or [],
-            textbook_metadata=textbook_metadata or {},
+            document_metadata=document_metadata or {},
         )
         question_mix = self._build_question_mix(question_distribution)
         total_questions = sum(question_mix.values())
-        effective_strict_scope = (
-            constraints.get("strict_scope", True)
-            if strict_scope is None
-            else bool(strict_scope)
-        )
+        # MVP CONSTRAINT: strict_scope always true, no exceptions
+        effective_strict_scope = True
         normalized_bloom = self._normalize_bloom_distribution(
             question_distribution=question_distribution,
             explicit_distribution=bloom_distribution or {},
@@ -118,7 +117,7 @@ class BlueprintAgent:
             bloom_dist[cell.bloom_level] += cell.overgenerate_count
             original_quota[cell.cell_id] = cell.target_count
 
-        title = f"Exam - {textbook_metadata.get('title', 'Untitled')}"
+        title = f"Exam - {document_metadata.get('title', 'Untitled')}"
         blueprint = ExamBlueprint(
             title=title,
             exam_spec=exam_spec,
@@ -142,22 +141,26 @@ class BlueprintAgent:
         self,
         scope: list[dict],
         chapters: list[int],
-        textbook_metadata: dict,
+        document_metadata: dict,
     ) -> list[ScopeUnit]:
         if scope:
             scope_units = []
             for item in scope:
                 chapter_number = int(item.get("chapter_number") or 0)
-                scope_id = item.get("scope_id") or self._scope_id_from_item(item, chapter_number)
+                section_id = item.get("section_id") or None
+                scope_id = item.get("scope_id") or section_id or self._scope_id_from_item(item, chapter_number)
                 title = item.get("title") or (
-                    f"Chapter {chapter_number}" if chapter_number > 0 else "Textbook"
+                    f"Chapter {chapter_number}" if chapter_number > 0 else "Document"
                 )
                 tags = list(item.get("tags") or [])
+                if section_id and f"section:{section_id}" not in tags:
+                    tags.append(f"section:{section_id}")
                 if chapter_number > 0 and f"chapter:{chapter_number}" not in tags:
                     tags.append(f"chapter:{chapter_number}")
                 scope_units.append(
                     ScopeUnit(
                         scope_id=scope_id,
+                        section_id=section_id,
                         scope_type=item.get("scope_type", "chapter"),
                         title=title,
                         chapter_number=chapter_number,
@@ -180,7 +183,7 @@ class BlueprintAgent:
                 for chapter in chapters
             ]
 
-        chapter_rows = textbook_metadata.get("chapters") or []
+        chapter_rows = document_metadata.get("chapters") or []
         if chapter_rows:
             return [
                 ScopeUnit(
@@ -197,10 +200,10 @@ class BlueprintAgent:
 
         return [
             ScopeUnit(
-                scope_id="textbook:all",
+                scope_id="document:all",
                 scope_type="course",
-                title=textbook_metadata.get("title", "Textbook"),
-                tags=["textbook:all"],
+                title=document_metadata.get("title", "Document"),
+                tags=["document:all"],
             )
         ]
 
@@ -215,7 +218,6 @@ class BlueprintAgent:
         dist = question_distribution.get("mcq", {}) or {}
         return {
             "mcq": int(dist.get("easy", 0)) + int(dist.get("medium", 0)) + int(dist.get("hard", 0)),
-            "essay": 0,
         }
 
     def _normalize_bloom_distribution(
@@ -277,7 +279,8 @@ class BlueprintAgent:
                 for scope_unit, target_count in scope_targets:
                     if target_count <= 0:
                         continue
-                    cell_id = f"{scope_unit.scope_id}|mcq|{bloom_level}"
+                    scope_key = scope_unit.section_id or scope_unit.scope_id
+                    cell_id = f"{scope_key}|mcq|{bloom_level}"
                     cells.append(
                         BlueprintCell(
                             cell_id=cell_id,
@@ -322,6 +325,10 @@ class BlueprintAgent:
         for cell in cells:
             for _ in range(cell.overgenerate_count):
                 scope_tags = list(cell.scope_unit.tags)
+                if cell.scope_unit.section_id:
+                    section_tag = f"section:{cell.scope_unit.section_id}"
+                    if section_tag not in scope_tags:
+                        scope_tags.append(section_tag)
                 if cell.scope_unit.chapter_number > 0:
                     chapter_tag = f"chapter:{cell.scope_unit.chapter_number}"
                     if chapter_tag not in scope_tags:

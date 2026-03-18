@@ -37,7 +37,7 @@ import { useAuth } from "@/components/auth-provider"
 
 const navItems = [
   { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { title: "Courses & Documents", href: "/dashboard/textbooks", icon: BookOpen },
+  { title: "Courses & Documents", href: "/dashboard/documents", icon: BookOpen },
   { title: "Generate Exam", href: "/dashboard/generate", icon: Sparkles },
   { title: "Exam History", href: "/dashboard/history", icon: History },
 ]

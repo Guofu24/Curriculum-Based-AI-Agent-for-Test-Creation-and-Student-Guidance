@@ -49,6 +49,24 @@ class DocumentResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DocumentListResponse(BaseModel):
+    id: str
+    course_id: Optional[str] = None
+    title: str
+    file_name: str
+    file_type: str
+    file_size: int
+    status: str
+    version: int
+    total_pages_or_slides: int = 0
+    total_chunks: int = 0
+    chapter_count: int = 0
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
 class CurriculumTreePatchRequest(BaseModel):
     curriculum_tree: list[CurriculumNodeResponse] = Field(default_factory=list)
 

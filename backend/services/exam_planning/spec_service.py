@@ -20,17 +20,17 @@ class ExamSpecService:
         prompt = (request.prompt or "").strip()
 
         normalized_instructions_parts = [
-            "Môn học: Vật lý.",
-            "Ngôn ngữ đầu ra: tiếng Việt.",
-            "Loại câu hỏi: trắc nghiệm 4 lựa chọn, 1 đáp án đúng.",
-            f"Tổng số câu hỏi: {total_questions}.",
-            "Chỉ sử dụng nội dung nằm trong scope đã chọn.",
-            "Mỗi câu hỏi phải có bằng chứng nguồn truy vết được.",
+            "Mon hoc: Vat ly.",
+            "Ngon ngu dau ra: tieng Viet.",
+            "Loai cau hoi: trac nghiem 4 lua chon, 1 dap an dung.",
+            f"Tong so cau hoi: {total_questions}.",
+            "Chi su dung noi dung nam trong scope da chon.",
+            "Moi cau hoi phai co bang chung nguon truy vet duoc.",
         ]
         if prompt:
-            normalized_instructions_parts.append(f"Yêu cầu bổ sung từ người dùng: {prompt}")
+            normalized_instructions_parts.append(f"Yeu cau bo sung tu nguoi dung: {prompt}")
         if instructions:
-            normalized_instructions_parts.append(f"Hướng dẫn hiển thị trên đề: {instructions}")
+            normalized_instructions_parts.append(f"Huong dan hien thi tren de: {instructions}")
 
         return ExamSpec(
             course_id=course_id,
@@ -42,7 +42,7 @@ class ExamSpecService:
             output_language=DEFAULT_OUTPUT_LANGUAGE,
             instructions=instructions,
             normalized_instructions=" ".join(normalized_instructions_parts),
-            strict_scope_flag=bool(request.strict_scope),
+            strict_scope_flag=True,
             selected_scope=list(resolved_scope.selected_scope),
             selected_section_ids=list(resolved_scope.selected_section_ids),
             bloom_distribution=self._build_default_bloom_distribution(total_questions),
@@ -67,7 +67,7 @@ class ExamSpecService:
             if total_questions > 0:
                 return total_questions
 
-        raise ValueError("total_questions phải lớn hơn 0")
+        raise ValueError("total_questions phai lon hon 0")
 
     def build_question_distribution(self, total_questions: int) -> dict[str, dict[str, int]]:
         easy = max(0, floor(total_questions * 0.3))
@@ -84,12 +84,7 @@ class ExamSpecService:
                 "easy": easy,
                 "medium": medium,
                 "hard": hard,
-            },
-            "essay": {
-                "easy": 0,
-                "medium": 0,
-                "hard": 0,
-            },
+            }
         }
 
     def _build_default_bloom_distribution(self, total_questions: int) -> dict[str, int]:

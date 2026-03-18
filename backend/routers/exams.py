@@ -12,6 +12,7 @@ from models.user import User, UserRole
 from routers.auth import get_current_user
 from schemas.exam import (
     EditOperationResponse,
+    FeedbackEventResponse,
     ExamListResponse,
     ExamResponse,
     ExamVersionResponse,
@@ -71,9 +72,21 @@ def _get_active_version(exam):
     return max(versions, key=lambda version: version.version_number)
 
 
+def _format_feedback_event(event) -> dict:
+    return FeedbackEventResponse(
+        id=event.id,
+        signal_type=_enum_value(event.signal_type),
+        severity=event.severity,
+        question_id=event.question_id,
+        payload=event.payload_json,
+        created_at=event.created_at,
+    ).model_dump()
+
+
 def _format_version(version) -> dict:
     questions = sorted(version.questions or [], key=lambda question: question.question_number)
     operations = sorted(version.edit_operations or [], key=lambda operation: operation.created_at)
+    feedback_events = sorted(version.feedback_events or [], key=lambda event: event.created_at)
     return ExamVersionResponse(
         id=version.id,
         version_number=version.version_number,
@@ -93,6 +106,7 @@ def _format_version(version) -> dict:
             )
             for operation in operations
         ],
+        feedback_events=[_format_feedback_event(event) for event in feedback_events],
     ).model_dump()
 
 
@@ -107,7 +121,7 @@ def _format_exam(exam) -> ExamResponse:
     return ExamResponse(
         id=exam.id,
         title=exam.title,
-        textbook_id=exam.textbook_id,
+        document_id=exam.textbook_id,
         course_id=exam.course_id,
         exam_type=_enum_value(exam.exam_type),
         difficulty=_enum_value(exam.difficulty),
@@ -132,6 +146,10 @@ def _format_exam(exam) -> ExamResponse:
         provider_logs=exam.provider_logs_json,
         edit_impact_level=exam.edit_impact_level,
         edit_history=exam.edit_history_json,
+        feedback_events=[
+            _format_feedback_event(event)
+            for event in sorted(list(exam.feedback_events or []), key=lambda item: item.created_at)
+        ],
         current_version=_format_version(active_version) if active_version else None,
         versions=[_format_version(version) for version in versions],
     )
@@ -148,7 +166,7 @@ async def list_exams(
         ExamListResponse(
             id=e.id,
             title=e.title,
-            textbook_id=e.textbook_id,
+            document_id=e.textbook_id,
             course_id=e.course_id,
             exam_type=_enum_value(e.exam_type),
             difficulty=_enum_value(e.difficulty),

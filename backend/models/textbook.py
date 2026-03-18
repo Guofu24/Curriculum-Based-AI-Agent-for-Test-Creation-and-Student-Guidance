@@ -80,6 +80,8 @@ class Textbook(Base):
 
 
 class TextbookChapter(Base):
+    """Legacy chapter table backing document chapter metadata."""
+
     __tablename__ = "textbook_chapters"
 
     id: Mapped[str] = mapped_column(
@@ -99,7 +101,7 @@ class TextbookChapter(Base):
 
 
 class TextbookChunk(Base):
-    """Stores raw chunk text in PostgreSQL for BM25 keyword search."""
+    """Legacy chunk table backing the active document chunk domain."""
 
     __tablename__ = "textbook_chunks"
 
@@ -109,6 +111,7 @@ class TextbookChunk(Base):
         default=lambda: str(uuid.uuid4()),
     )
     textbook_id: Mapped[str] = mapped_column(ForeignKey("textbooks.id"), nullable=False)
+    section_id: Mapped[str] = mapped_column(String(255), nullable=True, index=True)
     chunk_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)

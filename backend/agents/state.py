@@ -10,7 +10,7 @@ These structures intentionally model the spec-first workflow:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, TypedDict
+from typing import Any
 
 
 @dataclass
@@ -159,63 +159,3 @@ class ChunkAssignment:
         return chunk_ids
 
 
-class AgentState(TypedDict, total=False):
-    user_id: str
-    textbook_id: str
-    chapters: list[int]
-    prompt: str
-    exam_type: str
-    difficulty: str
-    question_distribution: dict[str, Any]
-    num_variants: int
-    gradually_increasing: bool
-    constraints: dict[str, Any]
-    textbook_metadata: dict[str, Any]
-    processing_status: str
-    exam_spec: ExamSpec | None
-    blueprint: ExamBlueprint | None
-    retrieved_contexts: list[RetrievedContext]
-    generated_questions: list[GeneratedQuestion]
-    validated_questions: list[GeneratedQuestion]
-    validation_summary: dict[str, Any]
-    judged_questions: list[GeneratedQuestion]
-    quality_scores: list[dict[str, Any]]
-    grounding_reports: list[dict[str, Any]]
-    duplicate_groups: list[dict[str, Any]]
-    final_questions: list[GeneratedQuestion]
-    current_step: str
-    step_progress: float
-    error: str | None
-    chunk_assignments: list[ChunkAssignment]
-    chunk_assignment_payloads: list[dict[str, Any]]
-    question_chunk_metadata: list[dict[str, Any]]
-    original_quota: dict[str, int]
-    edit_requests: list[dict[str, Any]] | None
-    is_partial_edit: bool
-    edit_impact_level: str | None
-    refreshed_contexts: list[RetrievedContext]
-    provider_logs: list[dict[str, Any]]
-    scope: list[dict[str, Any]]
-    time_limit_minutes: int | None
-    output_language: str
-    instructions: str
-    bloom_distribution: dict[str, int]
-    formatting_preferences: dict[str, Any]
-    strict_scope: bool
-    # Audit results (from Scope Auditor & Bloom Auditor agents)
-    scope_audit_results: list[dict[str, Any]]
-    bloom_audit_results: list[dict[str, Any]]
-    # Agent references
-    _retrieval_agent: Any
-    _blueprint_agent: Any
-    _question_generator: Any
-    _validator: Any
-    _reviewer: Any
-    _pruning_agent: Any
-    _quality_judge: Any
-    _dedup_filter: Any
-    _scope_auditor: Any
-    _bloom_auditor: Any
-    _requirement_parser: Any
-    _db_session: Any
-    _retry_attempted: bool

@@ -79,7 +79,7 @@ class RAGService:
         return self._index
 
     def get_vector_store(self, namespace: str = None) -> PineconeVectorStore:
-        """Get a LangChain PineconeVectorStore (uses namespace per textbook)."""
+        """Get a LangChain PineconeVectorStore scoped by document namespace."""
         index = self._get_index()
         return PineconeVectorStore(
             index=index,
@@ -91,11 +91,15 @@ class RAGService:
         """Get raw Pinecone index for direct operations."""
         return self._get_index()
 
-    def delete_textbook_chunks(self, textbook_id: str):
-        """Remove all vectors for a specific textbook (uses namespace)."""
+    def delete_document_chunks(self, document_id: str):
+        """Remove all vectors for a specific document namespace."""
         index = self._get_index()
         try:
-            index.delete(delete_all=True, namespace=textbook_id)
-            logger.info(f"Deleted Pinecone vectors for textbook: {textbook_id}")
+            index.delete(delete_all=True, namespace=document_id)
+            logger.info("Deleted Pinecone vectors for document: %s", document_id)
         except Exception as e:
-            logger.warning(f"Failed to delete vectors for {textbook_id}: {e}")
+            logger.warning("Failed to delete vectors for %s: %s", document_id, e)
+
+    def delete_textbook_chunks(self, textbook_id: str):
+        """Deprecated alias for legacy naming."""
+        self.delete_document_chunks(textbook_id)

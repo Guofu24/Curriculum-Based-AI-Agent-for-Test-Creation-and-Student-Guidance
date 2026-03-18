@@ -1,27 +1,27 @@
-"use client";
+"use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import Link from "next/link";
-import { DashboardHeader } from "@/components/dashboard-header";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import Link from "next/link"
+import { DashboardHeader } from "@/components/dashboard-header"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@/components/ui/dialog"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@/components/ui/dropdown-menu"
 import {
   BookOpen,
   Calendar,
@@ -39,22 +39,21 @@ import {
   Trash2,
   Upload,
   X,
-} from "lucide-react";
+} from "lucide-react"
 import {
   courses as coursesApi,
   documents as documentsApi,
   isReadyStatus,
-  textbooks as textbooksApi,
   type Course,
   type CurriculumNode,
-  type TextbookListItem,
-} from "@/lib/api";
+  type DocumentListItem,
+} from "@/lib/api"
 
 function formatFileSize(bytes: number) {
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
-  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} KB`;
-  return `${bytes} B`;
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`
+  if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} KB`
+  return `${bytes} B`
 }
 
 function formatDate(iso: string) {
@@ -62,173 +61,169 @@ function formatDate(iso: string) {
     month: "short",
     day: "numeric",
     year: "numeric",
-  });
+  })
 }
 
 function countTreeNodes(nodes: CurriculumNode[]): number {
-  return nodes.reduce((total, node) => total + 1 + countTreeNodes(node.children || []), 0);
+  return nodes.reduce((total, node) => total + 1 + countTreeNodes(node.children || []), 0)
 }
 
 function flattenTitles(nodes: CurriculumNode[], depth = 0): string[] {
   return nodes.flatMap((node) => [
     `${"  ".repeat(depth)}${node.title}`,
     ...flattenTitles(node.children || [], depth + 1),
-  ]);
+  ])
 }
 
-type CollectionFilter = "all" | "unassigned" | `course:${string}`;
+type CollectionFilter = "all" | "unassigned" | `course:${string}`
 
-export default function TextbooksPage() {
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [documents, setDocuments] = useState<TextbookListItem[]>([]);
-  const [selectedCollection, setSelectedCollection] = useState<CollectionFilter>("all");
-  const [loading, setLoading] = useState(true);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
-  const [detailDocument, setDetailDocument] = useState<TextbookListItem | null>(null);
-  const [detailCurriculum, setDetailCurriculum] = useState<CurriculumNode[]>([]);
-  const [loadingCurriculum, setLoadingCurriculum] = useState(false);
-  const [error, setError] = useState("");
-  const [creatingCourse, setCreatingCourse] = useState(false);
-  const [courseName, setCourseName] = useState("");
-  const [courseSubject, setCourseSubject] = useState("Vật lý");
-  const [courseLevel, setCourseLevel] = useState("");
-  const [courseDescription, setCourseDescription] = useState("");
-  const fileInputRef = useRef<HTMLInputElement>(null);
+export default function DocumentsPage() {
+  const [courses, setCourses] = useState<Course[]>([])
+  const [documents, setDocuments] = useState<DocumentListItem[]>([])
+  const [selectedCollection, setSelectedCollection] = useState<CollectionFilter>("all")
+  const [loading, setLoading] = useState(true)
+  const [isUploading, setIsUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(0)
+  const [isDragging, setIsDragging] = useState(false)
+  const [detailDocument, setDetailDocument] = useState<DocumentListItem | null>(null)
+  const [detailCurriculum, setDetailCurriculum] = useState<CurriculumNode[]>([])
+  const [loadingCurriculum, setLoadingCurriculum] = useState(false)
+  const [error, setError] = useState("")
+  const [creatingCourse, setCreatingCourse] = useState(false)
+  const [courseName, setCourseName] = useState("")
+  const [courseSubject, setCourseSubject] = useState("Physics")
+  const [courseLevel, setCourseLevel] = useState("")
+  const [courseDescription, setCourseDescription] = useState("")
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const loadData = useCallback(async () => {
     try {
       const [courseList, documentList] = await Promise.all([
         coursesApi.list(),
-        textbooksApi.list(),
-      ]);
-      setCourses(courseList);
-      setDocuments(documentList);
+        documentsApi.listAll(),
+      ])
+      setCourses(courseList)
+      setDocuments(documentList)
     } catch (loadError: unknown) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load courses and documents");
+      setError(loadError instanceof Error ? loadError.message : "Failed to load courses and documents")
     } finally {
-      setLoading(false);
+      setLoading(false)
     }
-  }, []);
+  }, [])
 
   useEffect(() => {
-    void loadData();
-  }, [loadData]);
+    void loadData()
+  }, [loadData])
 
   useEffect(() => {
-    if (selectedCollection !== "all") return;
+    if (selectedCollection !== "all") return
     if (courses.length > 0) {
-      setSelectedCollection(`course:${courses[0].id}`);
-      return;
+      setSelectedCollection(`course:${courses[0].id}`)
+      return
     }
     if (documents.some((document) => !document.course_id)) {
-      setSelectedCollection("unassigned");
+      setSelectedCollection("unassigned")
     }
-  }, [courses, documents, selectedCollection]);
+  }, [courses, documents, selectedCollection])
 
   const selectedCourseId = selectedCollection.startsWith("course:")
     ? selectedCollection.slice("course:".length)
-    : null;
+    : null
 
-  const selectedCourse = courses.find((course) => course.id === selectedCourseId) || null;
+  const selectedCourse = courses.find((course) => course.id === selectedCourseId) || null
 
   const filteredDocuments = useMemo(() => {
-    if (selectedCollection === "all") return documents;
-    if (selectedCollection === "unassigned") {
-      return documents.filter((document) => !document.course_id);
-    }
-    return documents.filter((document) => document.course_id === selectedCourseId);
-  }, [documents, selectedCollection, selectedCourseId]);
+    if (selectedCollection === "all") return documents
+    if (selectedCollection === "unassigned") return documents.filter((document) => !document.course_id)
+    return documents.filter((document) => document.course_id === selectedCourseId)
+  }, [documents, selectedCollection, selectedCourseId])
 
-  const processedCount = filteredDocuments.filter((document) => isReadyStatus(document.status)).length;
+  const processedCount = filteredDocuments.filter((document) => isReadyStatus(document.status)).length
 
   const handleCreateCourse = useCallback(async () => {
     if (!courseName.trim() || !courseSubject.trim()) {
-      setError("Course name and subject are required");
-      return;
+      setError("Course name and subject are required")
+      return
     }
-
-    setCreatingCourse(true);
-    setError("");
+    setCreatingCourse(true)
+    setError("")
     try {
       const created = await coursesApi.create({
         course_name: courseName.trim(),
         subject: courseSubject.trim(),
         academic_level: courseLevel.trim() || undefined,
         description: courseDescription.trim() || undefined,
-      });
-      setCourses((previous) => [created, ...previous]);
-      setSelectedCollection(`course:${created.id}`);
-      setCourseName("");
-      setCourseSubject("");
-      setCourseLevel("");
-      setCourseDescription("");
+      })
+      setCourses((previous) => [created, ...previous])
+      setSelectedCollection(`course:${created.id}`)
+      setCourseName("")
+      setCourseSubject("Physics")
+      setCourseLevel("")
+      setCourseDescription("")
     } catch (createError: unknown) {
-      setError(createError instanceof Error ? createError.message : "Failed to create course");
+      setError(createError instanceof Error ? createError.message : "Failed to create course")
     } finally {
-      setCreatingCourse(false);
+      setCreatingCourse(false)
     }
-  }, [courseDescription, courseLevel, courseName, courseSubject]);
+  }, [courseDescription, courseLevel, courseName, courseSubject])
 
   const handleUpload = useCallback(async (file: File) => {
-    setIsUploading(true);
-    setUploadProgress(10);
-    setError("");
+    setIsUploading(true)
+    setUploadProgress(10)
+    setError("")
 
     const interval = setInterval(() => {
-      setUploadProgress((current) => Math.min(current + 6, 90));
-    }, 250);
+      setUploadProgress((current) => Math.min(current + 6, 90))
+    }, 250)
 
     try {
-      const title = file.name.replace(/\.[^.]+$/, "");
-      if (selectedCourseId) {
-        await documentsApi.upload(selectedCourseId, title, file, "vi");
-      } else {
-        await textbooksApi.upload(title, file);
-      }
-      setUploadProgress(100);
-      await loadData();
+      const title = file.name.replace(/\.[^.]+$/, "")
+      await documentsApi.upload(title, file, {
+        course_id: selectedCourseId || undefined,
+        language: "vi",
+      })
+      setUploadProgress(100)
+      await loadData()
     } catch (uploadError: unknown) {
-      setError(uploadError instanceof Error ? uploadError.message : "Upload failed");
+      setError(uploadError instanceof Error ? uploadError.message : "Upload failed")
     } finally {
-      clearInterval(interval);
-      setIsUploading(false);
-      setUploadProgress(0);
+      clearInterval(interval)
+      setIsUploading(false)
+      setUploadProgress(0)
     }
-  }, [loadData, selectedCourseId]);
+  }, [loadData, selectedCourseId])
 
   const handleFileSelect = useCallback((files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    void handleUpload(files[0]);
-  }, [handleUpload]);
+    if (!files || files.length === 0) return
+    void handleUpload(files[0])
+  }, [handleUpload])
 
   const handleDelete = useCallback(async (id: string) => {
     try {
-      await textbooksApi.delete(id);
-      setDocuments((previous) => previous.filter((document) => document.id !== id));
+      await documentsApi.delete(id)
+      setDocuments((previous) => previous.filter((document) => document.id !== id))
       if (detailDocument?.id === id) {
-        setDetailDocument(null);
-        setDetailCurriculum([]);
+        setDetailDocument(null)
+        setDetailCurriculum([])
       }
     } catch (deleteError: unknown) {
-      setError(deleteError instanceof Error ? deleteError.message : "Delete failed");
+      setError(deleteError instanceof Error ? deleteError.message : "Delete failed")
     }
-  }, [detailDocument]);
+  }, [detailDocument])
 
-  const openDetails = useCallback(async (document: TextbookListItem) => {
-    setDetailDocument(document);
-    setDetailCurriculum([]);
-    setLoadingCurriculum(true);
+  const openDetails = useCallback(async (document: DocumentListItem) => {
+    setDetailDocument(document)
+    setDetailCurriculum([])
+    setLoadingCurriculum(true)
     try {
-      const tree = await documentsApi.getCurriculumTree(document.id);
-      setDetailCurriculum(tree);
+      const tree = await documentsApi.getCurriculumTree(document.id)
+      setDetailCurriculum(tree)
     } catch {
-      setDetailCurriculum([]);
+      setDetailCurriculum([])
     } finally {
-      setLoadingCurriculum(false);
+      setLoadingCurriculum(false)
     }
-  }, []);
+  }, [])
 
   return (
     <>
@@ -240,7 +235,7 @@ export default function TextbooksPage() {
               Course and Document Library
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Organize course spaces, upload teaching materials, and prepare structured scope for exam generation.
+              Organize course spaces, upload Physics PDFs, and prepare section-level scope for grounded exam generation.
             </p>
           </div>
           <Badge variant="secondary" className="w-fit gap-1.5">
@@ -258,13 +253,7 @@ export default function TextbooksPage() {
           </div>
         )}
 
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".pdf"
-          className="hidden"
-          onChange={(event) => handleFileSelect(event.target.files)}
-        />
+        <input ref={fileInputRef} type="file" accept=".pdf" className="hidden" onChange={(event) => handleFileSelect(event.target.files)} />
 
         <div className="grid gap-6 xl:grid-cols-[1.15fr_1.85fr]">
           <Card className="rounded-2xl shadow-sm">
@@ -278,52 +267,25 @@ export default function TextbooksPage() {
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="course-name">Course name</Label>
-                  <Input
-                    id="course-name"
-                    placeholder="Physics 101"
-                    value={courseName}
-                    onChange={(event) => setCourseName(event.target.value)}
-                  />
+                  <Input id="course-name" placeholder="Physics 101" value={courseName} onChange={(event) => setCourseName(event.target.value)} />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="course-subject">Subject</Label>
-                  <Input
-                    id="course-subject"
-                    placeholder="Vật lý"
-                    value={courseSubject}
-                    onChange={(event) => setCourseSubject(event.target.value)}
-                    readOnly
-                  />
+                  <Input id="course-subject" placeholder="Physics" value={courseSubject} onChange={(event) => setCourseSubject(event.target.value)} readOnly />
                 </div>
               </div>
-
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="course-level">Academic level</Label>
-                  <Input
-                    id="course-level"
-                    placeholder="Undergraduate"
-                    value={courseLevel}
-                    onChange={(event) => setCourseLevel(event.target.value)}
-                  />
+                  <Input id="course-level" placeholder="Undergraduate" value={courseLevel} onChange={(event) => setCourseLevel(event.target.value)} />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="course-description">Description</Label>
-                  <Input
-                    id="course-description"
-                    placeholder="Semester 1 mechanics course"
-                    value={courseDescription}
-                    onChange={(event) => setCourseDescription(event.target.value)}
-                  />
+                  <Input id="course-description" placeholder="Semester 1 mechanics course" value={courseDescription} onChange={(event) => setCourseDescription(event.target.value)} />
                 </div>
               </div>
-
               <Button onClick={() => void handleCreateCourse()} disabled={creatingCourse}>
-                {creatingCourse ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <Plus className="mr-2 h-4 w-4" />
-                )}
+                {creatingCourse ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
                 {creatingCourse ? "Creating..." : "Create course"}
               </Button>
             </CardContent>
@@ -338,41 +300,23 @@ export default function TextbooksPage() {
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
               <div className="flex flex-wrap gap-2">
-                <FilterChip
-                  active={selectedCollection === "all"}
-                  label={`All documents (${documents.length})`}
-                  onClick={() => setSelectedCollection("all")}
-                />
-                {documents.some((document) => !document.course_id) && (
-                  <FilterChip
-                    active={selectedCollection === "unassigned"}
-                    label={`Personal library (${documents.filter((document) => !document.course_id).length})`}
-                    onClick={() => setSelectedCollection("unassigned")}
-                  />
-                )}
+                <FilterChip active={selectedCollection === "all"} label={`All documents (${documents.length})`} onClick={() => setSelectedCollection("all")} />
+                {documents.some((document) => !document.course_id) ? (
+                  <FilterChip active={selectedCollection === "unassigned"} label={`Personal library (${documents.filter((document) => !document.course_id).length})`} onClick={() => setSelectedCollection("unassigned")} />
+                ) : null}
                 {courses.map((course) => (
-                  <FilterChip
-                    key={course.id}
-                    active={selectedCollection === `course:${course.id}`}
-                    label={`${course.course_name} (${course.document_count})`}
-                    onClick={() => setSelectedCollection(`course:${course.id}`)}
-                  />
+                  <FilterChip key={course.id} active={selectedCollection === `course:${course.id}`} label={`${course.course_name} (${course.document_count})`} onClick={() => setSelectedCollection(`course:${course.id}`)} />
                 ))}
               </div>
 
               <div
-                className={`rounded-2xl border-2 border-dashed p-8 text-center transition-colors ${
-                  isDragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/40 hover:bg-muted/30"
-                }`}
-                onDragOver={(event) => {
-                  event.preventDefault();
-                  setIsDragging(true);
-                }}
+                className={`rounded-2xl border-2 border-dashed p-8 text-center transition-colors ${isDragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/40 hover:bg-muted/30"}`}
+                onDragOver={(event) => { event.preventDefault(); setIsDragging(true) }}
                 onDragLeave={() => setIsDragging(false)}
                 onDrop={(event) => {
-                  event.preventDefault();
-                  setIsDragging(false);
-                  handleFileSelect(event.dataTransfer.files);
+                  event.preventDefault()
+                  setIsDragging(false)
+                  handleFileSelect(event.dataTransfer.files)
                 }}
               >
                 {isUploading ? (
@@ -381,14 +325,9 @@ export default function TextbooksPage() {
                       <CloudUpload className="h-6 w-6 animate-pulse text-primary" />
                     </div>
                     <div className="w-full max-w-xs">
-                      <p className="mb-2 text-sm font-medium text-foreground">
-                        Uploading and structuring document...
-                      </p>
+                      <p className="mb-2 text-sm font-medium text-foreground">Uploading and structuring document...</p>
                       <div className="h-2 overflow-hidden rounded-full bg-muted">
-                        <div
-                          className="h-full rounded-full bg-primary transition-all"
-                          style={{ width: `${uploadProgress}%` }}
-                        />
+                        <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${uploadProgress}%` }} />
                       </div>
                       <p className="mt-2 text-xs text-muted-foreground">{uploadProgress}% complete</p>
                     </div>
@@ -399,14 +338,8 @@ export default function TextbooksPage() {
                       <Upload className="h-6 w-6 text-muted-foreground" />
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-foreground">
-                        {selectedCourse
-                          ? `Upload into ${selectedCourse.course_name}`
-                          : "Upload into your personal library"}
-                      </p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Supports PDF only. Structured curriculum and retrieval evidence will be built from this source.
-                      </p>
+                      <p className="text-sm font-medium text-foreground">{selectedCourse ? `Upload into ${selectedCourse.course_name}` : "Upload into your personal library"}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">Supports PDF only. Structured curriculum and retrieval evidence will be built from this source.</p>
                     </div>
                     <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>
                       <Upload className="mr-2 h-3.5 w-3.5" />
@@ -426,33 +359,21 @@ export default function TextbooksPage() {
         </div>
 
         {loading ? (
-          <div className="flex items-center justify-center py-16">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-          </div>
+          <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
         ) : filteredDocuments.length === 0 ? (
           <Card className="rounded-2xl border-dashed shadow-sm">
             <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted">
-                <BookOpen className="h-7 w-7 text-muted-foreground" />
-              </div>
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted"><BookOpen className="h-7 w-7 text-muted-foreground" /></div>
               <div>
                 <p className="text-base font-semibold text-foreground">No documents in this collection</p>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  Create a course or upload your first document to start building curriculum-aware exams.
-                </p>
+                <p className="mt-1 text-sm text-muted-foreground">Create a course or upload your first document to start building curriculum-aware exams.</p>
               </div>
             </CardContent>
           </Card>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {filteredDocuments.map((document) => (
-              <DocumentCard
-                key={document.id}
-                document={document}
-                course={courses.find((course) => course.id === document.course_id) || null}
-                onDelete={handleDelete}
-                onViewDetails={openDetails}
-              />
+              <DocumentCard key={document.id} document={document} course={courses.find((course) => course.id === document.course_id) || null} onDelete={handleDelete} onViewDetails={openDetails} />
             ))}
           </div>
         )}
@@ -461,11 +382,9 @@ export default function TextbooksPage() {
           <DialogContent className="max-w-2xl">
             <DialogHeader>
               <DialogTitle>{detailDocument?.title}</DialogTitle>
-              <DialogDescription>
-                Review processing status, curriculum structure, and generation readiness for this document.
-              </DialogDescription>
+              <DialogDescription>Review processing status, curriculum structure, and generation readiness for this document.</DialogDescription>
             </DialogHeader>
-            {detailDocument && (
+            {detailDocument ? (
               <div className="flex flex-col gap-5 pt-2">
                 <div className="grid gap-3 sm:grid-cols-2">
                   <DetailItem label="Upload date" value={formatDate(detailDocument.created_at)} icon={<Calendar className="h-4 w-4" />} />
@@ -478,18 +397,16 @@ export default function TextbooksPage() {
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <p className="text-sm font-medium text-foreground">Curriculum tree</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        The extracted tree is what the generator uses for strict scope selection.
-                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">The extracted tree is what generation uses for strict scope selection.</p>
                     </div>
-                    {isReadyStatus(detailDocument.status) && (
+                    {isReadyStatus(detailDocument.status) ? (
                       <Button asChild size="sm">
                         <Link href="/dashboard/generate">
                           <Sparkles className="mr-2 h-4 w-4" />
                           Generate exam
                         </Link>
                       </Button>
-                    )}
+                    ) : null}
                   </div>
 
                   <div className="mt-4 rounded-lg border bg-background p-3">
@@ -499,9 +416,7 @@ export default function TextbooksPage() {
                         Loading curriculum tree...
                       </div>
                     ) : detailCurriculum.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">
-                        No curriculum tree is available yet. The document may still be processing or it was uploaded through the legacy flow.
-                      </p>
+                      <p className="text-sm text-muted-foreground">No curriculum tree is available yet. The document may still be processing or it was uploaded through the legacy flow.</p>
                     ) : (
                       <div className="space-y-3">
                         <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -510,9 +425,7 @@ export default function TextbooksPage() {
                         </div>
                         <div className="max-h-64 overflow-y-auto rounded-lg bg-muted/30 p-3">
                           {flattenTitles(detailCurriculum).map((title) => (
-                            <p key={title} className="py-0.5 text-sm text-foreground">
-                              {title}
-                            </p>
+                            <p key={title} className="py-0.5 text-sm text-foreground">{title}</p>
                           ))}
                         </div>
                       </div>
@@ -520,12 +433,12 @@ export default function TextbooksPage() {
                   </div>
                 </div>
               </div>
-            )}
+            ) : null}
           </DialogContent>
         </Dialog>
       </div>
     </>
-  );
+  )
 }
 
 function FilterChip({
@@ -533,22 +446,18 @@ function FilterChip({
   label,
   onClick,
 }: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
+  active: boolean
+  label: string
+  onClick: () => void
 }) {
   return (
     <button
       onClick={onClick}
-      className={`rounded-full border px-3 py-1.5 text-sm transition-colors ${
-        active
-          ? "border-primary bg-primary text-primary-foreground"
-          : "border-border bg-background text-foreground hover:border-primary/40 hover:bg-muted"
-      }`}
+      className={`rounded-full border px-3 py-1.5 text-sm transition-colors ${active ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-foreground hover:border-primary/40 hover:bg-muted"}`}
     >
       {label}
     </button>
-  );
+  )
 }
 
 function SummaryCard({
@@ -556,9 +465,9 @@ function SummaryCard({
   value,
   icon: Icon,
 }: {
-  label: string;
-  value: string;
-  icon: typeof BookOpen;
+  label: string
+  value: string
+  icon: typeof BookOpen
 }) {
   return (
     <div className="rounded-xl border bg-muted/20 p-4">
@@ -568,7 +477,7 @@ function SummaryCard({
       </div>
       <p className="mt-2 text-2xl font-semibold text-foreground">{value}</p>
     </div>
-  );
+  )
 }
 
 function DocumentCard({
@@ -577,12 +486,12 @@ function DocumentCard({
   onDelete,
   onViewDetails,
 }: {
-  document: TextbookListItem;
-  course: Course | null;
-  onDelete: (id: string) => void;
-  onViewDetails: (document: TextbookListItem) => void;
+  document: DocumentListItem
+  course: Course | null
+  onDelete: (id: string) => void
+  onViewDetails: (document: DocumentListItem) => void
 }) {
-  const ready = isReadyStatus(document.status);
+  const ready = isReadyStatus(document.status)
 
   return (
     <Card className="group rounded-2xl shadow-sm transition-shadow hover:shadow-md">
@@ -602,19 +511,16 @@ function DocumentCard({
                 <Eye className="mr-2 h-4 w-4" />
                 View details
               </DropdownMenuItem>
-              {ready && (
+              {ready ? (
                 <DropdownMenuItem asChild>
                   <Link href="/dashboard/generate">
                     <Sparkles className="mr-2 h-4 w-4" />
                     Generate exam
                   </Link>
                 </DropdownMenuItem>
-              )}
+              ) : null}
               <DropdownMenuSeparator />
-              <DropdownMenuItem
-                className="text-destructive focus:text-destructive"
-                onClick={() => onDelete(document.id)}
-              >
+              <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => onDelete(document.id)}>
                 <Trash2 className="mr-2 h-4 w-4" />
                 Delete
               </DropdownMenuItem>
@@ -624,53 +530,49 @@ function DocumentCard({
 
         <div className="mt-4">
           <h3 className="line-clamp-2 text-sm font-semibold text-foreground">{document.title}</h3>
-          <p className="mt-1.5 text-xs text-muted-foreground">
-            {document.file_type.toUpperCase()} · {formatFileSize(document.file_size)}
-          </p>
+          <p className="mt-1.5 text-xs text-muted-foreground">{document.file_type.toUpperCase()} - {formatFileSize(document.file_size)}</p>
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
-          <Badge variant={ready ? "secondary" : "outline"} className="capitalize">
-            {document.status}
-          </Badge>
-          {course ? (
-            <Badge variant="outline">{course.course_name}</Badge>
-          ) : (
-            <Badge variant="outline">Personal library</Badge>
-          )}
+          <Badge variant={ready ? "secondary" : "outline"} className="capitalize">{document.status}</Badge>
+          {course ? <Badge variant="outline">{course.course_name}</Badge> : <Badge variant="outline">Personal library</Badge>}
         </div>
 
-        <div className="mt-4 grid gap-2 text-xs text-muted-foreground">
-          <div className="flex items-center gap-2">
-            <Calendar className="h-3.5 w-3.5" />
-            {formatDate(document.created_at)}
-          </div>
-          <div className="flex items-center gap-2">
-            <Layers className="h-3.5 w-3.5" />
-            {document.chapter_count ? `${document.chapter_count} chapters detected` : `${document.total_chunks} chunks indexed`}
-          </div>
+        <div className="mt-4 grid grid-cols-3 gap-3 text-xs text-muted-foreground">
+          <DocumentStat label="Pages" value={String(document.total_pages_or_slides)} />
+          <DocumentStat label="Chunks" value={String(document.total_chunks)} />
+          <DocumentStat label="Created" value={formatDate(document.created_at)} />
         </div>
       </CardContent>
     </Card>
-  );
+  )
+}
+
+function DocumentStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border bg-muted/20 p-2 text-center">
+      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="mt-1 text-sm font-medium text-foreground">{value}</p>
+    </div>
+  )
 }
 
 function DetailItem({
-  icon,
   label,
   value,
+  icon,
 }: {
-  icon: ReactNode;
-  label: string;
-  value: string;
+  label: string
+  value: string
+  icon: ReactNode
 }) {
   return (
-    <div className="rounded-xl border bg-muted/20 p-3">
+    <div className="rounded-xl border bg-muted/20 p-4">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         {icon}
         {label}
       </div>
       <p className="mt-2 text-sm font-medium text-foreground">{value}</p>
     </div>
-  );
+  )
 }

@@ -19,6 +19,8 @@ from database import Base
 
 
 class ExamType(str, enum.Enum):
+    # Legacy enum values are kept for DB compatibility.
+    # Active Phase 1 runtime accepts MCQ only and rejects essay/mixed at the API/service layer.
     MCQ = "mcq"
     ESSAY = "essay"
     MIXED = "mixed"
@@ -41,8 +43,19 @@ class ExamStatus(str, enum.Enum):
 
 
 class QuestionType(str, enum.Enum):
+    # Legacy enum values are kept for DB compatibility.
+    # Active Phase 1 runtime accepts MCQ only.
     MCQ = "mcq"
     ESSAY = "essay"
+
+
+class FeedbackSignalType(str, enum.Enum):
+    RETRIEVAL_SUMMARY = "retrieval_summary"
+    VERIFIER_WARNING = "verifier_warning"
+    VERIFIER_FAILED = "verifier_failed"
+    HUMAN_EDIT = "human_edit"
+    REGENERATE_REQUESTED = "regenerate_requested"
+    EXAM_PUBLISHED = "exam_published"
 
 
 class BloomLevel(str, enum.Enum):
@@ -116,6 +129,12 @@ class Exam(Base):
         back_populates="exam",
         cascade="all, delete-orphan",
         foreign_keys="ExamVersion.exam_id",
+    )
+    feedback_events = relationship(
+        "FeedbackEvent",
+        back_populates="exam",
+        cascade="all, delete-orphan",
+        foreign_keys="FeedbackEvent.exam_id",
     )
     current_version = relationship(
         "ExamVersion",
@@ -242,6 +261,12 @@ class ExamVersion(Base):
         back_populates="exam_version",
         cascade="all, delete-orphan",
     )
+    feedback_events = relationship(
+        "FeedbackEvent",
+        back_populates="exam_version",
+        cascade="all, delete-orphan",
+        foreign_keys="FeedbackEvent.exam_version_id",
+    )
 
 
 class ExamQuestion(Base):
@@ -307,3 +332,31 @@ class EditOperation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     exam_version = relationship("ExamVersion", back_populates="edit_operations")
+
+
+class FeedbackEvent(Base):
+    __tablename__ = "feedback_events"
+
+    id: Mapped[str] = mapped_column(
+        String,
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    exam_id: Mapped[str] = mapped_column(ForeignKey("exams.id"), nullable=False)
+    exam_version_id: Mapped[str] = mapped_column(ForeignKey("exam_versions.id"), nullable=True)
+    question_id: Mapped[str] = mapped_column(ForeignKey("exam_questions.id"), nullable=True)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=True)
+    signal_type: Mapped[FeedbackSignalType] = mapped_column(
+        SAEnum(FeedbackSignalType, native_enum=False),
+        nullable=False,
+    )
+    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="info")
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    exam = relationship("Exam", back_populates="feedback_events", foreign_keys=[exam_id])
+    exam_version = relationship(
+        "ExamVersion",
+        back_populates="feedback_events",
+        foreign_keys=[exam_version_id],
+    )

@@ -1,178 +1,90 @@
 """
-Question Generator Agent — Micro-Prompting
+Question generator for the active Phase 1 runtime.
 
-Responsibilities:
-- Generate exam questions from blueprint slots + retrieved context (legacy)
-- NEW: Generate questions from individual chunks (micro-prompting)
-  Each LLM call receives only ONE chunk (~500-1500 chars) and produces 1-2 questions
-  This keeps input+output tokens minimal, avoiding token overflow
-- Support MCQ and Essay question types
-- Ground all content in retrieved textbook material
-- Produce structured JSON output per question
-- Respect difficulty scores and Bloom's taxonomy levels
+Scope:
+- Physics PDFs only
+- Vietnamese output
+- MCQ single-answer only
+- Strict grounding against retrieved chunks
+- Regenerate through the same scoped evidence path
 """
-import json
-import re
-import logging
+from __future__ import annotations
+
 import asyncio
-import time
+import json
+import logging
+import re
 from dataclasses import dataclass, field
 
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from agents.state import ChunkAssignment, GeneratedQuestion, QuestionSlot, RetrievedContext
+from config import settings
 
 logger = logging.getLogger(__name__)
 
-from config import settings
-from agents.state import GeneratedQuestion, QuestionSlot, RetrievedContext, ChunkAssignment
 
+MCQ_SYSTEM_PROMPT = """You write Vietnamese Physics multiple-choice questions.
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# System prompts — legacy (per-slot generation)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Hard rules:
+1. Use only the provided source text.
+2. Do not add outside knowledge.
+3. Return valid JSON only.
+4. Each question must have exactly 4 options labeled A, B, C, D.
+5. There must be exactly one correct answer.
+6. The explanation must point back to the source material.
 
-MCQ_SYSTEM_PROMPT = """You are an expert exam question writer. Generate a multiple-choice question based on the provided textbook context.
-
-STRICT RULES:
-1. The question MUST be answerable from the provided context only
-2. Do NOT introduce information not present in the context
-3. Create exactly 4 options (A, B, C, D) with only ONE correct answer
-4. Distractors (wrong options) must be plausible but clearly wrong based on the context
-5. Match the specified difficulty level and Bloom's taxonomy level
-
-Bloom's Taxonomy Guide:
-- remember: Recall facts, definitions, terminology
-- understand: Explain concepts, summarize, paraphrase  
-- apply: Use knowledge in new situations, solve problems
-- analyze: Break down information, identify patterns, compare/contrast
-- evaluate: Judge, critique, assess validity
-- create: Design, construct, produce original work
-
-Difficulty Guide (0.0 = easiest, 1.0 = hardest):
-- 0.0-0.3: Straightforward recall or basic understanding
-- 0.4-0.6: Requires combining concepts, applying to scenarios
-- 0.7-1.0: Complex analysis, subtle distinctions, multi-step reasoning
-
-Respond ONLY with valid JSON:
+Return JSON:
 {
-  "content": "The question text",
+  "content": "...",
   "options": [
-    {"label": "A", "text": "option text"},
-    {"label": "B", "text": "option text"},
-    {"label": "C", "text": "option text"},
-    {"label": "D", "text": "option text"}
+    {"label": "A", "text": "..."},
+    {"label": "B", "text": "..."},
+    {"label": "C", "text": "..."},
+    {"label": "D", "text": "..."}
   ],
   "correct_answer": "A",
-  "explanation": "Brief explanation of why the answer is correct, referencing the source material"
+  "explanation": "..."
 }"""
 
 
-ESSAY_SYSTEM_PROMPT = """You are an expert exam question writer. Generate an essay/short-answer question based on the provided textbook context.
+MICRO_PROMPT_SYSTEM = """Ban la chuyen gia ra de thi Vat ly bang tieng Viet.
 
-STRICT RULES:
-1. The question MUST be answerable from the provided context only
-2. Do NOT introduce information not present in the context
-3. Match the specified difficulty level and Bloom's taxonomy level
-4. For applied questions, create realistic scenarios that use ONLY concepts from the context
-5. Provide a model answer that references specific content from the context
+Chi tao cau hoi MCQ 4 lua chon, 1 dap an dung, dua duy nhat vao doan van ban duoc cung cap.
+Moi item trong JSON array phai co:
+- question_type = "mcq"
+- difficulty = "easy" | "medium" | "hard"
+- bloom_level
+- content
+- options
+- correct_answer
+- explanation
 
-Bloom's Taxonomy Guide:
-- remember: Recall and list specific facts
-- understand: Explain concepts in own words
-- apply: Use concepts to solve a practical problem
-- analyze: Compare, contrast, examine relationships
-- evaluate: Assess, critique, justify positions
-- create: Design solutions, propose new approaches
-
-Respond ONLY with valid JSON:
-{
-  "content": "The essay question text",
-  "correct_answer": "Model answer that demonstrates what a complete response should cover",
-  "explanation": "Grading rubric or key points to look for"
-}"""
+Chi tra ve JSON array, khong them van ban khac."""
 
 
-APPLIED_QUESTION_PROMPT = """Additionally, this is an APPLIED question. Create a realistic real-world scenario 
-that requires applying the concepts from the context. The scenario should:
-- Be practical and relatable
-- Only require knowledge that EXISTS in the provided context
-- NOT use concepts from topics beyond what is covered in the context
-- Test the student's ability to transfer textbook knowledge to new situations"""
+MULTI_CHUNK_SYSTEM_PROMPT = """Ban la chuyen gia ra de thi Vat ly bang tieng Viet.
+
+Ban nhan nhieu doan van ban va phai tao cau hoi MCQ tong hop thong tin tu cac doan do.
+Chi dung thong tin co trong cac doan van ban duoc cung cap.
+Moi item trong JSON array phai co:
+- question_type = "mcq"
+- difficulty = "medium" | "hard"
+- bloom_level
+- content
+- options
+- correct_answer
+- explanation
+
+Chi tra ve JSON array, khong them van ban khac."""
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Micro-prompting system prompt — Bloom's Taxonomy integrated
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-MICRO_PROMPT_SYSTEM = """Đóng vai trò là một chuyên gia ra đề thi. Bạn sẽ nhận được MỘT đoạn văn bản ngắn từ sách giáo khoa và yêu cầu sinh câu hỏi.
-
-QUY TẮC TUYỆT ĐỐI:
-1. Chỉ dựa DUY NHẤT vào đoạn văn bản được cung cấp
-2. KHÔNG thêm thông tin ngoài đoạn văn bản
-3. Mỗi câu hỏi phải có đáp án đúng và giải thích
-
-CÁC MỨC ĐỘ BLOOM:
-- Dễ (Easy) = Nhớ (Remember) & Hiểu (Understand): Hỏi về định nghĩa, khái niệm, liệt kê, giải thích ý nghĩa
-- Trung bình (Medium) = Vận dụng (Apply) & Phân tích (Analyze): Hỏi cách giải quyết vấn đề, so sánh, phân loại, tìm mối quan hệ
-- Khó (Hard) = Đánh giá (Evaluate) & Sáng tạo (Create): Nhận định ưu/nhược điểm, thiết kế giải pháp mới, phản biện
-
-ĐỊNH DẠNG TRẢ VỀ — JSON array:
-[
-  {
-    "question_type": "mcq" hoặc "essay",
-    "difficulty": "easy" / "medium" / "hard",
-    "bloom_level": "remember" / "understand" / "apply" / "analyze" / "evaluate" / "create",
-    "content": "Nội dung câu hỏi",
-    "options": [{"label": "A", "text": "..."}, {"label": "B", "text": "..."}, {"label": "C", "text": "..."}, {"label": "D", "text": "..."}],
-    "correct_answer": "A (cho MCQ) hoặc câu trả lời mẫu (cho essay)",
-    "explanation": "Giải thích ngắn gọn"
-  }
-]
-
-Lưu ý: Nếu question_type là "essay" thì KHÔNG cần trường "options".
-Chỉ trả về JSON, không thêm text nào khác."""
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Multi-chunk synthesis prompt (Phase 3)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-MULTI_CHUNK_SYSTEM_PROMPT = """Đóng vai trò là một chuyên gia ra đề thi. Bạn sẽ nhận được NHIỀU đoạn văn bản từ sách giáo khoa và yêu cầu sinh câu hỏi ĐÒI HỎI TỔNG HỢP thông tin từ nhiều đoạn.
-
-QUY TẮC TUYỆT ĐỐI:
-1. Chỉ dựa DUY NHẤT vào các đoạn văn bản được cung cấp
-2. KHÔNG thêm thông tin ngoài các đoạn văn bản
-3. Câu hỏi PHẢI đòi hỏi người đọc kết hợp/so sánh/tổng hợp thông tin từ NHIỀU đoạn, KHÔNG chỉ dựa vào 1 đoạn duy nhất
-4. Mỗi câu hỏi phải có đáp án đúng và giải thích dựa trên thông tin từ các đoạn
-
-CÁC MỨC ĐỘ BLOOM:
-- Trung bình (Medium) = Vận dụng (Apply) & Phân tích (Analyze): So sánh khái niệm giữa các đoạn, phân loại, tìm mối quan hệ
-- Khó (Hard) = Đánh giá (Evaluate) & Sáng tạo (Create): Nhận định ưu/nhược điểm dựa trên nhiều nguồn, thiết kế giải pháp tổng hợp
-
-ĐỊNH DẠNG TRẢ VỀ — JSON array:
-[
-  {
-    "question_type": "mcq" hoặc "essay",
-    "difficulty": "medium" / "hard",
-    "bloom_level": "apply" / "analyze" / "evaluate" / "create",
-    "content": "Nội dung câu hỏi (phải kết hợp thông tin từ nhiều đoạn)",
-    "options": [{"label": "A", "text": "..."}, {"label": "B", "text": "..."}, {"label": "C", "text": "..."}, {"label": "D", "text": "..."}],
-    "correct_answer": "A (cho MCQ) hoặc câu trả lời mẫu (cho essay)",
-    "explanation": "Giải thích — chỉ rõ thông tin lấy từ đoạn nào"
-  }
-]
-
-Lưu ý: Nếu question_type là "essay" thì KHÔNG cần trường "options".
-Chỉ trả về JSON, không thêm text nào khác."""
+APPLIED_QUESTION_PROMPT = """Additionally, this is an APPLIED question. Create a realistic scenario
+that still relies only on the provided source text."""
 
 
 @dataclass
 class BundleContext:
-    """Normalized bundle metadata for generation.
-
-    Keeps the generator compatible with both the old assignment shape
-    (`chunk_id`, `chunk_text`, `context_chunks`) and the newer richer shape
-    (`primary_chunk`, `supporting_chunks`, `bundle_strategy`, `evidence_roles`).
-    """
     primary_chunk_id: str
     primary_chunk_text: str
     bundle_strategy: str
@@ -185,18 +97,16 @@ class BundleContext:
 
 
 class QuestionGeneratorAgent:
-    """Generates exam questions grounded in retrieved textbook content."""
+    """MCQ-only generator for the active MVP path."""
 
     def __init__(self, llm):
         self.llm = llm
 
     def _normalize_bundle_context(self, chunk_assignment: ChunkAssignment) -> BundleContext:
-        """Normalize chunk assignment metadata into a single bundle view."""
         primary = getattr(chunk_assignment, "primary_chunk", None) or {
             "chunk_id": chunk_assignment.chunk_id,
             "chunk_text": chunk_assignment.chunk_text,
         }
-
         primary_chunk_id = primary.get("chunk_id", chunk_assignment.chunk_id)
         primary_chunk_text = primary.get("chunk_text", chunk_assignment.chunk_text)
 
@@ -205,14 +115,11 @@ class QuestionGeneratorAgent:
         if primary_chunk_id:
             evidence_roles.setdefault(primary_chunk_id, "primary")
 
-        source_chunk_ids = []
-        explicit_source_chunks = getattr(chunk_assignment, "source_chunks", None)
+        explicit_source_chunks = list(getattr(chunk_assignment, "source_chunks", []) or [])
         if explicit_source_chunks:
-            source_chunk_ids = list(explicit_source_chunks)
-        elif hasattr(chunk_assignment, "get_source_chunk_ids"):
-            source_chunk_ids = chunk_assignment.get_source_chunk_ids()
+            source_chunk_ids = explicit_source_chunks
         else:
-            source_chunk_ids = [primary_chunk_id]
+            source_chunk_ids = [primary_chunk_id] if primary_chunk_id else []
             for chunk in supporting_chunks:
                 chunk_id = chunk.get("chunk_id")
                 if chunk_id and chunk_id not in source_chunk_ids:
@@ -235,38 +142,27 @@ class QuestionGeneratorAgent:
         bundle: BundleContext,
         max_chars: int,
     ) -> tuple[list[str], list[str], list[str]]:
-        """Format primary/supporting chunks for prompt input and traceability."""
         segments: list[str] = []
         all_chunk_ids: list[str] = []
         all_chunk_texts: list[str] = []
 
-        primary_text = bundle.primary_chunk_text
-        if len(primary_text) > max_chars:
-            primary_text = primary_text[:max_chars] + "..."
-        segments.append(
-            "=== NGUỒN TRUNG TÂM / PRIMARY CHUNK ===\n\n"
-            f"{primary_text}"
-        )
+        primary_text = bundle.primary_chunk_text[:max_chars]
+        segments.append(f"=== PRIMARY CHUNK ===\n\n{primary_text}")
         all_chunk_ids.append(bundle.primary_chunk_id)
         all_chunk_texts.append(bundle.primary_chunk_text[:500])
 
-        for i, extra in enumerate(bundle.supporting_chunks, start=2):
-            extra_text = extra.get("chunk_text", "")
-            if len(extra_text) > max_chars:
-                extra_text = extra_text[:max_chars] + "..."
-            chunk_id = extra.get("chunk_id", f"support-{i}")
+        for index, extra in enumerate(bundle.supporting_chunks, start=1):
+            extra_text = (extra.get("chunk_text", "") or "")[:max_chars]
+            chunk_id = extra.get("chunk_id", f"support-{index}")
             role = bundle.evidence_roles.get(chunk_id, extra.get("role", "support"))
-            segments.append(f"=== NGUỒN BỔ TRỢ {i - 1} ({role}) ===\n\n{extra_text}")
+            segments.append(f"=== SUPPORT {index} ({role}) ===\n\n{extra_text}")
             if chunk_id not in all_chunk_ids:
                 all_chunk_ids.append(chunk_id)
-                all_chunk_texts.append(extra.get("chunk_text", "")[:500])
+                all_chunk_texts.append((extra.get("chunk_text", "") or "")[:500])
 
         return segments, all_chunk_ids, all_chunk_texts
 
-    def _build_single_source_evidence(
-        self,
-        chunk_assignment: ChunkAssignment,
-    ) -> list[dict]:
+    def _build_single_source_evidence(self, chunk_assignment: ChunkAssignment) -> list[dict]:
         return [
             {
                 "chunk_id": chunk_assignment.chunk_id,
@@ -276,10 +172,7 @@ class QuestionGeneratorAgent:
             }
         ]
 
-    def _build_bundle_source_evidence(
-        self,
-        bundle: BundleContext,
-    ) -> list[dict]:
+    def _build_bundle_source_evidence(self, bundle: BundleContext) -> list[dict]:
         evidence = [
             {
                 "chunk_id": bundle.primary_chunk_id,
@@ -305,7 +198,7 @@ class QuestionGeneratorAgent:
         return evidence
 
     def _build_context_source_evidence(self, context: RetrievedContext) -> list[dict]:
-        evidence = []
+        evidence: list[dict] = []
         for chunk in context.chunks:
             metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
             evidence.append(
@@ -322,14 +215,15 @@ class QuestionGeneratorAgent:
         return evidence
 
     def _normalize_rubric(self, question_type: str, payload: dict) -> dict | None:
+        _ = question_type
         rubric = payload.get("rubric")
-        if isinstance(rubric, dict):
-            return rubric
-        if question_type == "essay":
-            explanation = (payload.get("explanation") or "").strip()
-            if explanation:
-                return {"guidance": explanation}
-        return None
+        return rubric if isinstance(rubric, dict) else None
+
+    def _assert_mcq_only_assignments(self, assignments: list[dict]) -> None:
+        for assignment in assignments:
+            question_type = str(assignment.get("question_type") or "").strip().lower()
+            if question_type != "mcq":
+                raise ValueError("Active MVP runtime only supports MCQ generation assignments")
 
     def _build_bundle_user_message(
         self,
@@ -337,183 +231,108 @@ class QuestionGeneratorAgent:
         bundle: BundleContext,
         combined_text: str,
     ) -> str:
-        """Build a strategy-aware prompt for local/semantic bundle generation."""
+        self._assert_mcq_only_assignments(assignments)
         task_descriptions = []
         for assignment in assignments:
-            diff = assignment["difficulty"]
-            q_type = assignment["question_type"]
-
-            if diff == "medium":
-                bloom_desc = (
-                    "vận dụng/phân tích: so sánh khái niệm giữa các đoạn, "
-                    "phân loại, tìm mối quan hệ"
-                )
+            difficulty = assignment["difficulty"]
+            if difficulty == "medium":
+                bloom_desc = "tong hop, so sanh, hoac lien ket thong tin"
             else:
-                bloom_desc = (
-                    "đánh giá/sáng tạo: nhận định ưu/nhược điểm dựa trên "
-                    "nhiều nguồn, thiết kế giải pháp tổng hợp"
-                )
-
-            type_desc = (
-                "trắc nghiệm (MCQ, 4 lựa chọn A-D)"
-                if q_type == "mcq"
-                else "tự luận (essay)"
-            )
+                bloom_desc = "phan tich sau, danh gia, hoac ket hop nhieu y"
             task_descriptions.append(
-                f"- 1 câu hỏi {type_desc}, mức độ {diff.upper()} ({bloom_desc})"
+                f"- 1 cau hoi MCQ 4 lua chon, do kho {difficulty.upper()} ({bloom_desc})"
             )
 
-        strategy_guidance = {
-            "local_multi": (
-                "Ưu tiên dùng nguồn trung tâm làm trục chính, sau đó kết nối với các nguồn bổ trợ "
-                "gần về cấu trúc/chủ đề để tạo câu hỏi tổng hợp mạch lạc."
-            ),
-            "semantic_multi": (
-                "Ưu tiên tổng hợp ý từ nguồn trung tâm với các nguồn bổ trợ có quan hệ khái niệm, "
-                "ví dụ định nghĩa - ví dụ - ngoại lệ - so sánh, thay vì chỉ gom các đoạn gần nhau."
-            ),
-            "multi": (
-                "Dùng nguồn trung tâm làm neo chính, các nguồn bổ trợ để mở rộng, đối chiếu hoặc minh họa."
-            ),
-        }
-
-        task_list = "\n".join(task_descriptions)
         source_summary = ", ".join(bundle.source_chunk_ids)
-
+        task_list = "\n".join(task_descriptions)
         return (
-            f"Dựa vào CÁC đoạn văn bản dưới đây, hãy sinh ra chính xác "
-            f"{len(assignments)} câu hỏi TỔNG HỢP.\n\n"
-            f"Chunk mode: {bundle.chunk_mode}\n"
+            f"Hay tao chinh xac {len(assignments)} cau hoi MCQ tong hop.\n\n"
             f"Bundle strategy: {bundle.bundle_strategy}\n"
-            f"Bundle score: {bundle.bundle_score:.2f}\n"
-            f"Primary chunk: {bundle.primary_chunk_id}\n"
-            f"Supporting chunks: {[c.get('chunk_id') for c in bundle.supporting_chunks]}\n"
             f"Traceable source chunks: {source_summary}\n"
             f"Assignment reason: {bundle.assignment_reason or 'n/a'}\n\n"
-            f"YÊU CẦU QUAN TRỌNG:\n"
-            f"- Chunk chính là nguồn trung tâm, phải được phản ánh trong nội dung câu hỏi.\n"
-            f"- Supporting chunks chỉ dùng để bổ trợ, mở rộng, đối chiếu hoặc tổng hợp.\n"
-            f"- Không được bỏ qua chunk chính để chỉ hỏi từ chunk phụ.\n"
-            f"- Giải thích phải có khả năng truy vết về các source chunks.\n"
-            f"- {strategy_guidance.get(bundle.bundle_strategy, strategy_guidance['multi'])}\n\n"
             f"{task_list}\n\n"
             f"{combined_text}\n\n"
-            f"=== HẾT VĂN BẢN ===\n\n"
-            f"Trả về JSON array chứa đúng {len(assignments)} câu hỏi."
+            f"Tra ve JSON array dung {len(assignments)} item."
         )
-
-    # ─── Micro-prompting: generate from a single chunk ──────────────
 
     async def generate_from_single_chunk(
         self,
         chunk_assignment: ChunkAssignment,
         constraints: dict,
     ) -> list[GeneratedQuestion]:
-        """
-        Generate questions from a single chunk using micro-prompting.
-
-        Each LLM call receives only ONE chunk of text and generates 1-2 questions.
-        Includes retry with exponential backoff for rate limit errors (429).
-        """
         assignments = chunk_assignment.assignments
         if not assignments:
             return []
+        self._assert_mcq_only_assignments(assignments)
 
-        # Truncate chunk text to keep token usage low
-        max_chars = settings.MAX_CHUNK_CHARS
-        chunk_text = chunk_assignment.chunk_text
-        if len(chunk_text) > max_chars:
-            chunk_text = chunk_text[:max_chars] + "..."
-            logger.debug(
-                f"Chunk {chunk_assignment.chunk_id} truncated: "
-                f"{len(chunk_assignment.chunk_text)} -> {max_chars} chars"
-            )
-
-        # Build the micro-prompt
+        chunk_text = chunk_assignment.chunk_text[: settings.MAX_CHUNK_CHARS]
         task_descriptions = []
-        for a in assignments:
-            diff = a["difficulty"]
-            q_type = a["question_type"]
-
-            if diff == "easy":
-                bloom_desc = "kiểm tra mức độ ghi nhớ/hiểu: định nghĩa, khái niệm, liệt kê"
-            elif diff == "medium":
-                bloom_desc = "kiểm tra mức độ vận dụng/phân tích: giải quyết vấn đề, so sánh, phân loại"
+        for assignment in assignments:
+            difficulty = assignment["difficulty"]
+            if difficulty == "easy":
+                bloom_desc = "remember/understand"
+            elif difficulty == "medium":
+                bloom_desc = "apply/analyze"
             else:
-                bloom_desc = "kiểm tra mức độ đánh giá/sáng tạo: nhận định ưu/nhược, thiết kế giải pháp"
-
-            type_desc = "trắc nghiệm (MCQ, 4 lựa chọn A-D)" if q_type == "mcq" else "tự luận (essay)"
+                bloom_desc = "evaluate/create"
             task_descriptions.append(
-                f"- 1 câu hỏi {type_desc}, mức độ {diff.upper()} ({bloom_desc})"
+                f"- 1 MCQ 4 lua chon, do kho {difficulty.upper()} ({bloom_desc})"
             )
 
-        task_list = "\n".join(task_descriptions)
+        user_message = (
+            f"Hay tao chinh xac {len(assignments)} cau hoi dua duy nhat vao doan van ban sau.\n\n"
+            f"{chr(10).join(task_descriptions)}\n\n"
+            f"=== SOURCE TEXT ===\n\n{chunk_text}\n\n=== END SOURCE TEXT ===\n\n"
+            f"Tra ve JSON array dung {len(assignments)} item."
+        )
 
-        user_message = f"""Dựa duy nhất vào đoạn văn bản dưới đây, hãy sinh ra chính xác {len(assignments)} câu hỏi:
-
-{task_list}
-
-=== ĐOẠN VĂN BẢN ===
-
-{chunk_text}
-
-=== HẾT VĂN BẢN ===
-
-Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
-
-        # Add strict grounding if enabled
         extra = ""
         if constraints.get("strict_grounding", True):
             extra = (
-                "\n\nLƯU Ý QUAN TRỌNG: Bạn đang ở chế độ STRICT GROUNDING. "
-                "Mọi thông tin trong câu hỏi PHẢI có trong đoạn văn bản trên. "
-                "KHÔNG sử dụng kiến thức bên ngoài."
+                "\n\nSTRICT GROUNDING: every fact in the question must be directly supported "
+                "by the provided source text."
             )
 
         messages = [
             SystemMessage(content=MICRO_PROMPT_SYSTEM + extra),
             HumanMessage(content=user_message),
         ]
-
-        # Retry with exponential backoff on rate limit errors
         questions_data = await self._invoke_with_retry(messages, chunk_assignment.chunk_id)
 
-        # Convert to GeneratedQuestion objects
-        generated = []
+        generated: list[GeneratedQuestion] = []
         source_evidence = self._build_single_source_evidence(chunk_assignment)
-        for i, q_data in enumerate(questions_data):
-            if i >= len(assignments):
+        for index, payload in enumerate(questions_data):
+            if index >= len(assignments):
                 break
-
-            a = assignments[i]
-            options = q_data.get("options") if q_data.get("question_type", a["question_type"]) == "mcq" else None
-
-            generated.append(GeneratedQuestion(
-                slot_number=a.get("slot_number", 0),
-                blueprint_cell_key=a.get("blueprint_cell_key", ""),
-                question_type=q_data.get("question_type", a["question_type"]),
-                bloom_level=q_data.get("bloom_level", a["bloom_level"]),
-                difficulty_score=self._difficulty_to_score(
-                    q_data.get("difficulty", a["difficulty"])
-                ),
-                content=q_data.get("content", ""),
-                options=options,
-                correct_answer=q_data.get("correct_answer", ""),
-                rubric=self._normalize_rubric(
-                    q_data.get("question_type", a["question_type"]),
-                    q_data,
-                ),
-                explanation=q_data.get("explanation", ""),
-                source_chunks=[chunk_assignment.chunk_id],
-                source_texts=[chunk_assignment.chunk_text[:500]],
-                source_evidence=list(source_evidence),
-                scope_tags=list(a.get("scope_tags") or []),
-            ))
+            assignment = assignments[index]
+            options = payload.get("options") if isinstance(payload.get("options"), list) else None
+            generated.append(
+                GeneratedQuestion(
+                    slot_number=assignment.get("slot_number", 0),
+                    blueprint_cell_key=assignment.get("blueprint_cell_key", ""),
+                    question_type="mcq",
+                    bloom_level=payload.get("bloom_level", assignment["bloom_level"]),
+                    difficulty_score=self._difficulty_to_score(
+                        payload.get("difficulty", assignment["difficulty"])
+                    ),
+                    content=payload.get("content", ""),
+                    options=options,
+                    correct_answer=payload.get("correct_answer", ""),
+                    rubric=self._normalize_rubric("mcq", payload),
+                    explanation=payload.get("explanation", ""),
+                    source_chunks=[chunk_assignment.chunk_id],
+                    source_texts=[chunk_assignment.chunk_text[:500]],
+                    source_evidence=list(source_evidence),
+                    scope_tags=list(assignment.get("scope_tags") or []),
+                )
+            )
 
         logger.debug(
-            f"Chunk {chunk_assignment.chunk_id}: generated {len(generated)}/{len(assignments)} questions"
+            "Chunk %s generated %s/%s questions",
+            chunk_assignment.chunk_id,
+            len(generated),
+            len(assignments),
         )
-
         return generated
 
     async def generate_from_chunk(
@@ -521,97 +340,73 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         chunk_assignment: ChunkAssignment,
         constraints: dict,
     ) -> list[GeneratedQuestion]:
-        """Backward-compatible alias for the original single-chunk generator."""
         return await self.generate_from_single_chunk(chunk_assignment, constraints)
-
-    # ─── Multi-chunk synthesis: generate from context bundle ────────
 
     async def generate_from_context_bundle(
         self,
         chunk_assignment: ChunkAssignment,
         constraints: dict,
     ) -> list[GeneratedQuestion]:
-        """
-        Generate synthesis questions from a multi-chunk context bundle.
-
-        The LLM receives the primary chunk + extra context_chunks and must
-        create questions that require combining information across sources.
-        Used for medium/hard slots (Phase 3).
-        """
         assignments = chunk_assignment.assignments
         if not assignments:
             return []
+        self._assert_mcq_only_assignments(assignments)
 
-        max_chars = settings.MAX_CHUNK_CHARS
         bundle = self._normalize_bundle_context(chunk_assignment)
         segments, all_chunk_ids, all_chunk_texts = self._format_bundle_segments(
             bundle=bundle,
-            max_chars=max_chars,
+            max_chars=settings.MAX_CHUNK_CHARS,
         )
         combined_text = "\n\n".join(segments)
-        user_message = self._build_bundle_user_message(
-            assignments=assignments,
-            bundle=bundle,
-            combined_text=combined_text,
-        )
+        user_message = self._build_bundle_user_message(assignments, bundle, combined_text)
 
         extra = ""
         if constraints.get("strict_grounding", True):
             extra = (
-                "\n\nLƯU Ý QUAN TRỌNG: Bạn đang ở chế độ STRICT GROUNDING. "
-                "Mọi thông tin trong câu hỏi PHẢI có trong các đoạn văn bản trên. "
-                "KHÔNG sử dụng kiến thức bên ngoài."
+                "\n\nSTRICT GROUNDING: every fact in the question must be directly supported "
+                "by the provided source text."
             )
 
         messages = [
             SystemMessage(content=MULTI_CHUNK_SYSTEM_PROMPT + extra),
             HumanMessage(content=user_message),
         ]
+        questions_data = await self._invoke_with_retry(messages, chunk_assignment.chunk_id)
 
-        questions_data = await self._invoke_with_retry(
-            messages, chunk_assignment.chunk_id,
-        )
-
-        generated = []
+        generated: list[GeneratedQuestion] = []
         source_evidence = self._build_bundle_source_evidence(bundle)
-        for i, q_data in enumerate(questions_data):
-            if i >= len(assignments):
+        for index, payload in enumerate(questions_data):
+            if index >= len(assignments):
                 break
-
-            a = assignments[i]
-            options = (
-                q_data.get("options")
-                if q_data.get("question_type", a["question_type"]) == "mcq"
-                else None
+            assignment = assignments[index]
+            options = payload.get("options") if isinstance(payload.get("options"), list) else None
+            generated.append(
+                GeneratedQuestion(
+                    slot_number=assignment.get("slot_number", 0),
+                    blueprint_cell_key=assignment.get("blueprint_cell_key", ""),
+                    question_type="mcq",
+                    bloom_level=payload.get("bloom_level", assignment["bloom_level"]),
+                    difficulty_score=self._difficulty_to_score(
+                        payload.get("difficulty", assignment["difficulty"])
+                    ),
+                    content=payload.get("content", ""),
+                    options=options,
+                    correct_answer=payload.get("correct_answer", ""),
+                    rubric=self._normalize_rubric("mcq", payload),
+                    explanation=payload.get("explanation", ""),
+                    source_chunks=all_chunk_ids,
+                    source_texts=all_chunk_texts,
+                    source_evidence=list(source_evidence),
+                    scope_tags=list(assignment.get("scope_tags") or []),
+                )
             )
 
-            generated.append(GeneratedQuestion(
-                slot_number=a.get("slot_number", 0),
-                blueprint_cell_key=a.get("blueprint_cell_key", ""),
-                question_type=q_data.get("question_type", a["question_type"]),
-                bloom_level=q_data.get("bloom_level", a["bloom_level"]),
-                difficulty_score=self._difficulty_to_score(
-                    q_data.get("difficulty", a["difficulty"])
-                ),
-                content=q_data.get("content", ""),
-                options=options,
-                correct_answer=q_data.get("correct_answer", ""),
-                rubric=self._normalize_rubric(
-                    q_data.get("question_type", a["question_type"]),
-                    q_data,
-                ),
-                explanation=q_data.get("explanation", ""),
-                source_chunks=all_chunk_ids,
-                source_texts=all_chunk_texts,
-                source_evidence=list(source_evidence),
-                scope_tags=list(a.get("scope_tags") or []),
-            ))
-
         logger.debug(
-            f"Multi-chunk bundle {bundle.primary_chunk_id}: "
-            f"generated {len(generated)}/{len(assignments)} synthesis questions"
+            "Bundle %s generated %s/%s questions",
+            bundle.primary_chunk_id,
+            len(generated),
+            len(assignments),
         )
-
         return generated
 
     async def generate_from_local_bundle(
@@ -619,7 +414,6 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         chunk_assignment: ChunkAssignment,
         constraints: dict,
     ) -> list[GeneratedQuestion]:
-        """Generate from a local multi-chunk bundle."""
         return await self.generate_from_context_bundle(chunk_assignment, constraints)
 
     async def generate_from_semantic_bundle(
@@ -627,7 +421,6 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         chunk_assignment: ChunkAssignment,
         constraints: dict,
     ) -> list[GeneratedQuestion]:
-        """Generate from a semantic-style multi-chunk bundle."""
         return await self.generate_from_context_bundle(chunk_assignment, constraints)
 
     async def _invoke_with_retry(
@@ -636,29 +429,31 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         chunk_id: str,
         max_retries: int = 4,
     ) -> list[dict]:
-        """Invoke LLM with exponential backoff on rate limit (429) errors."""
         for attempt in range(max_retries):
             try:
                 response = await self.llm.ainvoke(messages)
                 return self._parse_array_response(response.content)
-            except Exception as e:
-                error_str = str(e)
-                is_rate_limit = "429" in error_str or "rate" in error_str.lower()
-
+            except Exception as exc:
+                error_text = str(exc)
+                is_rate_limit = "429" in error_text or "rate" in error_text.lower()
                 if is_rate_limit and attempt < max_retries - 1:
-                    # Exponential backoff: 8s, 16s, 32s, 64s
-                    wait = 8 * (2 ** attempt)
+                    wait_seconds = 8 * (2 ** attempt)
                     logger.warning(
-                        f"Rate limit hit for chunk {chunk_id}, "
-                        f"retry {attempt + 1}/{max_retries} in {wait}s"
+                        "Rate limit for chunk %s, retry %s/%s in %ss",
+                        chunk_id,
+                        attempt + 1,
+                        max_retries,
+                        wait_seconds,
                     )
-                    await asyncio.sleep(wait)
-                else:
-                    logger.error(
-                        f"Micro-prompting failed for chunk {chunk_id} "
-                        f"(attempt {attempt + 1}): {e}"
-                    )
-                    return []
+                    await asyncio.sleep(wait_seconds)
+                    continue
+                logger.error(
+                    "Question generation failed for chunk %s (attempt %s): %s",
+                    chunk_id,
+                    attempt + 1,
+                    exc,
+                )
+                return []
         return []
 
     async def generate_from_chunks_parallel(
@@ -667,66 +462,36 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         constraints: dict,
         max_concurrency: int = 1,
     ) -> list[GeneratedQuestion]:
-        """
-        Generate questions from chunks sequentially with rate-limit delays.
-
-        Dispatches each ChunkAssignment to the appropriate method:
-        - Single-chunk (strategy=single or no support) → generate_from_single_chunk()
-        - Local bundle (strategy=local_multi) → generate_from_local_bundle()
-        - Semantic bundle (strategy=semantic_multi) → generate_from_semantic_bundle()
-        - Fallback multi bundle → generate_from_context_bundle()
-        """
+        _ = max_concurrency
         delay = settings.LLM_REQUEST_DELAY
-        all_questions = []
+        all_questions: list[GeneratedQuestion] = []
 
-        single_count = sum(
-            1 for ca in chunk_assignments
-            if (ca.bundle_strategy == "single") or not ca.get_supporting_chunks()
-        )
-        multi_count = len(chunk_assignments) - single_count
-
-        logger.info(
-            f"Starting sequential generation: {len(chunk_assignments)} assignments "
-            f"({single_count} single-chunk, {multi_count} multi-chunk bundles), "
-            f"delay={delay}s between calls"
-        )
-
-        for idx, ca in enumerate(chunk_assignments):
-            bundle = self._normalize_bundle_context(ca)
+        for index, chunk_assignment in enumerate(chunk_assignments):
+            bundle = self._normalize_bundle_context(chunk_assignment)
             supporting_chunks = bundle.supporting_chunks
             mode = bundle.bundle_strategy or ("multi-chunk" if supporting_chunks else "single")
             logger.info(
-                f"Generating {idx + 1}/{len(chunk_assignments)} "
-                f"({mode}, chunk_id={ca.chunk_id[:16]}..., "
-                f"tasks={len(ca.assignments)}, bundle_score={bundle.bundle_score:.2f})"
+                "Generating assignment %s/%s (%s, chunk=%s, tasks=%s)",
+                index + 1,
+                len(chunk_assignments),
+                mode,
+                chunk_assignment.chunk_id[:16],
+                len(chunk_assignment.assignments),
             )
 
             try:
                 if not supporting_chunks or mode == "single":
-                    questions = await self.generate_from_single_chunk(ca, constraints)
-                elif mode == "local_multi":
-                    questions = await self.generate_from_local_bundle(ca, constraints)
-                elif mode == "semantic_multi":
-                    questions = await self.generate_from_semantic_bundle(ca, constraints)
+                    questions = await self.generate_from_single_chunk(chunk_assignment, constraints)
                 else:
-                    questions = await self.generate_from_context_bundle(ca, constraints)
+                    questions = await self.generate_from_context_bundle(chunk_assignment, constraints)
                 all_questions.extend(questions)
-            except Exception as e:
-                logger.error(f"Chunk generation error: {e}")
+            except Exception as exc:
+                logger.error("Chunk generation error: %s", exc)
 
-            # Wait between requests to respect rate limits
-            if idx < len(chunk_assignments) - 1:
-                logger.debug(f"Rate-limit delay: waiting {delay}s...")
+            if index < len(chunk_assignments) - 1:
                 await asyncio.sleep(delay)
 
-        logger.info(
-            f"Sequential generation complete: {len(all_questions)} questions "
-            f"from {len(chunk_assignments)} chunks"
-        )
-
         return all_questions
-
-    # ─── Legacy: generate from blueprint slot + context ────────────
 
     async def generate_questions(
         self,
@@ -734,13 +499,9 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         contexts: list[RetrievedContext],
         constraints: dict,
     ) -> list[GeneratedQuestion]:
-        """Generate all questions for the exam based on blueprint and context."""
-        questions = []
-
+        questions: list[GeneratedQuestion] = []
         for slot, context in zip(slots, contexts):
-            question = await self._generate_single(slot, context, constraints)
-            questions.append(question)
-
+            questions.append(await self._generate_single(slot, context, constraints))
         return questions
 
     async def _generate_single(
@@ -749,24 +510,15 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
         context: RetrievedContext,
         constraints: dict,
     ) -> GeneratedQuestion:
-        """Generate a single question for a blueprint slot."""
+        if slot.question_type != "mcq":
+            raise ValueError("Active MVP runtime only supports MCQ generation")
 
-        if slot.question_type == "mcq":
-            system_prompt = MCQ_SYSTEM_PROMPT
-        else:
-            system_prompt = ESSAY_SYSTEM_PROMPT
-
-        # Add applied question guidance if difficulty is high
+        system_prompt = MCQ_SYSTEM_PROMPT
         if constraints.get("allow_applied_questions") and slot.difficulty_score >= 0.6:
             system_prompt += "\n\n" + APPLIED_QUESTION_PROMPT
-
-        # Add strict grounding reminder
         if constraints.get("strict_grounding", True):
             system_prompt += (
-                "\n\nCRITICAL: You are in STRICT GROUNDING mode. "
-                "Every fact, concept, and piece of information in the question "
-                "MUST come directly from the provided context. "
-                "Do NOT use any external knowledge."
+                "\n\nSTRICT GROUNDING: use only the provided context and do not add outside knowledge."
             )
 
         edit_prompt = (constraints.get("_edit_prompt") or "").strip()
@@ -778,12 +530,12 @@ Trả về JSON array chứa đúng {len(assignments)} câu hỏi."""
                 "Keep the same scope, answerability requirements, and question family."
             )
 
-        user_message = f"""Generate a {slot.question_type.upper()} question with these specifications:
+        user_message = f"""Generate a MCQ question with these specifications:
 
 Chapter: {slot.target_chapter}
 Topics: {', '.join(slot.target_topics) if slot.target_topics else 'General'}
 Bloom's Level: {slot.bloom_level}
-Difficulty: {slot.difficulty_score:.2f} (scale 0.0-1.0)
+Difficulty: {slot.difficulty_score:.2f}
 Question Number: {slot.slot_number}
 Scope Tags: {', '.join(getattr(slot, 'scope_tags', []) or [])}
 
@@ -795,47 +547,37 @@ Scope Tags: {', '.join(getattr(slot, 'scope_tags', []) or [])}
 
 Generate the question now.{edit_instruction}"""
 
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_message),
-        ]
-
-        response = await self.llm.ainvoke(messages)
+        response = await self.llm.ainvoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_message),
+            ]
+        )
         question_data = self._parse_response(response.content)
-
-        # Build GeneratedQuestion
-        options = None
-        if slot.question_type == "mcq" and "options" in question_data:
-            options = question_data["options"]
+        options = question_data.get("options") if isinstance(question_data.get("options"), list) else None
 
         return GeneratedQuestion(
             slot_number=slot.slot_number,
             blueprint_cell_key=getattr(slot, "blueprint_cell_key", ""),
-            question_type=slot.question_type,
+            question_type="mcq",
             bloom_level=slot.bloom_level,
             difficulty_score=slot.difficulty_score,
             content=question_data.get("content", ""),
             options=options,
             correct_answer=question_data.get("correct_answer", ""),
-            rubric=self._normalize_rubric(slot.question_type, question_data),
+            rubric=self._normalize_rubric("mcq", question_data),
             explanation=question_data.get("explanation", ""),
-            source_chunks=[c["id"] for c in context.chunks],
-            source_texts=[c["text"] for c in context.chunks],
+            source_chunks=[chunk["id"] for chunk in context.chunks],
+            source_texts=[chunk["text"] for chunk in context.chunks],
             source_evidence=self._build_context_source_evidence(context),
             scope_tags=list(getattr(slot, "scope_tags", []) or []),
         )
 
-    # ─── Response parsing ──────────────────────────────────────────
-
     def _parse_response(self, response_text: str) -> dict:
-        """Parse LLM JSON response, handling markdown and extra text."""
         text = response_text.strip()
-        logger.debug(f"QuestionGen LLM raw (first 300): {text[:300]}")
-
         if not text:
             return {}
 
-        # Extract from ```json ... ``` block
         code_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if code_block:
             text = code_block.group(1)
@@ -846,51 +588,43 @@ Generate the question now.{edit_instruction}"""
 
         try:
             return json.loads(text)
-        except json.JSONDecodeError as e:
-            logger.warning(f"QuestionGen JSON parse failed: {e}. Raw: {text[:200]}")
+        except json.JSONDecodeError as exc:
+            logger.warning("QuestionGen JSON parse failed: %s. Raw: %s", exc, text[:200])
             return {}
 
     def _parse_array_response(self, response_text: str) -> list[dict]:
-        """Parse LLM JSON array response (for micro-prompting)."""
         text = response_text.strip()
-        logger.debug(f"MicroPrompt LLM raw (first 300): {text[:300]}")
-
         if not text:
             return []
 
-        # Extract from ```json ... ``` block (array)
         code_block = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
         if code_block:
             text = code_block.group(1)
         elif not text.startswith("["):
-            # Try to find array
             bracket_match = re.search(r"\[.*\]", text, re.DOTALL)
             if bracket_match:
                 text = bracket_match.group(0)
             else:
-                # Maybe it's a single object, wrap in array
                 brace_match = re.search(r"\{.*\}", text, re.DOTALL)
                 if brace_match:
                     text = f"[{brace_match.group(0)}]"
 
         try:
-            result = json.loads(text)
-            if isinstance(result, dict):
-                return [result]
-            return result if isinstance(result, list) else []
-        except json.JSONDecodeError as e:
-            logger.warning(f"MicroPrompt JSON parse failed: {e}. Raw: {text[:200]}")
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning("MicroPrompt JSON parse failed: %s. Raw: %s", exc, text[:200])
             return []
 
+        if isinstance(parsed, dict):
+            return [parsed]
+        return parsed if isinstance(parsed, list) else []
+
     def _difficulty_to_score(self, difficulty: str) -> float:
-        """Convert difficulty label to score."""
         return {
             "easy": 0.2,
             "medium": 0.5,
             "hard": 0.85,
         }.get(difficulty, 0.5)
-
-    # ─── Legacy: regenerate single ─────────────────────────────────
 
     async def regenerate_single(
         self,
@@ -899,20 +633,17 @@ Generate the question now.{edit_instruction}"""
         constraints: dict,
         edit_prompt: str = "",
     ) -> GeneratedQuestion:
-        """Regenerate a single question, preserving its slot specifications."""
         slot = QuestionSlot(
             slot_number=original_question.slot_number,
-            question_type=original_question.question_type,
+            question_type="mcq",
             bloom_level=original_question.bloom_level,
             difficulty_score=original_question.difficulty_score,
-            target_chapter=0,  # will use existing context
+            target_chapter=0,
             target_topics=[],
             blueprint_cell_key=original_question.blueprint_cell_key,
             scope_tags=list(original_question.scope_tags or []),
         )
-
         if edit_prompt:
-            # Add specific edit guidance
             constraints = {**constraints, "_edit_prompt": edit_prompt}
 
         regenerated = await self._generate_single(slot, context, constraints)

@@ -1,0 +1,54 @@
+[
+  {
+    "sample_id": "physics-scope-001",
+    "expected_scope_section_ids": ["doc-1:topic:1:1"],
+    "questions": [
+      {
+        "question_text": "Van toc dac trung cho dai luong nao?",
+        "verification_status": "passed",
+        "source_evidence": [
+          {
+            "section_id": "doc-1:topic:1:1",
+            "chunk_id": "chunk-1"
+          }
+        ],
+        "retrieval": {
+          "top_section_ids": ["doc-1:topic:1:1", "doc-1:topic:1:2"]
+        },
+        "regenerate_count": 0,
+        "human_edit_count": 0
+      },
+      {
+        "question_text": "Cong thuc tinh van toc trung binh la gi?",
+        "verification_status": "passed",
+        "source_evidence": [
+          {
+            "section_id": "doc-1:topic:1:1",
+            "chunk_id": "chunk-2"
+          }
+        ],
+        "retrieval": {
+          "top_section_ids": ["doc-1:topic:1:1"]
+        },
+        "regenerate_count": 1,
+        "human_edit_count": 0
+      }
+    ]
+  },
+  {
+    "sample_id": "physics-scope-002",
+    "expected_scope_section_ids": ["doc-2:topic:2:1"],
+    "questions": [
+      {
+        "question_text": "Gia toc la gi?",
+        "verification_status": "failed",
+        "source_evidence": [],
+        "retrieval": {
+          "top_section_ids": ["doc-2:topic:2:2"]
+        },
+        "regenerate_count": 2,
+        "human_edit_count": 1
+      }
+    ]
+  }
+]

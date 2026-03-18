@@ -9,6 +9,7 @@ from routers.auth import get_current_user
 from schemas.document import (
     CurriculumNodeResponse,
     CurriculumTreePatchRequest,
+    DocumentListResponse,
     DocumentResponse,
     DocumentStatusResponse,
 )
@@ -61,6 +62,24 @@ def _format_document(document) -> DocumentResponse:
     )
 
 
+def _format_document_list_item(document) -> DocumentListResponse:
+    return DocumentListResponse(
+        id=document.id,
+        course_id=document.course_id,
+        title=document.title,
+        file_name=document.file_name,
+        file_type=document.file_type,
+        file_size=document.file_size,
+        status=document.status.value,
+        version=document.version,
+        total_pages_or_slides=document.total_pages_or_slides,
+        total_chunks=document.total_chunks,
+        chapter_count=len(document.chapters),
+        created_at=document.created_at,
+        updated_at=document.updated_at,
+    )
+
+
 @router.post("/courses/{course_id}/documents/upload", response_model=DocumentResponse)
 async def upload_document(
     course_id: str,
@@ -87,7 +106,7 @@ async def upload_document(
 
     service = DocumentService(db)
     try:
-        document = await service.upload_textbook(
+        document = await service.upload_document(
             user_id=current_user.id,
             title=title,
             file_name=file.filename,
@@ -102,15 +121,66 @@ async def upload_document(
     return _format_document(document)
 
 
-@router.get("/courses/{course_id}/documents", response_model=list[DocumentResponse])
+@router.post("/documents/upload", response_model=DocumentResponse)
+async def upload_personal_document(
+    title: str = Form(...),
+    file: UploadFile = File(...),
+    course_id: str | None = Form(None),
+    language: str = Form("vi"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.LECTURER, UserRole.TEACHING_ASSISTANT)),
+):
+    file_ext = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    try:
+        file_ext = require_pdf_extension(file_ext)
+        language = normalize_mvp_language(language)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    content = await file.read()
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large. Maximum: {settings.MAX_UPLOAD_SIZE_MB}MB",
+        )
+
+    service = DocumentService(db)
+    try:
+        document = await service.upload_document(
+            user_id=current_user.id,
+            title=title,
+            file_name=file.filename,
+            file_content=content,
+            file_type=file_ext.lstrip("."),
+            course_id=course_id,
+            language=language,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return _format_document(document)
+
+
+@router.get("/documents", response_model=list[DocumentListResponse])
+async def list_documents(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = DocumentService(db)
+    documents = await service.list_documents(user_id=current_user.id)
+    return [_format_document_list_item(document) for document in documents]
+
+
+@router.get("/courses/{course_id}/documents", response_model=list[DocumentListResponse])
 async def list_course_documents(
     course_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     service = DocumentService(db)
-    documents = await service.get_textbooks(user_id=current_user.id, course_id=course_id)
-    return [_format_document(document) for document in documents]
+    documents = await service.list_documents(user_id=current_user.id, course_id=course_id)
+    return [_format_document_list_item(document) for document in documents]
 
 
 @router.get("/documents/{document_id}/status", response_model=DocumentStatusResponse)
@@ -124,6 +194,19 @@ async def get_document_status(
     if not status_payload:
         raise HTTPException(status_code=404, detail="Document not found")
     return DocumentStatusResponse(**status_payload)
+
+
+@router.get("/documents/{document_id}", response_model=DocumentResponse)
+async def get_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = DocumentService(db)
+    document = await service.get_document(document_id, current_user.id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return _format_document(document)
 
 
 @router.get("/documents/{document_id}/curriculum-tree", response_model=list[CurriculumNodeResponse])
@@ -155,3 +238,16 @@ async def patch_curriculum_tree(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     return _build_curriculum_nodes(document.curriculum_tree_json or [])
+
+
+@router.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = DocumentService(db)
+    deleted = await service.delete_document(document_id, current_user.id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"message": "Document deleted successfully"}

@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Partitioning strategy: "fast" (no system deps) or "hi_res" (needs Tesseract + Poppler)
 STRATEGY = "fast"
 
-# Chunking parameters (tuned for academic textbooks)
+# Chunking parameters tuned for academic PDF documents
 COMBINE_TEXT_UNDER_N_CHARS = 500   # Group short paragraphs together
 MAX_CHARACTERS = 1500              # Hard limit per chunk
 OVERLAP = 150                      # Character overlap for split continuity
@@ -53,7 +53,7 @@ IMAGE_OUTPUT_DIR = os.path.join(settings.UPLOAD_DIR, "extracted_images")
 
 class DocumentProcessorAgent:
     """
-    Processes textbook documents using the `unstructured` library.
+    Processes uploaded PDF documents using the `unstructured` library.
 
     Pipeline: partition → clean → track hierarchy → chunk → format output.
     """
@@ -63,13 +63,13 @@ class DocumentProcessorAgent:
         self.db_session = db_session
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # Public API (same interface as before — TextbookService unchanged)
+    # Public API for the active document ingestion service
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    async def process_document(self, file_path: str, textbook_id: str) -> dict:
+    async def process_document(self, file_path: str, document_id: str) -> dict:
         """
         Full document processing pipeline.
-        Returns metadata about the processed textbook.
+        Returns metadata about the processed document.
         """
         logger.info(f"[PROCESSOR] Starting document processing: {file_path}")
 
@@ -92,13 +92,13 @@ class DocumentProcessorAgent:
         logger.info(f"[PROCESSOR] Step 4 — Produced {len(chunks)} chunks")
 
         # Step 5: Format output and store
-        formatted = self._format_output(chunks, file_path, textbook_id)
-        sections = self._derive_sections(formatted, chapters)
-        chunk_ids = await self._store_chunks(formatted, textbook_id)
+        formatted = self._format_output(chunks, file_path, document_id)
+        sections = self._derive_sections(formatted, chapters, document_id)
+        chunk_ids = await self._store_chunks(formatted, document_id)
         logger.info(f"[PROCESSOR] Step 5 — Stored {len(chunk_ids)} chunks")
 
         return {
-            "textbook_id": textbook_id,
+            "document_id": document_id,
             "title": Path(file_path).stem,
             "total_pages": self._count_pages(elements),
             "total_chunks": len(formatted),
@@ -246,7 +246,7 @@ class DocumentProcessorAgent:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _format_output(
-        self, chunks: list, source_file: str, textbook_id: str
+        self, chunks: list, source_file: str, document_id: str
     ) -> list[dict]:
         """
         Convert unstructured chunks to clean dictionaries.
@@ -259,7 +259,7 @@ class DocumentProcessorAgent:
             "chunk_index": int,
             "metadata": {
                 "source_file": str,
-                "textbook_id": str,
+                "document_id": str,
                 "page_number": int | None,
                 "chapter": str | None,
                 "chapter_number": int | None,
@@ -289,7 +289,7 @@ class DocumentProcessorAgent:
                 parent_heading = getattr(meta, 'parent_heading', None)
 
             chunk_id = hashlib.md5(
-                f"{textbook_id}:{idx}".encode()
+                f"{document_id}:{idx}".encode()
             ).hexdigest()
 
             formatted.append({
@@ -298,7 +298,8 @@ class DocumentProcessorAgent:
                 "chunk_index": idx,
                 "metadata": {
                     "source_file": Path(source_file).name,
-                    "textbook_id": textbook_id,
+                    "document_id": document_id,
+                    "textbook_id": document_id,
                     "page_number": page_number,
                     "chapter": chapter,
                     "chapter_number": chapter_number,
@@ -313,7 +314,7 @@ class DocumentProcessorAgent:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def _store_chunks(
-        self, formatted_chunks: list[dict], textbook_id: str
+        self, formatted_chunks: list[dict], document_id: str
     ) -> list[str]:
         """
         Store chunks in Pinecone (vectors) and PostgreSQL (raw text for BM25).
@@ -327,7 +328,9 @@ class DocumentProcessorAgent:
         # Prepare Pinecone metadata (only essential fields, no large text blobs)
         pinecone_metadatas = [
             {
+                "document_id": c["metadata"]["document_id"],
                 "textbook_id": c["metadata"]["textbook_id"],
+                "section_id": c["metadata"].get("section_id"),
                 "page": c["metadata"]["page_number"],
                 "chapter": c["metadata"]["chapter"] or "",
                 "chapter_number": c["metadata"]["chapter_number"] or 0,
@@ -351,7 +354,8 @@ class DocumentProcessorAgent:
 
             for chunk_data in formatted_chunks:
                 db_chunk = TextbookChunk(
-                    textbook_id=textbook_id,
+                    textbook_id=document_id,
+                    section_id=chunk_data["metadata"].get("section_id"),
                     chunk_id=chunk_data["chunk_id"],
                     chunk_index=chunk_data["chunk_index"],
                     content=chunk_data["chunk_text"],
@@ -379,7 +383,12 @@ class DocumentProcessorAgent:
                     pages.add(el.metadata.page_number)
         return len(pages) or 1
 
-    def _derive_sections(self, formatted_chunks: list[dict], chapters: list[dict]) -> list[dict]:
+    def _derive_sections(
+        self,
+        formatted_chunks: list[dict],
+        chapters: list[dict],
+        document_id: str,
+    ) -> list[dict]:
         """Derive curriculum sections from chunk metadata with chapter/lesson/topic hierarchy."""
         chapter_nodes: dict[int, dict] = {}
         sections: list[dict] = []
@@ -387,9 +396,13 @@ class DocumentProcessorAgent:
 
         for chapter in chapters:
             chapter_number = int(chapter.get("chapter_number") or 0)
+            chapter_key = f"chapter:{chapter_number}" if chapter_number > 0 else "chapter:general"
+            chapter_section_id = self._compose_section_id(document_id, chapter_key)
             section = {
-                "section_key": f"chapter:{chapter_number}" if chapter_number > 0 else "chapter:general",
+                "section_key": chapter_section_id,
                 "parent_key": None,
+                "section_id": chapter_section_id,
+                "parent_section_id": None,
                 "section_title": chapter.get("title") or (f"Chapter {chapter_number}" if chapter_number > 0 else "General"),
                 "section_type": "chapter",
                 "section_order": order_counter,
@@ -413,9 +426,13 @@ class DocumentProcessorAgent:
             heading = (metadata.get("parent_heading") or "").strip()
 
             if chapter_number not in chapter_nodes:
+                chapter_key = f"chapter:{chapter_number}" if chapter_number > 0 else "chapter:general"
+                chapter_section_id = self._compose_section_id(document_id, chapter_key)
                 section = {
-                    "section_key": f"chapter:{chapter_number}" if chapter_number > 0 else "chapter:general",
+                    "section_key": chapter_section_id,
                     "parent_key": None,
+                    "section_id": chapter_section_id,
+                    "parent_section_id": None,
                     "section_title": f"Chapter {chapter_number}" if chapter_number > 0 else "General",
                     "section_type": "chapter",
                     "section_order": order_counter,
@@ -430,6 +447,7 @@ class DocumentProcessorAgent:
                 order_counter += 1
 
             chapter_section = chapter_nodes[chapter_number]
+            target_section_id = chapter_section["section_key"]
             if page_number is not None:
                 if chapter_section["page_from"] is None or page_number < chapter_section["page_from"]:
                     chapter_section["page_from"] = page_number
@@ -437,6 +455,10 @@ class DocumentProcessorAgent:
                     chapter_section["page_to"] = page_number
 
             if not heading:
+                # MVP Requirement: ensure deterministic section_id for every chunk
+                # Even if no parent_heading, attach to chapter section
+                metadata["section_id"] = target_section_id
+                metadata["section_key"] = target_section_id
                 continue
 
             parent_key = chapter_section["section_key"]
@@ -450,10 +472,14 @@ class DocumentProcessorAgent:
             for index, node in enumerate(heading_chain):
                 node_key = (chapter_number, str(node["section_title"]).lower())
                 if node_key not in heading_lookup:
+                    raw_section_key = f"{node['section_type']}:{chapter_number}:{len(heading_lookup) + 1}"
+                    section_id = self._compose_section_id(document_id, raw_section_key)
                     heading_lookup[node_key] = {
                         **node,
-                        "section_key": f"{node['section_type']}:{chapter_number}:{len(heading_lookup) + 1}",
+                        "section_key": section_id,
                         "parent_key": parent_key,
+                        "section_id": section_id,
+                        "parent_section_id": parent_key,
                     }
                     sections.append(heading_lookup[node_key])
                     order_counter += 1
@@ -466,8 +492,12 @@ class DocumentProcessorAgent:
                         current["page_to"] = page_number
 
                 parent_key = current["section_key"]
+                target_section_id = current["section_key"]
                 if index == len(heading_chain) - 1:
                     heading_summaries.setdefault(current["section_key"], []).append(chunk.get("chunk_text", ""))
+
+            metadata["section_id"] = target_section_id
+            metadata["section_key"] = target_section_id
 
         for section in sections:
             summary_chunks = heading_summaries.get(section["section_key"], [])
@@ -520,6 +550,13 @@ class DocumentProcessorAgent:
         if len(lowered.split()) <= 2:
             return "unknown"
         return "topic"
+
+    def _compose_section_id(self, document_id: str, section_key: str) -> str:
+        normalized_key = (section_key or "").strip()
+        prefix = f"{document_id}:"
+        if normalized_key.startswith(prefix):
+            return normalized_key
+        return f"{prefix}{normalized_key}"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
