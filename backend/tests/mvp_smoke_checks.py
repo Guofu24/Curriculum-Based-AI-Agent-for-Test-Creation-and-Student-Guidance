@@ -1,4 +1,4 @@
-"""Minimal smoke checks for the active Phase 1 runtime.
+"""Minimal smoke checks for the active MVP runtime.
 
 Run from `backend/`:
     python tests/mvp_smoke_checks.py
@@ -18,25 +18,61 @@ from agents.blueprint import BlueprintAgent, assign_chunks_to_slots
 from agents.document_processor import DocumentProcessorAgent
 from agents.grounding_checker import GroundingChecker
 from agents.question_generator import QuestionGeneratorAgent
-from agents.state import RetrievedContext
+from agents.retrieval import RetrievalAgent
+from agents.state import GeneratedQuestion, RetrievedContext
 from agents.validator import ValidatorAgent
 from config import settings
 from main import app
 from models.curriculum import Section
+from models.exam import BloomLevel
+from models.textbook import PROCESSING_STATUS_ENUM, ProcessingStatus
 from schemas.exam import ExamGenerationRequest
 from services.curriculum.scope_service import CurriculumScopeService, ResolvedScope
 from services.editing.review_edit_service import ReviewEditService
 from services.exam_planning.spec_service import ExamSpecService
 from services.exam_service import ExamService
 from services.generation.mcq_generation_service import MCQGenerationService
+from services.fallback_embeddings import DeterministicHashEmbeddings, NoOpVectorStore
 from services.retrieval.scoped_retrieval_service import ScopedRetrievalService
 from services.verification.mcq_verifier_service import MCQVerifierService
+from utils.bloom_levels import normalize_bloom_level
 
 
 class _FakeVectorStore:
     async def aadd_texts(self, **kwargs):
         _ = kwargs
         return None
+
+
+class _FailingQueryVectorStore:
+    async def asimilarity_search_with_score(self, **kwargs):
+        _ = kwargs
+        raise RuntimeError("vector backend unavailable")
+
+
+class _ScalarListResult:
+    def __init__(self, rows) -> None:
+        self._rows = list(rows)
+
+    def all(self):
+        return list(self._rows)
+
+
+class _ExecuteResult:
+    def __init__(self, rows) -> None:
+        self._rows = list(rows)
+
+    def scalars(self):
+        return _ScalarListResult(self._rows)
+
+
+class _FakeDBSession:
+    def __init__(self, rows) -> None:
+        self._rows = list(rows)
+
+    async def execute(self, statement):
+        _ = statement
+        return _ExecuteResult(self._rows)
 
 
 class _ScopeServiceStub:
@@ -152,7 +188,7 @@ class _FakeLLM:
         )
 
 
-def check_request_surface_is_phase1_only() -> None:
+def check_request_surface_is_mvp_only() -> None:
     request = ExamGenerationRequest(
         document_id="doc-1",
         total_questions=8,
@@ -293,6 +329,86 @@ def check_question_generator_rejects_non_mcq_assignments() -> None:
     raise AssertionError("Expected non-MCQ assignments to be rejected")
 
 
+def check_question_generator_normalizes_string_options() -> None:
+    generator = QuestionGeneratorAgent(llm=None)
+    options = generator._normalize_options(
+        [
+            "A. Van toc",
+            "B. Quang duong",
+            "C. Thoi gian",
+            "D. Luc",
+        ]
+    )
+    assert options == [
+        {"label": "A", "text": "Van toc"},
+        {"label": "B", "text": "Quang duong"},
+        {"label": "C", "text": "Thoi gian"},
+        {"label": "D", "text": "Luc"},
+    ]
+    assert generator._normalize_correct_answer("Van toc", options) == "A"
+    assert generator._normalize_correct_answer("B. Quang duong", options) == "B"
+
+
+def check_bloom_level_aliases_are_normalized() -> None:
+    generator = QuestionGeneratorAgent(llm=None)
+    assert normalize_bloom_level("analysis", fallback="remember") == "analyze"
+    assert normalize_bloom_level("application", fallback="remember") == "apply"
+    assert generator._normalize_payload_bloom_level("analysis", "remember") == "analyze"
+    assert generator._normalize_payload_bloom_level("unknown-level", "remember") == "remember"
+
+    db_question = ExamService(db=None)._question_to_db(
+        exam_id="exam-1",
+        exam_version_id="version-1",
+        question=GeneratedQuestion(
+            slot_number=1,
+            blueprint_cell_key="cell-1",
+            question_type="mcq",
+            bloom_level="analysis",
+            difficulty_score=0.5,
+            content="Noi dung cau hoi",
+            options=[
+                {"label": "A", "text": "Phuong an A"},
+                {"label": "B", "text": "Phuong an B"},
+                {"label": "C", "text": "Phuong an C"},
+                {"label": "D", "text": "Phuong an D"},
+            ],
+            correct_answer="A",
+            explanation="Giai thich",
+        ),
+        quality_by_slot={},
+        grounding_by_slot={},
+    )
+    assert db_question.bloom_level == BloomLevel.ANALYZE
+
+
+def check_document_processing_status_uses_enum_values() -> None:
+    assert PROCESSING_STATUS_ENUM.enums == [item.name for item in ProcessingStatus]
+    bind_processor = PROCESSING_STATUS_ENUM.bind_processor(None)
+    assert bind_processor is not None
+    assert ProcessingStatus.PARSING is ProcessingStatus.PROCESSING
+    assert ProcessingStatus.INDEXED is ProcessingStatus.PROCESSED
+    assert bind_processor(ProcessingStatus.PARSING) == "PROCESSING"
+    assert bind_processor(ProcessingStatus.INDEXED) == "PROCESSED"
+
+
+def check_deterministic_fallback_embeddings_are_stable() -> None:
+    embeddings = DeterministicHashEmbeddings(dimension=16)
+    first = embeddings.embed_query("Van toc trung binh")
+    second = embeddings.embed_query("Van toc trung binh")
+    third = embeddings.embed_query("Luc ma sat")
+
+    assert len(first) == 16
+    assert first == second
+    assert first != third
+    assert round(sum(value * value for value in first), 6) == 1.0
+
+
+def check_noop_vector_store_is_safe() -> None:
+    store = NoOpVectorStore(namespace="doc-1")
+    assert asyncio.run(store.aadd_texts(texts=["hello"], metadatas=[{}], ids=["c1"])) == []
+    assert asyncio.run(store.asimilarity_search_with_score(query="hello", k=3)) == []
+
+
 def check_chunk_section_id_is_attached() -> None:
     processor = DocumentProcessorAgent(vector_store=_FakeVectorStore())
     formatted_chunks = [
@@ -385,6 +501,34 @@ def check_retrieval_prefers_deterministic_section_id() -> None:
     ids = [item["id"] for item in filtered]
     assert ids == ["ok-1"]
     assert scope_stub.heuristic_calls == 1
+
+
+async def _retrieve_with_vector_failure_uses_bm25() -> None:
+    row = SimpleNamespace(
+        metadata_json='{"chapter_number": 1, "parent_heading": "Bai 1"}',
+        chapter="Chuong 1",
+        parent_heading="Bai 1",
+        page=1,
+        chunk_id="chunk-1",
+        content="Van toc trung binh duoc tinh bang quang duong chia cho thoi gian.",
+    )
+    agent = RetrievalAgent(
+        vector_store=_FailingQueryVectorStore(),
+        db_session=_FakeDBSession([row]),
+    )
+    context = await agent.retrieve_for_single_question(
+        query="van toc trung binh",
+        document_id="doc-1",
+        chapter=1,
+        top_k=3,
+    )
+    assert context.chunks
+    assert context.chunks[0]["id"] == "chunk-1"
+    assert "Van toc trung binh" in context.combined_text
+
+
+def check_retrieval_falls_back_to_bm25_when_vector_search_fails() -> None:
+    asyncio.run(_retrieve_with_vector_failure_uses_bm25())
 
 
 async def _run_component_flow_smoke() -> None:
@@ -524,13 +668,19 @@ def check_production_routes_mvp_only() -> None:
 
 
 if __name__ == "__main__":
-    check_request_surface_is_phase1_only()
+    check_request_surface_is_mvp_only()
     check_runtime_payload_is_hardened()
     check_invalid_scope_does_not_expand_to_full_document()
     check_blueprint_preserves_section_id()
     check_question_generator_rejects_non_mcq_assignments()
+    check_question_generator_normalizes_string_options()
+    check_bloom_level_aliases_are_normalized()
+    check_document_processing_status_uses_enum_values()
+    check_deterministic_fallback_embeddings_are_stable()
+    check_noop_vector_store_is_safe()
     check_chunk_section_id_is_attached()
     check_retrieval_prefers_deterministic_section_id()
+    check_retrieval_falls_back_to_bm25_when_vector_search_fails()
     check_component_flow_smoke()
     check_production_routes_mvp_only()
     print("MVP smoke checks passed")
