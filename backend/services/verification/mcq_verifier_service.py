@@ -17,6 +17,7 @@ class MCQVerifierService:
         questions: list[GeneratedQuestion],
         blueprint: ExamBlueprint,
         resolved_scope: ResolvedScope,
+        playbook_lines: list[str] | None = None,
     ) -> tuple[list[GeneratedQuestion], dict, list[dict], list[dict], list[dict]]:
         validated_questions, summary = await self.validator.validate_questions(
             questions,
@@ -56,6 +57,8 @@ class MCQVerifierService:
             validation_payload["duplication_check"] = duplicate_ok
             validation_payload["validation_errors"] = issues
             validation_payload["warnings"] = issues
+            if playbook_lines:
+                validation_payload["playbook_hints"] = list(playbook_lines)
 
             question.warnings = issues
             question.is_validated = all((scope_ok, mcq_ok, answerability_ok, duplicate_ok)) and bool(question.is_validated)
@@ -74,6 +77,7 @@ class MCQVerifierService:
                     "answerability": answerability_ok,
                     "duplication": duplicate_ok,
                     "notes": issues,
+                    "playbook_hint_count": len(playbook_lines or []),
                 }
             )
 
@@ -121,8 +125,14 @@ class MCQVerifierService:
             return False
         if not question.options or len(question.options) != 4:
             return False
-        labels = [str(option.get("label", "")).strip() for option in question.options]
-        texts = [str(option.get("text", "")).strip() for option in question.options]
+        normalized_options = [
+            option for option in question.options
+            if isinstance(option, dict)
+        ]
+        if len(normalized_options) != 4:
+            return False
+        labels = [str(option.get("label", "")).strip() for option in normalized_options]
+        texts = [str(option.get("text", "")).strip() for option in normalized_options]
         if labels != ["A", "B", "C", "D"]:
             return False
         if any(not text for text in texts):

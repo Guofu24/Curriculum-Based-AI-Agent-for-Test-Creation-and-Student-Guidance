@@ -1,0 +1,87 @@
+{
+  "sample_id": "physics-heldout-momentum-consistency",
+  "split": "held_out",
+  "subject": "physics",
+  "language": "vi",
+  "document": {
+    "document_id": "physics-10-momentum",
+    "title": "Vat ly 10 - Dong luong",
+    "reference": "SGK vat ly 10 PDF"
+  },
+  "scope": {
+    "selected_scope": [
+      {
+        "section_id": "doc-momentum:chapter4:lesson1",
+        "scope_type": "lesson",
+        "title": "Dong luong va dinh luat bao toan"
+      }
+    ],
+    "allowed_section_ids": ["doc-momentum:chapter4:lesson1"],
+    "expected_section_coverage": ["doc-momentum:chapter4:lesson1"]
+  },
+  "exam_request": {
+    "prompt": "Danh gia kha nang giu chat luong o held-out set",
+    "total_questions": 2
+  },
+  "normalized_spec": {
+    "exam_type": "mcq",
+    "question_type": "mcq_single_answer",
+    "strict_scope_flag": true,
+    "total_questions": 2
+  },
+  "version_count": 1,
+  "questions": [
+    {
+      "question_id": "q1",
+      "question_text": "Dong luong cua vat duoc tinh bang cong thuc nao?",
+      "reference_question": "p = m.v",
+      "source_evidence": [
+        {
+          "section_id": "doc-momentum:chapter4:lesson1",
+          "chunk_id": "chunk-301",
+          "text_preview": "Dong luong bang khoi luong nhan van toc."
+        }
+      ],
+      "expected_evidence_hints": ["khoi luong", "van toc"],
+      "retrieval": {
+        "top_section_ids": ["doc-momentum:chapter4:lesson1"],
+        "expected_hit_section_ids": ["doc-momentum:chapter4:lesson1"]
+      },
+      "verification_status": "passed",
+      "warnings": [],
+      "verifier_expectation": {
+        "expected_status": "passed",
+        "expected_warning_count": 0
+      },
+      "quality_signals": {},
+      "regenerate_count": 0,
+      "human_edit_count": 0
+    },
+    {
+      "question_id": "q2",
+      "question_text": "Phat bieu nao dung ve dinh luat bao toan dong luong?",
+      "reference_question": "Tong dong luong he co lap duoc bao toan",
+      "source_evidence": [
+        {
+          "section_id": "doc-momentum:chapter4:lesson1",
+          "chunk_id": "chunk-304",
+          "text_preview": "Trong he co lap, tong dong luong truoc va sau tuong tac khong doi."
+        }
+      ],
+      "expected_evidence_hints": ["he co lap", "tong dong luong"],
+      "retrieval": {
+        "top_section_ids": ["doc-momentum:chapter4:lesson2", "doc-momentum:chapter4:lesson1"],
+        "expected_hit_section_ids": ["doc-momentum:chapter4:lesson1"]
+      },
+      "verification_status": "passed",
+      "warnings": [],
+      "verifier_expectation": {
+        "expected_status": "passed",
+        "expected_warning_count": 0
+      },
+      "quality_signals": {},
+      "regenerate_count": 0,
+      "human_edit_count": 0
+    }
+  ]
+}

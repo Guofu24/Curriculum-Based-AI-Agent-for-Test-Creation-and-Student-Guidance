@@ -1,52 +1,65 @@
-# Curriculum-Based AI Agent
+# ExamAI Physics ACE Foundation
 
-This repo is now focused on a narrow Physics exam-generation product with a document-first Phase 2 baseline.
+This repo now targets the **Phase 4 baseline** of a narrow internal product for grounded Physics MCQ generation in Vietnamese.
 
-## Active product scope
+## Active scope
 
 - Subject: Physics only
-- Output language: Vietnamese only
-- Input document: PDF only
-- Question type: single-answer MCQ only
-- Scope-driven generation by chapter / lesson / topic
-- Review, edit, regenerate, versioning, and publish
-- Strict grounding with source evidence on every question
+- Language: Vietnamese only
+- Input: PDF only
+- Output: single-answer MCQ only
+- Scope: chapter / lesson / topic selection only
+- Workflow: generate, verify, review, edit, regenerate, version, publish
+- Requirement: strict scope grounding with source evidence on every question
 
 ## Active flow
 
-1. Upload PDFs through the `documents` API.
-2. Parse text, build sections, and persist section-aware chunks.
-3. Build the curriculum tree.
-4. Resolve user scope into section IDs.
-5. Create `ExamSpec`.
-6. Create `Blueprint`.
-7. Retrieve evidence by persisted `section_id`.
+1. Upload a PDF through the documents flow.
+2. Parse text and derive curriculum sections.
+3. Build a curriculum tree and persist section-aware chunks.
+4. Resolve the teacher-selected scope into section IDs.
+5. Build `ExamSpec`.
+6. Build `Blueprint`.
+7. Retrieve evidence inside the allowed section IDs.
 8. Generate MCQ questions.
-9. Verify scope adherence, evidence, answerability, and duplication.
-10. Review, edit, regenerate, save versions, and publish.
+9. Verify scope, evidence, answerability, and duplication.
+10. Review warnings, source evidence, and question activity.
+11. Edit or regenerate questions, then save a new version.
+12. Publish only after the review state is acceptable.
 
-## Phase 2 hardening
+## Phase 4 focus
 
-- document-first naming on the active API/service surface
-- structured `feedback_events` for retrieval, verifier, edit, regenerate, and publish signals
-- minimal eval infrastructure under `backend/evals/`
-- stronger backend regression scripts under `backend/tests/`
-- cleaned Phase-2 UI flow under `UI/app/dashboard/`
+- richer `feedback_events` that are queryable by exam, version, question, stage, source, actor, and error category
+- a persisted **playbook bullet store** with approved, candidate, archived, and rejected lifecycle states
+- a **reflection candidate** layer that turns feedback + eval patterns into promotable playbook items
+- an **offline warmup export** for accepted exams, question history, feedback cases, and playbook seeds
+- **feature-flagged playbook retrieval** for generator/verifier:
+  - `off`
+  - `shadow`
+  - `limited`
+- UI and docs that make it clear this is ACE foundation, not ACE core
 
-## Not in the active production path
+## Not in the active runtime
 
-- ACE core
+- ACE core online adaptation
+- autonomous prompt rewriting loops
 - student guidance
-- essay / mixed exams
-- DOCX / PPTX ingestion
-- free-form multi-agent orchestration
-- advanced export flows
-
-Legacy and phase-later backend modules remain under `backend/legacy/` and are not mounted into the active app.
+- essay or mixed-question exams
+- DOCX or PPTX ingestion
+- multi-subject support
+- legacy runtime reactivation
 
 ## Key docs
 
 - [backend/README.md](backend/README.md)
-- [docs/architecture_phase2.md](docs/architecture_phase2.md)
 - [docs/evaluation.md](docs/evaluation.md)
+- [docs/ace_foundation.md](docs/ace_foundation.md)
+- [docs/playbook_model.md](docs/playbook_model.md)
+- [docs/feedback_store.md](docs/feedback_store.md)
+- [docs/warmup_data.md](docs/warmup_data.md)
+- [docs/phase3_eval_workflow.md](docs/phase3_eval_workflow.md)
+- [docs/error_analysis.md](docs/error_analysis.md)
+- [docs/data_curation.md](docs/data_curation.md)
 - [docs/ui_flow.md](docs/ui_flow.md)
+- [docs/codebase_cleanup.md](docs/codebase_cleanup.md)
+- [docs/architecture_phase2.md](docs/architecture_phase2.md)

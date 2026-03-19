@@ -12,6 +12,7 @@ class MCQGenerationService:
         self,
         chunk_assignments: list[ChunkAssignment],
         strict_scope: bool = True,
+        playbook_lines: list[str] | None = None,
     ) -> list[GeneratedQuestion]:
         _ = strict_scope
         constraints = {
@@ -20,6 +21,8 @@ class MCQGenerationService:
             "allow_applied_questions": False,
             "max_concurrency": 1,
         }
+        if playbook_lines:
+            constraints["_playbook_lines"] = list(playbook_lines)
         questions = await self.generator.generate_from_chunks_parallel(
             chunk_assignments=chunk_assignments,
             constraints=constraints,
@@ -34,12 +37,15 @@ class MCQGenerationService:
         original_question: GeneratedQuestion,
         context: RetrievedContext,
         edit_prompt: str = "",
+        playbook_lines: list[str] | None = None,
     ) -> GeneratedQuestion:
         constraints = {
             "strict_grounding": True,
             "strict_scope": True,
             "allow_applied_questions": False,
         }
+        if playbook_lines:
+            constraints["_playbook_lines"] = list(playbook_lines)
         regenerated = await self.generator.regenerate_single(
             original_question=original_question,
             context=context,

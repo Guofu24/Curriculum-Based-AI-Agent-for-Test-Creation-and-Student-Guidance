@@ -1,5 +1,5 @@
 """
-Document service for the active Phase 1 runtime.
+Document service for the active MVP runtime.
 
 The persistence layer still uses the existing textbook tables, but the
 production-facing service is document-first:
@@ -88,7 +88,7 @@ class DocumentService:
             file_size=len(file_content),
             file_hash=file_hash,
             language=language,
-            status=DocumentProcessingStatus.PARSING,
+            status=DocumentProcessingStatus.PROCESSING,
             curriculum_tree_json=[],
         )
         self.db.add(document)
@@ -111,7 +111,7 @@ class DocumentService:
                 document_id=document_id,
             )
 
-            document.status = DocumentProcessingStatus.INDEXED
+            document.status = DocumentProcessingStatus.PROCESSED
             document.total_chunks = result.get("total_chunks", 0)
             document.total_pages_or_slides = result.get("total_pages", 0)
             document.curriculum_tree_json = self._build_curriculum_tree(result.get("sections", []))

@@ -12,7 +12,9 @@ import logging
 
 from pinecone import Pinecone, ServerlessSpec
 from langchain_pinecone import PineconeVectorStore
+
 from config import settings
+from services.fallback_embeddings import DeterministicHashEmbeddings, NoOpVectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ class RAGService:
         self._pc = None
         self._index = None
         self._embeddings = None
+        self._using_fallback_embeddings = False
 
     @classmethod
     def get_instance(cls) -> "RAGService":
@@ -37,17 +40,32 @@ class RAGService:
         """Initialize embedding model based on configured provider."""
         if self._embeddings is None:
             if settings.EMBEDDING_PROVIDER == "huggingface":
-                from langchain_huggingface import HuggingFaceEmbeddings
-                self._embeddings = HuggingFaceEmbeddings(
-                    model_name=settings.EMBEDDING_MODEL,
-                    encode_kwargs={"normalize_embeddings": True},
-                )
+                try:
+                    from langchain_huggingface import HuggingFaceEmbeddings
+
+                    self._embeddings = HuggingFaceEmbeddings(
+                        model_name=settings.EMBEDDING_MODEL,
+                        encode_kwargs={"normalize_embeddings": True},
+                    )
+                except Exception as exc:
+                    if not settings.EMBEDDING_ALLOW_FALLBACK:
+                        raise
+                    logger.warning(
+                        "Falling back to deterministic hash embeddings because "
+                        "HuggingFace embeddings could not initialize: %s",
+                        exc,
+                    )
+                    self._embeddings = DeterministicHashEmbeddings(
+                        dimension=settings.EMBEDDING_DIMENSION,
+                    )
+                    self._using_fallback_embeddings = True
             else:
                 from langchain_openai import OpenAIEmbeddings
                 self._embeddings = OpenAIEmbeddings(
                     model=settings.EMBEDDING_MODEL,
                     openai_api_key=settings.OPENAI_API_KEY,
                 )
+                self._using_fallback_embeddings = False
         return self._embeddings
 
     def _get_pinecone_client(self) -> Pinecone:
@@ -78,12 +96,24 @@ class RAGService:
             self._index = pc.Index(index_name)
         return self._index
 
-    def get_vector_store(self, namespace: str = None) -> PineconeVectorStore:
-        """Get a LangChain PineconeVectorStore scoped by document namespace."""
+    def get_vector_store(self, namespace: str = None) -> PineconeVectorStore | NoOpVectorStore:
+        """Get the active vector store scoped by document namespace."""
+        embedding_backend = self._get_embeddings()
+        if (
+            self._using_fallback_embeddings
+            and settings.EMBEDDING_DISABLE_VECTOR_INDEX_WHEN_FALLBACK
+        ):
+            logger.warning(
+                "Using BM25/local retrieval only for namespace %s because fallback "
+                "embeddings are active and vector indexing is disabled in degraded mode.",
+                namespace or "<default>",
+            )
+            return NoOpVectorStore(namespace=namespace)
+
         index = self._get_index()
         return PineconeVectorStore(
             index=index,
-            embedding=self._get_embeddings(),
+            embedding=embedding_backend,
             namespace=namespace,
         )
 
@@ -93,6 +123,16 @@ class RAGService:
 
     def delete_document_chunks(self, document_id: str):
         """Remove all vectors for a specific document namespace."""
+        if (
+            self._using_fallback_embeddings
+            and settings.EMBEDDING_DISABLE_VECTOR_INDEX_WHEN_FALLBACK
+        ):
+            logger.info(
+                "Skipping vector delete for document %s because degraded fallback mode "
+                "never wrote Pinecone vectors.",
+                document_id,
+            )
+            return
         index = self._get_index()
         try:
             index.delete(delete_all=True, namespace=document_id)

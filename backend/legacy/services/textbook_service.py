@@ -76,7 +76,7 @@ class TextbookService:
             file_size=len(file_content),
             file_hash=file_hash,
             language=language,
-            status=ProcessingStatus.PARSING,
+            status=ProcessingStatus.PROCESSING,
             curriculum_tree_json=[],
         )
         self.db.add(textbook)
@@ -95,7 +95,7 @@ class TextbookService:
             await self._replace_sections(textbook_id, result.get("sections", []))
             await self._upsert_learning_objectives(course_id, result.get("sections", []), textbook_id)
 
-            textbook.status = ProcessingStatus.INDEXED
+            textbook.status = ProcessingStatus.PROCESSED
             textbook.total_chunks = result.get("total_chunks", 0)
             textbook.total_pages_or_slides = result.get("total_pages", 0)
             textbook.curriculum_tree_json = self._build_curriculum_tree(result.get("sections", []))

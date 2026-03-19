@@ -9,8 +9,8 @@ const _inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
 const _sourceSerif = Source_Serif_4({ subsets: ['latin'], variable: '--font-source-serif' })
 
 export const metadata: Metadata = {
-  title: 'ExamAI - AI Exam Generation Platform',
-  description: 'Generate professional exams from curriculum-grounded course documents using AI. Built for university lecturers.',
+  title: 'ExamAI - Physics Quality Ops',
+  description: 'Internal quality workspace for grounded Physics exam generation, feedback logging, and error analysis.',
   icons: {
     icon: [
       {

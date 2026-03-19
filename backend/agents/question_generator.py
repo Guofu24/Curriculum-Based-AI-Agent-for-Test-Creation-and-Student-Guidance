@@ -1,5 +1,5 @@
 """
-Question generator for the active Phase 1 runtime.
+Question generator for the active MVP runtime.
 
 Scope:
 - Physics PDFs only
@@ -20,8 +20,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.state import ChunkAssignment, GeneratedQuestion, QuestionSlot, RetrievedContext
 from config import settings
+from utils.bloom_levels import normalize_bloom_level
 
 logger = logging.getLogger(__name__)
+DEFAULT_OPTION_LABELS = ["A", "B", "C", "D"]
 
 
 MCQ_SYSTEM_PROMPT = """You write Vietnamese Physics multiple-choice questions.
@@ -101,6 +103,21 @@ class QuestionGeneratorAgent:
 
     def __init__(self, llm):
         self.llm = llm
+
+    def _playbook_instruction(self, constraints: dict) -> str:
+        lines = [
+            str(item).strip()
+            for item in (constraints.get("_playbook_lines") or [])
+            if str(item).strip()
+        ]
+        if not lines:
+            return ""
+        formatted_lines = "\n".join(f"- {line}" for line in lines)
+        return (
+            "\n\nPLAYBOOK GUIDANCE:\n"
+            "Apply these internal operating bullets only if they are compatible with the provided source text.\n"
+            f"{formatted_lines}"
+        )
 
     def _normalize_bundle_context(self, chunk_assignment: ChunkAssignment) -> BundleContext:
         primary = getattr(chunk_assignment, "primary_chunk", None) or {
@@ -219,6 +236,92 @@ class QuestionGeneratorAgent:
         rubric = payload.get("rubric")
         return rubric if isinstance(rubric, dict) else None
 
+    def _normalize_options(self, raw_options) -> list[dict] | None:
+        if raw_options is None:
+            return None
+
+        if isinstance(raw_options, dict):
+            normalized_from_dict: list[dict] = []
+            for label in DEFAULT_OPTION_LABELS:
+                value = raw_options.get(label)
+                if value is None:
+                    continue
+                text = str(value).strip()
+                if text:
+                    normalized_from_dict.append({"label": label, "text": text})
+            raw_options = normalized_from_dict
+
+        if not isinstance(raw_options, list):
+            return None
+
+        normalized: list[dict] = []
+        for index, item in enumerate(raw_options[:4]):
+            fallback_label = DEFAULT_OPTION_LABELS[index]
+            option = self._normalize_single_option(item, fallback_label)
+            if option is not None:
+                normalized.append(option)
+
+        if len(normalized) != 4:
+            return normalized or None
+
+        relabeled: list[dict] = []
+        for index, option in enumerate(normalized):
+            relabeled.append(
+                {
+                    "label": DEFAULT_OPTION_LABELS[index],
+                    "text": str(option.get("text", "")).strip(),
+                }
+            )
+        return relabeled
+
+    def _normalize_single_option(self, raw_option, fallback_label: str) -> dict | None:
+        if isinstance(raw_option, dict):
+            label = str(raw_option.get("label") or fallback_label).strip().upper()
+            text = str(raw_option.get("text") or "").strip()
+            if not text:
+                return None
+            if label not in DEFAULT_OPTION_LABELS:
+                label = fallback_label
+            return {"label": label, "text": text}
+
+        if raw_option is None:
+            return None
+
+        text = str(raw_option).strip()
+        if not text:
+            return None
+
+        prefixed = re.match(r"^\s*([A-D])[\)\.\:\-]\s*(.+)$", text, re.IGNORECASE)
+        if prefixed:
+            return {
+                "label": prefixed.group(1).upper(),
+                "text": prefixed.group(2).strip(),
+            }
+
+        return {"label": fallback_label, "text": text}
+
+    def _normalize_correct_answer(self, raw_answer, options: list[dict] | None) -> str:
+        text = str(raw_answer or "").strip()
+        if not text:
+            return ""
+
+        answer_label_match = re.match(r"^\s*([A-D])(?:[\)\.\:\-].*)?$", text, re.IGNORECASE)
+        if answer_label_match:
+            return answer_label_match.group(1).upper()
+
+        normalized_options = [item for item in (options or []) if isinstance(item, dict)]
+        answer_text = re.sub(r"^\s*([A-D])[\)\.\:\-]\s*", "", text, flags=re.IGNORECASE).strip().lower()
+        for option in normalized_options:
+            option_label = str(option.get("label") or "").strip().upper()
+            option_text = str(option.get("text") or "").strip().lower()
+            if answer_text and answer_text == option_text:
+                return option_label
+
+        return text.upper()
+
+    def _normalize_payload_bloom_level(self, raw_level, fallback_level: str) -> str:
+        return normalize_bloom_level(raw_level, fallback=fallback_level)
+
     def _assert_mcq_only_assignments(self, assignments: list[dict]) -> None:
         for assignment in assignments:
             question_type = str(assignment.get("question_type") or "").strip().lower()
@@ -292,6 +395,7 @@ class QuestionGeneratorAgent:
                 "\n\nSTRICT GROUNDING: every fact in the question must be directly supported "
                 "by the provided source text."
             )
+        extra += self._playbook_instruction(constraints)
 
         messages = [
             SystemMessage(content=MICRO_PROMPT_SYSTEM + extra),
@@ -305,19 +409,25 @@ class QuestionGeneratorAgent:
             if index >= len(assignments):
                 break
             assignment = assignments[index]
-            options = payload.get("options") if isinstance(payload.get("options"), list) else None
+            options = self._normalize_options(payload.get("options"))
             generated.append(
                 GeneratedQuestion(
                     slot_number=assignment.get("slot_number", 0),
                     blueprint_cell_key=assignment.get("blueprint_cell_key", ""),
                     question_type="mcq",
-                    bloom_level=payload.get("bloom_level", assignment["bloom_level"]),
+                    bloom_level=self._normalize_payload_bloom_level(
+                        payload.get("bloom_level"),
+                        assignment["bloom_level"],
+                    ),
                     difficulty_score=self._difficulty_to_score(
                         payload.get("difficulty", assignment["difficulty"])
                     ),
                     content=payload.get("content", ""),
                     options=options,
-                    correct_answer=payload.get("correct_answer", ""),
+                    correct_answer=self._normalize_correct_answer(
+                        payload.get("correct_answer", ""),
+                        options,
+                    ),
                     rubric=self._normalize_rubric("mcq", payload),
                     explanation=payload.get("explanation", ""),
                     source_chunks=[chunk_assignment.chunk_id],
@@ -366,6 +476,7 @@ class QuestionGeneratorAgent:
                 "\n\nSTRICT GROUNDING: every fact in the question must be directly supported "
                 "by the provided source text."
             )
+        extra += self._playbook_instruction(constraints)
 
         messages = [
             SystemMessage(content=MULTI_CHUNK_SYSTEM_PROMPT + extra),
@@ -379,19 +490,25 @@ class QuestionGeneratorAgent:
             if index >= len(assignments):
                 break
             assignment = assignments[index]
-            options = payload.get("options") if isinstance(payload.get("options"), list) else None
+            options = self._normalize_options(payload.get("options"))
             generated.append(
                 GeneratedQuestion(
                     slot_number=assignment.get("slot_number", 0),
                     blueprint_cell_key=assignment.get("blueprint_cell_key", ""),
                     question_type="mcq",
-                    bloom_level=payload.get("bloom_level", assignment["bloom_level"]),
+                    bloom_level=self._normalize_payload_bloom_level(
+                        payload.get("bloom_level"),
+                        assignment["bloom_level"],
+                    ),
                     difficulty_score=self._difficulty_to_score(
                         payload.get("difficulty", assignment["difficulty"])
                     ),
                     content=payload.get("content", ""),
                     options=options,
-                    correct_answer=payload.get("correct_answer", ""),
+                    correct_answer=self._normalize_correct_answer(
+                        payload.get("correct_answer", ""),
+                        options,
+                    ),
                     rubric=self._normalize_rubric("mcq", payload),
                     explanation=payload.get("explanation", ""),
                     source_chunks=all_chunk_ids,
@@ -520,6 +637,7 @@ class QuestionGeneratorAgent:
             system_prompt += (
                 "\n\nSTRICT GROUNDING: use only the provided context and do not add outside knowledge."
             )
+        system_prompt += self._playbook_instruction(constraints)
 
         edit_prompt = (constraints.get("_edit_prompt") or "").strip()
         edit_instruction = ""
@@ -554,17 +672,23 @@ Generate the question now.{edit_instruction}"""
             ]
         )
         question_data = self._parse_response(response.content)
-        options = question_data.get("options") if isinstance(question_data.get("options"), list) else None
+        options = self._normalize_options(question_data.get("options"))
 
         return GeneratedQuestion(
             slot_number=slot.slot_number,
             blueprint_cell_key=getattr(slot, "blueprint_cell_key", ""),
             question_type="mcq",
-            bloom_level=slot.bloom_level,
+            bloom_level=self._normalize_payload_bloom_level(
+                question_data.get("bloom_level"),
+                slot.bloom_level,
+            ),
             difficulty_score=slot.difficulty_score,
             content=question_data.get("content", ""),
             options=options,
-            correct_answer=question_data.get("correct_answer", ""),
+            correct_answer=self._normalize_correct_answer(
+                question_data.get("correct_answer", ""),
+                options,
+            ),
             rubric=self._normalize_rubric("mcq", question_data),
             explanation=question_data.get("explanation", ""),
             source_chunks=[chunk["id"] for chunk in context.chunks],

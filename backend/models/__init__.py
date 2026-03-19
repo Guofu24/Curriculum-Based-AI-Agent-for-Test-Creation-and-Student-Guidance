@@ -22,6 +22,13 @@ from models.exam import (
     FeedbackSignalType,
     QuestionType,
 )
+from models.playbook import (
+    PlaybookBullet,
+    PlaybookBulletStatus,
+    PlaybookBulletType,
+    ReflectionCandidate,
+    ReflectionCandidateStatus,
+)
 from models.textbook import ProcessingStatus, Textbook, TextbookChapter, TextbookChunk
 from models.token_blacklist import TokenBlacklist
 from models.user import User, UserRole
@@ -48,8 +55,13 @@ __all__ = [
     "FeedbackEvent",
     "FeedbackSignalType",
     "LearningObjective",
+    "PlaybookBullet",
+    "PlaybookBulletStatus",
+    "PlaybookBulletType",
     "ProcessingStatus",
     "QuestionType",
+    "ReflectionCandidate",
+    "ReflectionCandidateStatus",
     "Section",
     "Textbook",
     "TextbookChapter",

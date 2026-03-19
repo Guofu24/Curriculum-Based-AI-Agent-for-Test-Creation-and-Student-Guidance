@@ -3,14 +3,15 @@
 import { usePathname } from "next/navigation"
 import Link from "next/link"
 import {
-  LayoutDashboard,
+  Activity,
+  Bot,
   BookOpen,
-  Sparkles,
-  History,
-  Settings,
-  BrainCircuit,
-  LogOut,
   ChevronsUpDown,
+  History,
+  LayoutDashboard,
+  LogOut,
+  Settings,
+  Sparkles,
 } from "lucide-react"
 import {
   Sidebar,
@@ -26,6 +27,7 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { Badge } from "@/components/ui/badge"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,10 +38,12 @@ import {
 import { useAuth } from "@/components/auth-provider"
 
 const navItems = [
-  { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { title: "Courses & Documents", href: "/dashboard/documents", icon: BookOpen },
-  { title: "Generate Exam", href: "/dashboard/generate", icon: Sparkles },
-  { title: "Exam History", href: "/dashboard/history", icon: History },
+  { title: "Quality Dashboard", href: "/dashboard", icon: LayoutDashboard },
+  { title: "Documents", href: "/dashboard/documents", icon: BookOpen },
+  { title: "Generate", href: "/dashboard/generate", icon: Sparkles },
+  { title: "History", href: "/dashboard/history", icon: History },
+  { title: "Playbook", href: "/dashboard/playbook", icon: Bot },
+  { title: "Feedback", href: "/dashboard/feedback", icon: Activity },
 ]
 
 const secondaryItems = [
@@ -67,21 +71,24 @@ export function AppSidebar() {
             <SidebarMenuButton size="lg" asChild tooltip="ExamAI">
               <Link href="/dashboard">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                  <BrainCircuit className="h-4 w-4" />
+                  <Activity className="h-4 w-4" />
                 </div>
-                <div className="flex flex-col gap-0.5 leading-none">
+                <div className="flex flex-col gap-1 leading-none">
                   <span className="font-semibold text-sm">ExamAI</span>
-                  <span className="text-xs text-muted-foreground">Curriculum Assessment</span>
+                  <span className="text-xs text-muted-foreground">Physics ACE foundation ops</span>
                 </div>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
+        <Badge variant="outline" className="mt-3 w-fit">
+          Phase 4 foundation
+        </Badge>
       </SidebarHeader>
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Platform</SidebarGroupLabel>
+          <SidebarGroupLabel>Workflow</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {navItems.map((item) => (
@@ -103,7 +110,7 @@ export function AppSidebar() {
         </SidebarGroup>
 
         <SidebarGroup>
-          <SidebarGroupLabel>Account</SidebarGroupLabel>
+          <SidebarGroupLabel>Foundation</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {secondaryItems.map((item) => (

@@ -232,15 +232,15 @@ export default function DocumentsPage() {
         <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-2xl font-semibold tracking-tight text-foreground">
-              Course and Document Library
+              Document intake and scope readiness
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Organize course spaces, upload Physics PDFs, and prepare section-level scope for grounded exam generation.
+              Organize Physics PDFs, confirm curriculum extraction, and make sure each source is ready for Phase 4 feedback, playbook, and warmup tracking.
             </p>
           </div>
           <Badge variant="secondary" className="w-fit gap-1.5">
             <Shield className="h-3 w-3" />
-            Grounded document workflow
+            Phase 4 document gate
           </Badge>
         </div>
 
@@ -352,7 +352,7 @@ export default function DocumentsPage() {
               <div className="grid gap-4 sm:grid-cols-3">
                 <SummaryCard label="Courses" value={courses.length.toString()} icon={GraduationCap} />
                 <SummaryCard label="Documents in view" value={filteredDocuments.length.toString()} icon={BookOpen} />
-                <SummaryCard label="Ready for generation" value={processedCount.toString()} icon={Sparkles} />
+                <SummaryCard label="Quality-ready docs" value={processedCount.toString()} icon={Sparkles} />
               </div>
             </CardContent>
           </Card>
@@ -366,7 +366,7 @@ export default function DocumentsPage() {
               <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted"><BookOpen className="h-7 w-7 text-muted-foreground" /></div>
               <div>
                 <p className="text-base font-semibold text-foreground">No documents in this collection</p>
-                <p className="mt-1 text-sm text-muted-foreground">Create a course or upload your first document to start building curriculum-aware exams.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Create a course or upload your first document to start building curriculum-aware, quality-traceable exams.</p>
               </div>
             </CardContent>
           </Card>
@@ -397,7 +397,7 @@ export default function DocumentsPage() {
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <p className="text-sm font-medium text-foreground">Curriculum tree</p>
-                      <p className="mt-1 text-xs text-muted-foreground">The extracted tree is what generation uses for strict scope selection.</p>
+                      <p className="mt-1 text-xs text-muted-foreground">The extracted tree is what generation, retrieval, feedback signals, and playbook scope rules all rely on.</p>
                     </div>
                     {isReadyStatus(detailDocument.status) ? (
                       <Button asChild size="sm">
@@ -416,7 +416,7 @@ export default function DocumentsPage() {
                         Loading curriculum tree...
                       </div>
                     ) : detailCurriculum.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">No curriculum tree is available yet. The document may still be processing or it was uploaded through the legacy flow.</p>
+                      <p className="text-sm text-muted-foreground">No curriculum tree is available yet. The document may still be processing or it came from an older flow without persisted section scope.</p>
                     ) : (
                       <div className="space-y-3">
                         <div className="flex items-center gap-2 text-xs text-muted-foreground">

@@ -59,6 +59,17 @@ SCHEMA_COMPATIBILITY_STATEMENTS = (
     "ALTER TABLE exam_questions ADD COLUMN IF NOT EXISTS is_locked BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE exam_questions ADD COLUMN IF NOT EXISTS quality_score_json JSON NULL",
     "ALTER TABLE exam_questions ADD COLUMN IF NOT EXISTS grounding_report_json JSON NULL",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS workflow_stage VARCHAR(50) NULL",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS event_stage VARCHAR(50) NULL",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS event_source VARCHAR(50) NULL",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS source_type VARCHAR(50) NULL",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS source_ref VARCHAR(255) NULL",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) NULL",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS reviewed_by_human BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS error_categories_json JSON NULL",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS before_snapshot_ref VARCHAR(255) NULL",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS after_snapshot_ref VARCHAR(255) NULL",
+    "ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS linked_eval_sample_id VARCHAR(255) NULL",
 )
 
 

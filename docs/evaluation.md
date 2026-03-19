@@ -1,56 +1,37 @@
 # Evaluation
 
-## Goal
+Phase 4 keeps the **Phase 3 eval workflow** active and treats it as one of the main inputs into ACE foundation.
 
-Phase 2 adds a lightweight internal evaluation layer so the team can measure quality without introducing ACE.
+## Dataset layout
 
-## Dataset location
+- Root: `backend/evals/datasets/physics/`
+- Dev set: `backend/evals/datasets/physics/dev/`
+- Held-out set: `backend/evals/datasets/physics/held_out/`
+- Sample template: `backend/evals/datasets/physics/sample_template.json`
+- Archived Phase 2 sample: `backend/evals/archive/phase2/physics_phase2_eval.json`
 
-- Samples: `backend/evals/samples/physics_phase2_eval.json`
-- Runner: `backend/evals/run_phase2_eval.py`
-
-## Metrics
-
-The current runner reports:
-
-- scope violation rate
-- evidence coverage rate
-- retrieval hit quality
-- verifier pass rate
-- average regenerate count
-- average human edit count
-
-## Run
+## Primary commands
 
 From `backend/`:
 
 ```bash
 conda activate graduation
-python evals/run_phase2_eval.py
+python evals/run_phase3_eval.py --split dev
+python evals/run_phase3_eval.py --split held_out
+python evals/run_phase3_eval.py --split all --json-out evals/output/phase3_report.json --csv-out evals/output/phase3_questions.csv
+python evals/run_error_analysis.py --split all --json-out evals/output/error_analysis.json
 ```
 
-Optional custom dataset:
+## Why it matters in Phase 4
 
-```bash
-conda activate graduation
-python evals/run_phase2_eval.py --dataset evals/samples/physics_phase2_eval.json
-```
+- eval metrics still tell us where retrieval, generation, verifier behavior, and human friction are weak
+- eval outputs now feed reflection candidates and playbook curation
+- `linked_eval_sample_id` can be stored on feedback events when a runtime issue is tied back to a known eval case
 
-## Sample schema
+## Related docs
 
-Each sample contains:
-
-- `sample_id`
-- `expected_scope_section_ids`
-- `questions[]`
-
-Each question can include:
-
-- `question_text`
-- `verification_status`
-- `source_evidence[]`
-- `retrieval.top_section_ids[]`
-- `regenerate_count`
-- `human_edit_count`
-
-The format is intentionally simple so the team can grow it gradually without locking into a heavy benchmarking framework.
+- `phase3_eval_workflow.md`
+- `error_analysis.md`
+- `data_curation.md`
+- `ace_foundation.md`
+- `playbook_model.md`

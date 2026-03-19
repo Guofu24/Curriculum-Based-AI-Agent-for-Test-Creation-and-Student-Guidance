@@ -9,14 +9,24 @@ from database import Base
 
 
 class ProcessingStatus(str, enum.Enum):
-    UPLOADED = "uploaded"
-    PARSING = "parsing"
-    STRUCTURED = "structured"
-    INDEXED = "indexed"
-    FAILED = "failed"
     PENDING = "pending"
     PROCESSING = "processing"
     PROCESSED = "processed"
+    FAILED = "failed"
+
+    # Legacy aliases kept so older code paths do not break while the active
+    # runtime converges on the database-backed four-state lifecycle.
+    UPLOADED = "pending"
+    PARSING = "processing"
+    STRUCTURED = "processed"
+    INDEXED = "processed"
+
+
+PROCESSING_STATUS_ENUM = SAEnum(
+    ProcessingStatus,
+    name="processingstatus",
+    values_callable=lambda enum_cls: [item.name for item in enum_cls],
+)
 
 
 class Textbook(Base):
@@ -44,8 +54,8 @@ class Textbook(Base):
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
     file_hash: Mapped[str] = mapped_column(String(128), nullable=True)
     status: Mapped[ProcessingStatus] = mapped_column(
-        SAEnum(ProcessingStatus, native_enum=False),
-        default=ProcessingStatus.UPLOADED,
+        PROCESSING_STATUS_ENUM,
+        default=ProcessingStatus.PENDING,
     )
     language: Mapped[str] = mapped_column(String(20), nullable=True, default="vi")
     version: Mapped[int] = mapped_column(Integer, default=1)

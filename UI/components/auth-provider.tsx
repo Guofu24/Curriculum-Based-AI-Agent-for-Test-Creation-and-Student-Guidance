@@ -26,6 +26,7 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const SESSION_EXPIRED_EVENT = "examai:session-expired";
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -95,6 +96,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       router.replace("/");
     }
   }, [loading, user, pathname, router]);
+
+  useEffect(() => {
+    function handleSessionExpired() {
+      localStorage.removeItem("token");
+      localStorage.removeItem("refresh_token");
+      setUser(null);
+      if (pathname.startsWith("/dashboard")) {
+        router.replace("/");
+      }
+    }
+
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    return () => {
+      window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    };
+  }, [pathname, router]);
 
   const login = useCallback(
     async (email: string, password: string) => {

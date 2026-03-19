@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     EMBEDDING_PROVIDER: str = "huggingface"
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     EMBEDDING_DIMENSION: int = 384
+    EMBEDDING_ALLOW_FALLBACK: bool = True
+    EMBEDDING_DISABLE_VECTOR_INDEX_WHEN_FALLBACK: bool = True
+    VECTOR_SEARCH_TIMEOUT_SECONDS: float = 6.0
 
     # Pinecone (free cloud vector DB)
     PINECONE_API_KEY: Optional[str] = None
@@ -79,6 +82,8 @@ class Settings(BaseSettings):
     SMTP_USER: Optional[str] = None
     SMTP_PASSWORD: Optional[str] = None
     SMTP_FROM_EMAIL: str = "noreply@examai.local"
+    PLAYBOOK_RETRIEVAL_MODE: str = "off"
+    PLAYBOOK_RETRIEVAL_LIMIT: int = 3
 
     @field_validator("DEBUG", mode="before")
     @classmethod
@@ -94,6 +99,14 @@ class Settings(BaseSettings):
             if normalized in {"0", "false", "no", "off", "release", "production"}:
                 return False
         return value
+
+    @field_validator("PLAYBOOK_RETRIEVAL_MODE", mode="before")
+    @classmethod
+    def normalize_playbook_mode(cls, value):
+        normalized = str(value or "off").strip().lower()
+        if normalized not in {"off", "shadow", "limited"}:
+            return "off"
+        return normalized
 
     model_config = {"env_file": str(_BASE_DIR / ".env"), "extra": "ignore"}
 

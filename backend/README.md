@@ -1,6 +1,6 @@
-# Backend Phase 2
+# Backend Phase 4
 
-This backend is hard-locked to the active Physics exam-generation product and now includes the Phase 2 hardening layer.
+This backend is hard-locked to the active Physics exam-generation product and now exposes the **ACE foundation** workflow needed for Phase 4.
 
 ## Active boundary
 
@@ -9,17 +9,17 @@ This backend is hard-locked to the active Physics exam-generation product and no
 - Input format: PDF only
 - Question type: single-answer MCQ only
 - Scope selection: chapter / lesson / topic only
-- Flow: review, edit, regenerate, versioning, publish
+- Review flow: verify, edit, regenerate, version, publish
 - Required: strict scope grounding and source evidence per question
 
-Not in the active production path:
+Not in the active path:
 
-- ACE core
+- ACE core online adaptation
 - student guidance
-- essay / mixed exams
-- DOCX / PPTX ingestion
-- export runtime
-- free-form multi-agent orchestration
+- essay or mixed exams
+- DOCX or PPTX ingestion
+- export runtime for students
+- unrestricted agent orchestration
 
 ## Production routers
 
@@ -30,6 +30,21 @@ Mounted at startup:
 - `/api/v1/documents`
 - `/api/v1/exams`
 - `/api/v1/generate`
+- `/api/v1/playbook`
+
+Phase 4 feedback + playbook endpoints:
+
+- `GET /api/v1/exams/quality-summary`
+- `GET /api/v1/exams/feedback-summary`
+- `GET /api/v1/exams/feedback-store`
+- `GET /api/v1/exams/{exam_id}/feedback`
+- `GET /api/v1/playbook/overview`
+- `GET /api/v1/playbook/bullets`
+- `GET /api/v1/playbook/candidates`
+- `POST /api/v1/playbook/candidates/generate`
+- `POST /api/v1/playbook/candidates/{candidate_id}/promote`
+- `POST /api/v1/playbook/candidates/{candidate_id}/reject`
+- `GET /api/v1/playbook/warmup-preview`
 
 Kept on disk but not mounted:
 
@@ -37,64 +52,28 @@ Kept on disk but not mounted:
 - `legacy/routers/export.py`
 - `legacy/routers/textbooks.py`
 
-## Active service path
+## Phase 4 additions
 
-The active API surface is document-first:
-
-- `DocumentService` + `documents` router are the production-facing names
-- review/edit/regenerate/versioning are handled through the exam + generation services
-- persistence still uses historical `textbooks` / `textbook_chunks` tables through compatibility aliases such as `DocumentRecord` and `DocumentChunkRecord`
-
-## Deterministic flow
-
-1. Upload a PDF through the documents router.
-2. Parse text and derive curriculum sections.
-3. Attach a deterministic `section_id` to every new chunk.
-4. Persist sections, chunks, and embeddings.
-5. Resolve user scope into concrete `selected_section_ids`.
-6. Build `ExamSpec` with `strict_scope_flag=true`.
-7. Build `Blueprint` from the spec before any generation.
-8. Retrieve evidence for each blueprint slot using section-aware filtering.
-9. Generate MCQ questions only.
-10. Verify scope adherence, MCQ validity, answerability, and duplicates.
-11. Review / edit / regenerate.
-12. Save a new exam version and publish when ready.
-
-## Hard enforcement
-
-### Strict scope
-
-- Request-level `strict_scope` is deprecated and ignored.
-- Constraint-level `constraints.strict_scope` is deprecated and ignored.
-- Runtime payloads are normalized to `strict_scope=true`.
-- Stored `ExamSpec.strict_scope_flag` is always `true` in the active path.
-- Invalid explicit scope does not expand to the whole document.
-
-### Section-based retrieval
-
-- New chunks must carry a persisted `chunk.section_id`.
-- Blueprint cells and slots preserve `section_id`.
-- Retrieval first filters vector/BM25 results by `section_id`.
-- DB fallback queries chunks by `section_id` directly.
-- Heuristic chunk-to-section matching is only a temporary fallback for legacy rows with no `section_id`.
-- Documents without persisted sections are rejected from active generation/regeneration until reprocessed.
-
-### Legacy runtime cut-off
-
-- Non-MCQ exams are rejected from active regenerate/publish paths.
-- Non-section-scoped legacy exams are rejected from active regenerate/publish paths.
-- Startup wiring does not depend on guidance/export/orchestrator modules.
-
-## Phase 2 additions
-
-- Structured `feedback_events` for:
-  - retrieval summaries
-  - verifier warnings and failures
-  - regenerate actions
-  - human edits
-  - publish actions
-- Minimal evaluation runner under `evals/`
-- Stronger backend regression checks under `tests/`
+- hardened `feedback_events` with:
+  - `event_stage`
+  - `source_type`
+  - `source_ref`
+  - `error_categories_json`
+  - `before_snapshot_ref`
+  - `after_snapshot_ref`
+  - `linked_eval_sample_id`
+- `playbook_bullets` persistence with seed approved bullets
+- `reflection_candidates` persistence and promote/reject lifecycle
+- feature-flagged playbook retrieval for generator/verifier:
+  - `PLAYBOOK_RETRIEVAL_MODE=off|shadow|limited`
+  - `PLAYBOOK_RETRIEVAL_LIMIT`
+- warmup export service and script
+- UI-facing playbook / feedback / warmup APIs
+- resilient embedding startup:
+  - default backend still prefers `sentence-transformers`
+  - if the local HuggingFace embedding stack is broken, dev mode can fall back to deterministic hash embeddings via `EMBEDDING_ALLOW_FALLBACK=true`
+  - fallback keeps upload/index/retrieval alive for local work, but retrieval quality is lower than the intended semantic embedding path
+  - when fallback embeddings are active, the runtime automatically disables Pinecone vector I/O and uses BM25/local chunk retrieval to avoid slow retry loops against cloud vector search
 
 ## Validation commands
 
@@ -103,12 +82,21 @@ From the `backend` directory:
 ```bash
 conda activate graduation
 python tests/mvp_smoke_checks.py
-python tests/phase2_hardening_checks.py
-python evals/run_phase2_eval.py
+python tests/phase3_quality_checks.py
+python tests/phase4_foundation_checks.py
+python evals/run_phase3_eval.py --split dev
+python evals/run_error_analysis.py --split dev
+python evals/export_warmup_dataset.py --output evals/output/warmup_dataset.json
 ```
 
 ## Supporting docs
 
-- `../docs/architecture_phase2.md`
 - `../docs/evaluation.md`
+- `../docs/ace_foundation.md`
+- `../docs/playbook_model.md`
+- `../docs/feedback_store.md`
+- `../docs/warmup_data.md`
+- `../docs/error_analysis.md`
+- `../docs/data_curation.md`
 - `../docs/ui_flow.md`
+- `../docs/codebase_cleanup.md`

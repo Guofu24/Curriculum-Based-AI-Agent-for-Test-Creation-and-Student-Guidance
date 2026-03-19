@@ -1,43 +1,61 @@
-# =========================================
-# ExamAI Project — .gitignore
-# =========================================
+# ExamAI project
 
-# ─── Environment & Secrets ──────────────────
+# Environment and secrets
 .env
 .env.local
 .env.*.local
 backend/.env
 backend/.env.local
 
-# ─── Python ─────────────────────────────────
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-*.egg-info/
 *.egg
-dist/
-build/
+*.egg-info/
 .eggs/
+build/
+dist/
 *.whl
-
-# ─── Virtual Environments ───────────────────
-venv/
 .venv/
+venv/
 env/
 .conda/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
-# ─── Node.js / Next.js ─────────────────────
+# Node and Next.js
 node_modules/
 UI/node_modules/
 UI/.next/
 UI/out/
 UI/.turbo/
+UI/tsconfig.tsbuildinfo
 .pnp
 .pnp.js
 .pnp.cjs
 
-# ─── IDE & Editors ─────────────────────────
+# Data and uploads
+backend/data/uploads/
+*.pdf
+*.docx
+*.pptx
+
+# Databases
+*.db
+*.sqlite3
+
+# Eval outputs
+backend/evals/output/
+
+# Logs
+*.log
+logs/
+
+# IDE and editors
 .vscode/
 .idea/
 *.swp
@@ -47,36 +65,16 @@ UI/.turbo/
 .classpath
 .settings/
 
-# ─── OS Files ──────────────────────────────
+# OS files
 .DS_Store
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# ─── Data & Uploads ────────────────────────
-backend/data/uploads/
-*.pdf
-*.docx
-*.pptx
-
-# ─── Database ──────────────────────────────
-*.db
-*.sqlite3
-
-# ─── Logs ──────────────────────────────────
-*.log
-logs/
-
-# ─── Testing & Coverage ───────────────────
-.coverage
-htmlcov/
-.pytest_cache/
-.mypy_cache/
-
-# ─── Docker ────────────────────────────────
+# Docker
 docker-compose.override.yml
 
-# ─── Misc ──────────────────────────────────
+# Misc
 *.bak
 *.tmp
 *.temp

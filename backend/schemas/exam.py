@@ -205,6 +205,7 @@ class QuestionResponse(BaseModel):
     is_validated: bool = False
     quality_score_detail: dict | None = None
     grounding_report_detail: dict | None = None
+    error_categories: list[str] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -295,6 +296,14 @@ class ExamListResponse(BaseModel):
     total_questions: int
     strict_scope_flag: bool = True
     quality_score: float | None = None
+    current_version_number: int | None = None
+    version_count: int = 0
+    verifier_pass_rate: float | None = None
+    evidence_coverage_rate: float | None = None
+    warning_count: int = 0
+    regenerate_count: int = 0
+    human_edit_count: int = 0
+    feedback_event_count: int = 0
     created_at: datetime
     updated_at: datetime | None = None
 
@@ -362,6 +371,7 @@ class EditOperationResponse(BaseModel):
     id: str
     edit_type: str
     target_question_id: str | None = None
+    target_slots: list[int] = Field(default_factory=list)
     prompt_used: str | None = None
     created_at: datetime
 
@@ -370,9 +380,25 @@ class EditOperationResponse(BaseModel):
 
 class FeedbackEventResponse(BaseModel):
     id: str
+    exam_id: str
+    exam_title: str | None = None
+    exam_version_id: str | None = None
+    version_number: int | None = None
+    actor_id: str | None = None
     signal_type: str
     severity: str
+    workflow_stage: str | None = None
+    event_stage: str | None = None
+    event_source: str | None = None
+    source_type: str | None = None
+    source_ref: str | None = None
+    review_status: str | None = None
+    reviewed_by_human: bool = False
     question_id: str | None = None
+    error_categories: list[str] = Field(default_factory=list)
+    before_snapshot_ref: str | None = None
+    after_snapshot_ref: str | None = None
+    linked_eval_sample_id: str | None = None
     payload: dict | None = None
     created_at: datetime
 
@@ -392,6 +418,45 @@ class ExamVersionResponse(BaseModel):
     feedback_events: list[FeedbackEventResponse] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
+
+
+class ErrorCategoryCount(BaseModel):
+    category: str
+    count: int
+
+
+class NamedCount(BaseModel):
+    name: str
+    count: int
+
+
+class QualitySummaryResponse(BaseModel):
+    documents_active: int
+    exams_generated: int
+    question_count: int
+    verifier_pass_rate: float
+    verifier_warning_rate: float
+    evidence_coverage_rate: float
+    scope_violation_rate: float
+    avg_regenerate_count: float
+    avg_human_edit_count: float
+    version_churn: float
+    top_error_categories: list[ErrorCategoryCount] = Field(default_factory=list)
+    recent_warnings: list[FeedbackEventResponse] = Field(default_factory=list)
+    last_updated_at: datetime | None = None
+
+
+class FeedbackStoreSummaryResponse(BaseModel):
+    total_events: int
+    reviewed_by_human_count: int
+    accepted_count: int
+    rejected_count: int
+    corrected_count: int
+    linked_eval_count: int
+    top_signal_types: list[NamedCount] = Field(default_factory=list)
+    top_error_categories: list[ErrorCategoryCount] = Field(default_factory=list)
+    recent_events: list[FeedbackEventResponse] = Field(default_factory=list)
+    last_updated_at: datetime | None = None
 
 
 ExamResponse.model_rebuild()

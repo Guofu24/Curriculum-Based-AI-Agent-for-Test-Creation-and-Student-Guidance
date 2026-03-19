@@ -33,6 +33,7 @@ import {
 import {
   courses as coursesApi,
   documents as documentsApi,
+  exams as examsApi,
   generation as generationApi,
   isReadyStatus,
   type Course,
@@ -40,8 +41,10 @@ import {
   type DocumentListItem,
   type ExamGenerationRequest,
   type GenerationStep,
+  type QualitySummary,
   type ScopeUnitPayload,
 } from "@/lib/api"
+import { formatPercent } from "@/lib/quality"
 
 function flattenNodes(nodes: CurriculumNode[]): CurriculumNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children || [])])
@@ -65,10 +68,26 @@ function buildScopePayload(node: CurriculumNode): ScopeUnitPayload {
   }
 }
 
+const emptySummary: QualitySummary = {
+  documents_active: 0,
+  exams_generated: 0,
+  question_count: 0,
+  verifier_pass_rate: 0,
+  verifier_warning_rate: 0,
+  evidence_coverage_rate: 0,
+  scope_violation_rate: 0,
+  avg_regenerate_count: 0,
+  avg_human_edit_count: 0,
+  version_churn: 0,
+  top_error_categories: [],
+  recent_warnings: [],
+}
+
 export default function GenerateExamPage() {
   const router = useRouter()
   const [courses, setCourses] = useState<Course[]>([])
   const [documents, setDocuments] = useState<DocumentListItem[]>([])
+  const [qualitySummary, setQualitySummary] = useState<QualitySummary>(emptySummary)
   const [loadingSources, setLoadingSources] = useState(true)
   const [selectedCourse, setSelectedCourse] = useState<string>("all")
   const [selectedDocument, setSelectedDocument] = useState<string>("")
@@ -86,12 +105,14 @@ export default function GenerateExamPage() {
 
   const loadSources = useCallback(async () => {
     try {
-      const [courseList, documentList] = await Promise.all([
+      const [courseList, documentList, summary] = await Promise.all([
         coursesApi.list(),
         documentsApi.listAll(),
+        examsApi.getQualitySummary(),
       ])
       setCourses(courseList)
       setDocuments(documentList)
+      setQualitySummary(summary)
     } finally {
       setLoadingSources(false)
     }
@@ -246,7 +267,7 @@ export default function GenerateExamPage() {
   if (isGenerating) {
     return (
       <>
-        <DashboardHeader title="Generate Exam" />
+        <DashboardHeader title="Generate" />
         {generationError ? (
           <div className="flex flex-1 items-center justify-center p-6">
             <div className="max-w-md text-center">
@@ -272,7 +293,7 @@ export default function GenerateExamPage() {
   if (loadingSources) {
     return (
       <>
-        <DashboardHeader title="Generate Exam" />
+        <DashboardHeader title="Generate" />
         <div className="flex flex-1 items-center justify-center">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
@@ -282,13 +303,19 @@ export default function GenerateExamPage() {
 
   return (
     <>
-      <DashboardHeader title="Generate Exam" />
+      <DashboardHeader title="Generate" />
       <div className="flex flex-1 flex-col gap-6 p-6 max-w-6xl">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight text-foreground">Grounded exam generation</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Generate one Physics exam in Vietnamese from PDF content only. The system creates an exam spec, builds a blueprint, retrieves evidence inside the selected scope, and saves a reviewable version.
-          </p>
+        <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-2xl font-semibold tracking-tight text-foreground">Generate under Phase 4 guardrails</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              The goal is no longer just to generate an exam. Each run should produce evidence-grounded questions that are easy to evaluate, edit, trace through feedback, and eventually learn from through curated playbook bullets.
+            </p>
+          </div>
+          <Badge variant="secondary" className="w-fit gap-1.5">
+            <ShieldCheck className="h-3.5 w-3.5" />
+            Quality logging enabled
+          </Badge>
         </div>
 
         {readyDocuments.length === 0 ? (
@@ -302,19 +329,19 @@ export default function GenerateExamPage() {
               <Button asChild>
                 <Link href="/dashboard/documents">
                   <ChevronRight className="mr-2 h-4 w-4" />
-                  Go to document library
+                  Go to documents
                 </Link>
               </Button>
             </CardContent>
           </Card>
         ) : (
           <>
-            <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+            <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
               <Card className="rounded-2xl shadow-sm">
                 <CardHeader className="pb-4">
                   <CardTitle className="flex items-center gap-2 text-base font-semibold">
                     <BookOpen className="h-4 w-4 text-primary" />
-                    Scope Selection
+                    Scope selection
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="flex flex-col gap-5">
@@ -357,7 +384,7 @@ export default function GenerateExamPage() {
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <p className="text-sm font-medium text-foreground">Curriculum scope</p>
-                        <p className="mt-1 text-xs text-muted-foreground">Select chapter, lesson, topic, or subtopic. Retrieval stays inside these sections only.</p>
+                        <p className="mt-1 text-xs text-muted-foreground">Select the exact sections that retrieval is allowed to use. Phase 4 feedback and playbook layers still treat scope drift as a first-class failure.</p>
                       </div>
                       <div className="flex items-center gap-2">
                         <Button variant="outline" size="sm" onClick={selectAllScope} disabled={scopeNodes.length === 0}>Select all</Button>
@@ -385,47 +412,58 @@ export default function GenerateExamPage() {
                 </CardContent>
               </Card>
 
-              <Card className="rounded-2xl shadow-sm">
-                <CardHeader className="pb-4">
-                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                    <ShieldCheck className="h-4 w-4 text-primary" />
-                    Runtime guardrails
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="flex flex-col gap-5">
-                  <div className="flex flex-wrap gap-2">
-                    <Badge variant="secondary">Physics</Badge>
-                    <Badge variant="outline">Vietnamese</Badge>
-                    <Badge variant="outline">PDF only</Badge>
-                    <Badge variant="outline">MCQ single-answer</Badge>
-                    <Badge variant="outline">Strict scope</Badge>
-                  </div>
+              <div className="space-y-6">
+                <Card className="rounded-2xl shadow-sm">
+                  <CardHeader className="pb-4">
+                    <CardTitle className="flex items-center gap-2 text-base font-semibold">
+                      <ShieldCheck className="h-4 w-4 text-primary" />
+                      Runtime and instrumentation
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-5">
+                    <div className="flex flex-wrap gap-2">
+                      <Badge variant="secondary">Physics</Badge>
+                      <Badge variant="outline">Vietnamese</Badge>
+                      <Badge variant="outline">PDF only</Badge>
+                      <Badge variant="outline">MCQ single-answer</Badge>
+                      <Badge variant="outline">Strict scope</Badge>
+                      <Badge variant="outline">Feedback events</Badge>
+                    </div>
 
-                  <div className="space-y-2">
-                    <Label>Total questions</Label>
-                    <Input type="number" min={1} max={100} value={totalQuestions} onChange={(event) => setTotalQuestions(event.target.value)} />
-                  </div>
+                    <div className="space-y-2">
+                      <Label>Total questions</Label>
+                      <Input type="number" min={1} max={100} value={totalQuestions} onChange={(event) => setTotalQuestions(event.target.value)} />
+                    </div>
 
-                  <div className="space-y-2">
-                    <Label>Time limit (minutes)</Label>
-                    <Input value={timeLimit} onChange={(event) => setTimeLimit(event.target.value)} />
-                  </div>
+                    <div className="space-y-2">
+                      <Label>Time limit (minutes)</Label>
+                      <Input value={timeLimit} onChange={(event) => setTimeLimit(event.target.value)} />
+                    </div>
 
-                  <div className="space-y-2">
-                    <Label>Teacher request</Label>
-                    <Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Example: focus more on conservation laws and keep the questions concise." className="min-h-24" />
-                  </div>
+                    <div className="space-y-2">
+                      <Label>Teacher request</Label>
+                      <Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Example: focus more on conservation laws and keep the questions concise." className="min-h-24" />
+                    </div>
 
-                  <div className="space-y-2">
-                    <Label>Instructions shown in the exam</Label>
-                    <Textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="Example: choose one correct answer for each question." className="min-h-20" />
-                  </div>
+                    <div className="space-y-2">
+                      <Label>Instructions shown in the exam</Label>
+                      <Textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="Example: choose one correct answer for each question." className="min-h-20" />
+                    </div>
+                  </CardContent>
+                </Card>
 
-                  <div className="rounded-xl border bg-muted/20 p-4 text-sm text-muted-foreground">
-                    Generation only starts after an exam spec and a section-level blueprint have been created.
-                  </div>
-                </CardContent>
-              </Card>
+                <Card className="rounded-2xl shadow-sm">
+                  <CardHeader className="pb-4">
+                    <CardTitle className="text-base font-semibold text-foreground">Current quality pulse</CardTitle>
+                  </CardHeader>
+                  <CardContent className="grid gap-3 sm:grid-cols-2">
+                    <PulseStat label="Verifier pass" value={formatPercent(qualitySummary.verifier_pass_rate)} />
+                    <PulseStat label="Evidence coverage" value={formatPercent(qualitySummary.evidence_coverage_rate)} />
+                    <PulseStat label="Warning rate" value={formatPercent(qualitySummary.verifier_warning_rate)} />
+                    <PulseStat label="Avg regenerate" value={qualitySummary.avg_regenerate_count.toFixed(2)} />
+                  </CardContent>
+                </Card>
+              </div>
             </div>
 
             <Card className="rounded-2xl shadow-sm">
@@ -436,7 +474,7 @@ export default function GenerateExamPage() {
                     <Badge variant="outline">{selectedScope.length > 0 ? `${selectedScope.length} scope units selected` : "Select at least one scope unit"}</Badge>
                     <Badge variant="outline">{selectedDocumentItem?.title || "No document selected"}</Badge>
                   </div>
-                  <p className="text-sm text-muted-foreground">Each question will include source evidence linked to the selected document and scoped sections before it reaches review.</p>
+                  <p className="text-sm text-muted-foreground">This run will emit verifier signals, evidence traces, edit history, and feedback events so the review page can show where quality is breaking down.</p>
                 </div>
                 <Button size="lg" className="h-11 md:min-w-56" disabled={!selectedDocumentItem || parsedQuestionCount <= 0 || selectedScope.length === 0} onClick={handleGenerate}>
                   <Wand2 className="mr-2 h-4 w-4" />
@@ -467,6 +505,15 @@ function MiniStat({
         {label}
       </div>
       <p className="mt-2 text-lg font-semibold text-foreground">{value}</p>
+    </div>
+  )
+}
+
+function PulseStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border bg-muted/20 p-4">
+      <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="mt-2 text-xl font-semibold text-foreground">{value}</p>
     </div>
   )
 }

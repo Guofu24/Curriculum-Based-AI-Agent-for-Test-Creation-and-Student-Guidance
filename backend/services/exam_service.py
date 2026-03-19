@@ -42,10 +42,12 @@ from services.editing.review_edit_service import ReviewEditService
 from services.exam_planning.spec_service import ExamSpecService
 from services.feedback.feedback_event_service import FeedbackEventService
 from services.generation.mcq_generation_service import MCQGenerationService
+from services.playbook.retrieval_service import PlaybookRetrievalService
 from services.rag_service import RAGService
 from services.retrieval.scoped_retrieval_service import ScopedRetrievalService
 from services.verification.mcq_verifier_service import MCQVerifierService
 from agents.validator import ValidatorAgent
+from utils.bloom_levels import normalize_bloom_level
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +121,9 @@ class ExamService:
         quality_by_slot: dict[int, dict],
         grounding_by_slot: dict[int, dict],
     ) -> ExamQuestion:
+        normalized_bloom = BloomLevel(
+            normalize_bloom_level(question.bloom_level, fallback="understand")
+        )
         return ExamQuestion(
             id=str(uuid.uuid4()),
             exam_id=exam_id,
@@ -126,7 +131,7 @@ class ExamService:
             question_number=question.slot_number,
             blueprint_cell_key=question.blueprint_cell_key or None,
             question_type=QuestionType.MCQ,
-            bloom_level=BloomLevel(question.bloom_level),
+            bloom_level=normalized_bloom,
             difficulty_score=question.difficulty_score,
             content=question.content,
             options=question.options,
@@ -472,6 +477,9 @@ class ExamService:
             if question.question_number is not None and question.id
         }
 
+    def _playbook_scope_units(self, scope_items: list[ScopeUnit]) -> list[dict]:
+        return [self._scope_to_dict(item) for item in scope_items or []]
+
     def _normalize_edit_requests(
         self,
         current_questions: list[ExamQuestion],
@@ -673,6 +681,7 @@ class ExamService:
                 document_id=document_id,
                 section_by_id=resolved_scope.section_by_id,
             )
+            playbook_service = PlaybookRetrievalService(self.db)
             retrieved_contexts, chunk_metadata_index, retrieval_stats = await retrieval_service.retrieve_for_blueprint(
                 blueprint=blueprint,
                 document_id=document_id,
@@ -682,21 +691,36 @@ class ExamService:
             if not chunk_assignments:
                 raise ValueError("No scoped evidence available for the selected curriculum units")
 
+            generation_playbook = await playbook_service.retrieve(
+                stage="generation",
+                language=exam_spec.output_language,
+                question_type=exam_spec.question_type,
+                scope_units=self._playbook_scope_units(exam_spec.selected_scope),
+            )
             generated_questions = await generation_service.generate(
                 chunk_assignments=chunk_assignments,
                 strict_scope=True,
+                playbook_lines=generation_playbook.as_prompt_lines(),
             )
             self._enrich_source_evidence(generated_questions, chunk_metadata_index, document_id)
+            verification_playbook = await playbook_service.retrieve(
+                stage="verification",
+                language=exam_spec.output_language,
+                question_type=exam_spec.question_type,
+                scope_units=self._playbook_scope_units(exam_spec.selected_scope),
+            )
             verified_questions, _, _, _, _ = await verifier_service.verify(
                 questions=generated_questions,
                 blueprint=blueprint,
                 resolved_scope=resolved_scope,
+                playbook_lines=verification_playbook.as_prompt_lines(),
             )
             final_questions = self._select_final_questions(verified_questions, blueprint)
             final_questions, validation_summary, quality_scores, grounding_reports, duplicate_groups = await verifier_service.verify(
                 questions=final_questions,
                 blueprint=blueprint,
                 resolved_scope=resolved_scope,
+                playbook_lines=verification_playbook.as_prompt_lines(),
             )
 
             version = await self._create_exam_version(
@@ -740,6 +764,28 @@ class ExamService:
                 actor_id=user_id,
                 questions=persisted_questions,
             )
+            if generation_playbook.mode != "off":
+                feedback_service.queue_playbook_shadow_event(
+                    exam_id=exam.id,
+                    exam_version_id=version.id,
+                    actor_id=user_id,
+                    stage="generation",
+                    payload={
+                        **generation_playbook.as_event_payload(),
+                        "question_count": len(persisted_questions),
+                    },
+                )
+            if verification_playbook.mode != "off":
+                feedback_service.queue_playbook_shadow_event(
+                    exam_id=exam.id,
+                    exam_version_id=version.id,
+                    actor_id=user_id,
+                    stage="verification",
+                    payload={
+                        **verification_playbook.as_event_payload(),
+                        "question_count": len(persisted_questions),
+                    },
+                )
 
             await self._persist_exam_spec_records(
                 exam=exam,
@@ -808,6 +854,13 @@ class ExamService:
             document_id=exam.textbook_id,
             section_by_id=resolved_scope.section_by_id,
         )
+        playbook_service = PlaybookRetrievalService(self.db)
+        review_playbook = await playbook_service.retrieve(
+            stage="review",
+            language=exam.output_language,
+            question_type="mcq_single_answer",
+            scope_units=list(exam.selected_scope_json or []),
+        )
 
         chunk_metadata_index: dict[str, dict] = {}
         retrieval_summaries: list[dict] = []
@@ -838,6 +891,7 @@ class ExamService:
                 original_question=original_question,
                 context=context,
                 edit_prompt=edit_prompt,
+                playbook_lines=review_playbook.as_prompt_lines(),
             )
             regenerated.is_locked = current_question.is_locked
             regenerated.scope_tags = list(current_question.scope_tags or original_question.scope_tags or [])
@@ -846,10 +900,17 @@ class ExamService:
 
         final_questions = edit_service.renumber(question_map)
         self._enrich_source_evidence(final_questions, chunk_metadata_index, exam.textbook_id)
+        verification_playbook = await playbook_service.retrieve(
+            stage="verification",
+            language=exam.output_language,
+            question_type="mcq_single_answer",
+            scope_units=list(exam.selected_scope_json or []),
+        )
         final_questions, validation_summary, quality_scores, grounding_reports, duplicate_groups = await verifier_service.verify(
             questions=final_questions,
             blueprint=blueprint,
             resolved_scope=resolved_scope,
+            playbook_lines=verification_playbook.as_prompt_lines(),
         )
 
         new_version = await self._create_exam_version(
@@ -896,6 +957,7 @@ class ExamService:
         feedback_service.queue_edit_events(
             exam_id=exam.id,
             exam_version_id=new_version.id,
+            parent_version_id=exam.current_version.id,
             actor_id=user_id,
             edit_requests=edit_requests,
             question_id_by_slot=self._question_id_by_slot(persisted_questions),
@@ -906,6 +968,28 @@ class ExamService:
             actor_id=user_id,
             questions=persisted_questions,
         )
+        if review_playbook.mode != "off":
+            feedback_service.queue_playbook_shadow_event(
+                exam_id=exam.id,
+                exam_version_id=new_version.id,
+                actor_id=user_id,
+                stage="review",
+                payload={
+                    **review_playbook.as_event_payload(),
+                    "regenerated_slots": sorted(slot for slot, _ in regenerate_targets),
+                },
+            )
+        if verification_playbook.mode != "off":
+            feedback_service.queue_playbook_shadow_event(
+                exam_id=exam.id,
+                exam_version_id=new_version.id,
+                actor_id=user_id,
+                stage="verification",
+                payload={
+                    **verification_playbook.as_event_payload(),
+                    "question_count": len(persisted_questions),
+                },
+            )
 
         history = list(exam.edit_history_json or [])
         history.append(

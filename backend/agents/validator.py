@@ -5,7 +5,7 @@ Responsibilities:
 - Verify each generated question has proper structure and content
 - Check: non-empty content, correct_answer present, MCQ has 4 options
 - Validate bloom_level and difficulty alignment
-- Grounding check via GroundingChecker (hybrid heuristic, Phase 2)
+- Grounding check via GroundingChecker (hybrid heuristic, active MVP path)
 - Zero LLM calls — saves API tokens for question generation
 
 Output per question (validation_notes JSON):
@@ -187,12 +187,19 @@ class ValidatorAgent:
             else:
                 # Check options have label and text
                 for opt in question.options:
+                    if not isinstance(opt, dict):
+                        issues.append("MCQ options must be objects with label/text")
+                        break
                     if not opt.get("label") or not opt.get("text"):
                         issues.append("MCQ option missing label or text")
                         break
 
                 # correct_answer should be one of the option labels
-                labels = {opt.get("label") for opt in question.options}
+                labels = {
+                    opt.get("label")
+                    for opt in question.options
+                    if isinstance(opt, dict)
+                }
                 if question.correct_answer not in labels:
                     issues.append(
                         f"correct_answer '{question.correct_answer}' "

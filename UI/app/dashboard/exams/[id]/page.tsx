@@ -36,6 +36,7 @@ import {
   Check,
   Eye,
   FileText,
+  History,
   Layers,
   Loader2,
   Lock,
@@ -49,12 +50,28 @@ import {
   Unlock,
 } from "lucide-react"
 import {
+  ApiError,
   exams as examsApi,
   generation as generationApi,
+  type ExamVersion,
   type Exam,
   type MCQOption,
   type Question,
 } from "@/lib/api"
+import {
+  countEvidenceCoverage,
+  countVerifierWarnings,
+  formatPercent,
+  getEvidenceCoverageRate,
+  getLatestVersion,
+  getPlaybookShadowEvents,
+  getQuestionEditOperations,
+  getQuestionFeedbackEvents,
+  getVerifierPassRate,
+  getVersionChurn,
+  humanReadableCategory,
+  humanReadableSignal,
+} from "@/lib/quality"
 
 type EditState = {
   questionId: string
@@ -102,8 +119,23 @@ function useActiveVersion(exam: Exam | null, selectedVersionId: string) {
   }, [exam, selectedVersionId])
 }
 
-function signalLabel(signal: string) {
-  return signal.replaceAll("_", " ")
+async function loadExamWithRetry(examId: string, attempts = 5): Promise<Exam> {
+  let lastError: unknown = null
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await examsApi.get(examId)
+    } catch (error: unknown) {
+      lastError = error
+      const isTransientNotFound = error instanceof ApiError && error.status === 404 && attempt < attempts
+      if (!isTransientNotFound) {
+        throw error
+      }
+      await new Promise((resolve) => setTimeout(resolve, 350 * attempt))
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("Unable to load exam")
 }
 
 export default function ExamReviewPage() {
@@ -122,22 +154,37 @@ export default function ExamReviewPage() {
 
   useEffect(() => {
     if (!examId) return
-    examsApi
-      .get(examId)
+    let cancelled = false
+    setLoading(true)
+    setError("")
+
+    void loadExamWithRetry(examId)
       .then((result) => {
+        if (cancelled) return
         setExam(result)
         setSelectedVersionId(result.current_version?.id || result.versions?.[result.versions.length - 1]?.id || "")
       })
       .catch((loadError: unknown) => {
+        if (cancelled) return
         setError(loadError instanceof Error ? loadError.message : "Unable to load exam")
       })
-      .finally(() => setLoading(false))
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [examId])
 
   const activeVersion = useActiveVersion(exam, selectedVersionId)
   const questions = activeVersion?.questions || exam?.questions || []
   const feedbackEvents = activeVersion?.feedback_events || exam?.feedback_events || []
+  const playbookShadowEvents = getPlaybookShadowEvents(feedbackEvents)
   const filteredQuestions = questions.filter((question) => filterBloom === "all" || question.bloom_level === filterBloom)
+  const versionOperations = activeVersion?.edit_operations || []
+  const latestVersion = getLatestVersion(exam)
+  const playbookMode = String(playbookShadowEvents[0]?.payload?.retrieval_mode || "off")
 
   const applyAndRefresh = async (action: () => Promise<Exam>, questionId?: string) => {
     setError("")
@@ -229,7 +276,7 @@ export default function ExamReviewPage() {
   if (loading) {
     return (
       <>
-        <DashboardHeader title="Exam Review" />
+        <DashboardHeader title="Review" />
         <div className="flex flex-1 items-center justify-center">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
@@ -240,7 +287,7 @@ export default function ExamReviewPage() {
   if (!exam) {
     return (
       <>
-        <DashboardHeader title="Exam Review" />
+        <DashboardHeader title="Review" />
         <div className="flex flex-1 items-center justify-center">
           <p className="text-muted-foreground">Exam not found</p>
         </div>
@@ -250,7 +297,7 @@ export default function ExamReviewPage() {
 
   return (
     <>
-      <DashboardHeader title="Exam Review" />
+      <DashboardHeader title="Review" />
       <div className="flex flex-1 flex-col gap-6 p-6">
         {error && <div className="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>}
 
@@ -262,14 +309,15 @@ export default function ExamReviewPage() {
               {exam.published_at ? <Badge>Published</Badge> : null}
             </div>
             <p className="text-sm text-muted-foreground">
-              {exam.total_questions} MCQ questions - created {formatDate(exam.created_at)}
-              {exam.updated_at ? ` - updated ${formatDate(exam.updated_at)}` : ""}
+              {exam.total_questions} MCQ questions | created {formatDate(exam.created_at)}
+              {exam.updated_at ? ` | updated ${formatDate(exam.updated_at)}` : ""}
             </p>
             <div className="flex flex-wrap gap-2">
               <Badge variant="outline">Physics</Badge>
               <Badge variant="outline">Vietnamese</Badge>
               <Badge variant="outline">PDF scoped generation</Badge>
               <Badge variant="outline">{exam.strict_scope_flag ? "Strict scope enforced" : "Legacy non-MVP exam"}</Badge>
+              {playbookShadowEvents.length > 0 ? <Badge variant="outline" className="capitalize">Playbook {playbookMode}</Badge> : null}
             </div>
           </div>
 
@@ -297,26 +345,41 @@ export default function ExamReviewPage() {
           </div>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-5">
+        <div className="grid gap-4 md:grid-cols-6">
           <Metric title="Active version" value={activeVersion ? `v${activeVersion.version_number}` : "N/A"} note={activeVersion?.change_summary || "Current review version"} icon={Layers} />
-          <Metric title="Blueprint cells" value={String(Array.isArray(exam.blueprint?.cells) ? exam.blueprint.cells.length : 0)} note="Question plan by scope unit" icon={FileText} />
-          <Metric title="Verified" value={`${questions.filter((question) => question.is_validated).length}/${questions.length}`} note="Questions passing verifier" icon={ShieldCheck} />
-          <Metric title="Warnings" value={String(questions.reduce((sum, question) => sum + (question.warnings?.length || 0), 0))} note="Needs review before publish" icon={AlertTriangle} />
-          <Metric title="Feedback signals" value={String(feedbackEvents.length)} note="Structured review logs" icon={Sparkles} />
+          <Metric title="Verifier pass" value={formatPercent(getVerifierPassRate(questions))} note="Current version pass rate" icon={ShieldCheck} />
+          <Metric title="Evidence coverage" value={formatPercent(getEvidenceCoverageRate(questions))} note={`${countEvidenceCoverage(questions)}/${questions.length || 0} questions grounded`} icon={Eye} />
+          <Metric title="Warnings" value={String(countVerifierWarnings(questions))} note="Current warning load" icon={AlertTriangle} />
+          <Metric title="Version churn" value={String(getVersionChurn(exam))} note={latestVersion ? `Latest version is v${latestVersion.version_number}` : "No saved churn"} icon={History} />
+          <Metric title="Playbook shadows" value={String(playbookShadowEvents.length)} note={playbookShadowEvents.length > 0 ? `${playbookMode} retrieval logged` : "No playbook context logged"} icon={Sparkles} />
         </div>
 
-        {exam.selected_scope && exam.selected_scope.length > 0 ? (
+        <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
           <Card className="rounded-2xl shadow-sm">
             <CardHeader className="pb-4"><CardTitle className="text-base">Selected scope</CardTitle></CardHeader>
             <CardContent className="flex flex-wrap gap-2">
-              {exam.selected_scope.map((scope, index) => (
-                <Badge key={`${String(scope.scope_id || scope.section_id || index)}`} variant="outline">
-                  {String(scope.title || scope.scope_id || scope.section_id || `Scope ${index + 1}`)}
-                </Badge>
-              ))}
+              {(exam.selected_scope || []).length === 0 ? (
+                <span className="text-sm text-muted-foreground">No selected scope stored on this exam.</span>
+              ) : (
+                (exam.selected_scope || []).map((scope, index) => (
+                  <Badge key={`${String(scope.scope_id || scope.section_id || index)}`} variant="outline">
+                    {String(scope.title || scope.scope_id || scope.section_id || `Scope ${index + 1}`)}
+                  </Badge>
+                ))
+              )}
             </CardContent>
           </Card>
-        ) : null}
+
+          <Card className="rounded-2xl shadow-sm">
+            <CardHeader className="pb-4"><CardTitle className="text-base">Version activity</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              <ActivityRow label="Feedback signals" value={String(feedbackEvents.length)} />
+              <ActivityRow label="Edit operations" value={String(versionOperations.length)} />
+              <ActivityRow label="Human-edited questions" value={String(questions.filter((question) => question.is_human_edited).length)} />
+              <ActivityRow label="Locked questions" value={String(questions.filter((question) => question.is_locked).length)} />
+            </CardContent>
+          </Card>
+        </div>
 
         {feedbackEvents.length > 0 ? (
           <Card className="rounded-2xl shadow-sm">
@@ -325,8 +388,9 @@ export default function ExamReviewPage() {
               {feedbackEvents.slice().reverse().slice(0, 5).map((event) => (
                 <div key={event.id} className="rounded-xl border bg-muted/20 p-4">
                   <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="secondary">{signalLabel(event.signal_type)}</Badge>
-                    <Badge variant="outline">{event.severity}</Badge>
+                    <Badge variant="secondary">{humanReadableSignal(event.signal_type)}</Badge>
+                    {event.review_status ? <Badge variant="outline">{humanReadableCategory(event.review_status)}</Badge> : null}
+                    {event.workflow_stage ? <Badge variant="outline">{event.workflow_stage}</Badge> : null}
                     <span className="text-xs text-muted-foreground">{formatDate(event.created_at)}</span>
                   </div>
                   {event.payload ? (
@@ -334,6 +398,40 @@ export default function ExamReviewPage() {
                   ) : null}
                 </div>
               ))}
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {playbookShadowEvents.length > 0 ? (
+          <Card className="rounded-2xl shadow-sm">
+            <CardHeader className="pb-4"><CardTitle className="text-base">Playbook shadow hints</CardTitle></CardHeader>
+            <CardContent className="space-y-3">
+              {playbookShadowEvents.slice().reverse().slice(0, 4).map((event) => {
+                const matchedBullets = Array.isArray(event.payload?.matched_bullets) ? event.payload?.matched_bullets : []
+                return (
+                  <div key={event.id} className="rounded-xl border bg-muted/20 p-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="secondary">Playbook shadow</Badge>
+                      <Badge variant="outline" className="capitalize">{String(event.payload?.retrieval_mode || playbookMode)}</Badge>
+                      {event.event_stage || event.workflow_stage ? <Badge variant="outline">{event.event_stage || event.workflow_stage}</Badge> : null}
+                    </div>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      {matchedBullets.length > 0
+                        ? `${matchedBullets.length} bullet(s) matched for this stage.`
+                        : "Shadow mode was active but no bullet matched this stage."}
+                    </p>
+                    {matchedBullets.length > 0 ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {matchedBullets.map((bullet) => (
+                          <Badge key={`${event.id}-${String((bullet as { bullet_id?: string }).bullet_id || "")}`} variant="outline">
+                            {String((bullet as { title?: string }).title || "Untitled")}
+                          </Badge>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                )
+              })}
             </CardContent>
           </Card>
         ) : null}
@@ -357,6 +455,7 @@ export default function ExamReviewPage() {
             <QuestionCard
               key={question.id}
               question={question}
+              version={activeVersion}
               isEditing={editState?.questionId === question.id}
               saving={savingQuestionId === question.id}
               editState={editState}
@@ -456,8 +555,18 @@ function Metric({
   )
 }
 
+function ActivityRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between rounded-xl border bg-muted/20 px-4 py-3">
+      <span className="text-sm text-muted-foreground">{label}</span>
+      <span className="text-sm font-semibold text-foreground">{value}</span>
+    </div>
+  )
+}
+
 function QuestionCard({
   question,
+  version,
   isEditing,
   saving,
   editState,
@@ -471,6 +580,7 @@ function QuestionCard({
   onDelete,
 }: {
   question: Question
+  version: ExamVersion | null
   isEditing: boolean
   saving: boolean
   editState: EditState | null
@@ -483,6 +593,11 @@ function QuestionCard({
   onLockToggle: () => void
   onDelete: () => void
 }) {
+  const relatedFeedback = getQuestionFeedbackEvents(version, question.id)
+  const relatedOperations = getQuestionEditOperations(version, question)
+  const hasRegenerateEvent = relatedFeedback.some((event) => event.signal_type === "regenerate_requested")
+  const playbookHints = relatedFeedback.filter((event) => event.signal_type === "playbook_shadow")
+
   return (
     <Card className={`rounded-2xl shadow-sm ${isEditing ? "border-primary/50 ring-2 ring-primary/15" : ""}`}>
       <CardContent className="p-5">
@@ -495,8 +610,18 @@ function QuestionCard({
               {question.verification_status ? <Badge variant={question.verification_status === "passed" ? "secondary" : "outline"}>{question.verification_status}</Badge> : null}
               {question.is_locked ? <Badge><Lock className="mr-1 h-3 w-3" />Locked</Badge> : null}
               {question.is_human_edited ? <Badge variant="outline"><Pencil className="mr-1 h-3 w-3" />Human edited</Badge> : null}
+              {hasRegenerateEvent ? <Badge variant="outline"><RefreshCw className="mr-1 h-3 w-3" />Regenerated</Badge> : null}
             </div>
             {question.blueprint_cell_key ? <p className="text-xs text-muted-foreground">Blueprint cell: {question.blueprint_cell_key}</p> : null}
+            {(question.error_categories || []).length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {(question.error_categories || []).map((category) => (
+                  <Badge key={`${question.id}-${category}`} variant="outline" className="capitalize">
+                    {humanReadableCategory(category)}
+                  </Badge>
+                ))}
+              </div>
+            ) : null}
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="h-8 w-8"><MoreVertical className="h-4 w-4" /></Button></DropdownMenuTrigger>
@@ -594,6 +719,56 @@ function QuestionCard({
             ) : (
               <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">This question does not have valid source evidence yet.</div>
             )}
+            {(relatedFeedback.length > 0 || relatedOperations.length > 0) ? (
+              <div className="rounded-xl border bg-muted/20 p-4">
+                <div className="flex items-center gap-2 text-sm font-medium text-foreground"><History className="h-4 w-4" />Question activity</div>
+                <div className="mt-3 space-y-2">
+                  {relatedFeedback.map((event) => (
+                    <div key={event.id} className="rounded-lg border bg-background p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="secondary">{humanReadableSignal(event.signal_type)}</Badge>
+                        {event.review_status ? <Badge variant="outline">{humanReadableCategory(event.review_status)}</Badge> : null}
+                        <span className="text-xs text-muted-foreground">{formatDate(event.created_at)}</span>
+                      </div>
+                      {(() => {
+                        const matchedBullets = Array.isArray(event.payload?.matched_bullets)
+                          ? event.payload.matched_bullets as Array<Record<string, unknown>>
+                          : []
+                        if (event.signal_type !== "playbook_shadow" || matchedBullets.length === 0) {
+                          return null
+                        }
+                        return (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {matchedBullets.map((bullet) => (
+                              <Badge key={`${event.id}-${String(bullet.bullet_id || "")}`} variant="outline">
+                                {String(bullet.title || "Untitled")}
+                              </Badge>
+                            ))}
+                          </div>
+                        )
+                      })()}
+                    </div>
+                  ))}
+                  {relatedOperations.map((operation) => (
+                    <div key={operation.id} className="rounded-lg border bg-background p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">{humanReadableCategory(operation.edit_type)}</Badge>
+                        {operation.target_slots.length > 0 ? <Badge variant="outline">Slots {operation.target_slots.join(", ")}</Badge> : null}
+                        <span className="text-xs text-muted-foreground">{formatDate(operation.created_at)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {playbookHints.length > 0 ? (
+              <div className="rounded-xl border border-primary/20 bg-primary/5 p-4">
+                <div className="flex items-center gap-2 text-sm font-medium text-foreground"><Sparkles className="h-4 w-4" />Playbook hint trail</div>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  This question has playbook shadow activity attached to the same review version, so you can inspect which approved bullets would have been used in limited mode.
+                </p>
+              </div>
+            ) : null}
             {question.scope_tags?.length ? <div className="flex flex-wrap gap-2">{question.scope_tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div> : null}
           </div>
         )}

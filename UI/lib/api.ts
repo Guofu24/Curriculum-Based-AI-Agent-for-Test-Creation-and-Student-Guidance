@@ -1,22 +1,114 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+const SESSION_EXPIRED_EVENT = "examai:session-expired";
+
+let refreshPromise: Promise<string | null> | null = null;
 
 function getToken(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("token");
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+function getRefreshToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("refresh_token");
+}
+
+function setToken(token: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem("token", token);
+}
+
+function clearStoredSession(): void {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem("token");
+  localStorage.removeItem("refresh_token");
+  window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+}
+
+async function authorizedFetch(
+  path: string,
+  options: RequestInit = {},
+  allowRefresh = true,
+): Promise<Response> {
   const token = getToken();
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string>),
   };
 
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  if (!(options.body instanceof FormData)) {
+  if (!(options.body instanceof FormData) && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
 
-  const res = await fetch(`${API_URL}${path}`, { ...options, headers });
+  const response = await fetch(`${API_URL}${path}`, { ...options, headers });
+  if (response.status !== 401 || !allowRefresh || path === "/auth/refresh-token") {
+    return response;
+  }
+
+  const refreshedToken = await refreshAccessToken();
+  if (!refreshedToken) {
+    return response;
+  }
+
+  const retryHeaders: Record<string, string> = {
+    ...(options.headers as Record<string, string>),
+    Authorization: `Bearer ${refreshedToken}`,
+  };
+  if (!(options.body instanceof FormData) && !retryHeaders["Content-Type"]) {
+    retryHeaders["Content-Type"] = "application/json";
+  }
+
+  return fetch(`${API_URL}${path}`, { ...options, headers: retryHeaders });
+}
+
+async function refreshAccessToken(): Promise<string | null> {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) {
+    clearStoredSession();
+    return null;
+  }
+
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      try {
+        const response = await fetch(`${API_URL}/auth/refresh-token`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+
+        if (!response.ok) {
+          clearStoredSession();
+          return null;
+        }
+
+        const payload = await response.json() as {
+          access_token?: string;
+        };
+        const nextToken = payload.access_token?.trim();
+        if (!nextToken) {
+          clearStoredSession();
+          return null;
+        }
+
+        setToken(nextToken);
+        return nextToken;
+      } catch {
+        clearStoredSession();
+        return null;
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+  }
+
+  return refreshPromise;
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const res = await authorizedFetch(path, options);
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -275,21 +367,39 @@ export interface Question {
   is_validated: boolean;
   quality_score_detail?: QualityScoreDetail | null;
   grounding_report_detail?: GroundingReportDetail | null;
+  error_categories: string[];
 }
 
 export interface EditOperation {
   id: string;
   edit_type: string;
   target_question_id?: string | null;
+  target_slots: number[];
   prompt_used?: string | null;
   created_at: string;
 }
 
 export interface FeedbackEvent {
   id: string;
+  exam_id: string;
+  exam_title?: string | null;
+  exam_version_id?: string | null;
+  version_number?: number | null;
+  actor_id?: string | null;
   signal_type: string;
   severity: string;
+  workflow_stage?: string | null;
+  event_stage?: string | null;
+  event_source?: string | null;
+  source_type?: string | null;
+  source_ref?: string | null;
+  review_status?: string | null;
+  reviewed_by_human: boolean;
   question_id?: string | null;
+  error_categories: string[];
+  before_snapshot_ref?: string | null;
+  after_snapshot_ref?: string | null;
+  linked_eval_sample_id?: string | null;
   payload?: Record<string, unknown> | null;
   created_at: string;
 }
@@ -352,8 +462,137 @@ export interface ExamListItem {
   total_questions: number;
   strict_scope_flag: boolean;
   quality_score?: number | null;
+  current_version_number?: number | null;
+  version_count: number;
+  verifier_pass_rate?: number | null;
+  evidence_coverage_rate?: number | null;
+  warning_count: number;
+  regenerate_count: number;
+  human_edit_count: number;
+  feedback_event_count: number;
   created_at: string;
   updated_at?: string | null;
+}
+
+export interface ErrorCategoryCount {
+  category: string;
+  count: number;
+}
+
+export interface NamedCount {
+  name: string;
+  count: number;
+}
+
+export interface QualitySummary {
+  documents_active: number;
+  exams_generated: number;
+  question_count: number;
+  verifier_pass_rate: number;
+  verifier_warning_rate: number;
+  evidence_coverage_rate: number;
+  scope_violation_rate: number;
+  avg_regenerate_count: number;
+  avg_human_edit_count: number;
+  version_churn: number;
+  top_error_categories: ErrorCategoryCount[];
+  recent_warnings: FeedbackEvent[];
+  last_updated_at?: string | null;
+}
+
+export interface FeedbackStoreSummary {
+  total_events: number;
+  reviewed_by_human_count: number;
+  accepted_count: number;
+  rejected_count: number;
+  corrected_count: number;
+  linked_eval_count: number;
+  top_signal_types: NamedCount[];
+  top_error_categories: ErrorCategoryCount[];
+  recent_events: FeedbackEvent[];
+  last_updated_at?: string | null;
+}
+
+export interface PlaybookBullet {
+  id: string;
+  status: string;
+  title: string;
+  bullet_type: string;
+  scope?: Record<string, unknown> | null;
+  subject: string;
+  language: string;
+  question_type: string;
+  content: string;
+  rationale?: string | null;
+  source_signals: Record<string, unknown>[];
+  helpful_count: number;
+  harmful_count: number;
+  confidence: number;
+  tags: string[];
+  created_from?: string | null;
+  review_status?: string | null;
+  version: number;
+  archived_at?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+export interface ReflectionCandidate {
+  id: string;
+  status: string;
+  category: string;
+  subject: string;
+  language: string;
+  question_type: string;
+  scope?: Record<string, unknown> | null;
+  evidence?: Record<string, unknown> | null;
+  proposed_title: string;
+  proposed_bullet_type: string;
+  proposed_bullet_text: string;
+  rationale?: string | null;
+  source_event_ids: string[];
+  source_eval_sample_ids: string[];
+  confidence: number;
+  merge_key: string;
+  review_notes?: string | null;
+  promoted_bullet_id?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+  reviewed_at?: string | null;
+}
+
+export interface WarmupPreview {
+  meta: {
+    exported_at: string;
+    exam_case_count: number;
+    question_case_count: number;
+    feedback_case_count: number;
+    playbook_seed_count: number;
+    reflection_candidate_count: number;
+  };
+  exam_cases: Record<string, unknown>[];
+  question_cases: Record<string, unknown>[];
+  feedback_cases: Record<string, unknown>[];
+  playbook_seed: Record<string, unknown>[];
+  reflection_candidates: Record<string, unknown>[];
+}
+
+export interface PlaybookOverview {
+  retrieval_mode: string;
+  retrieval_limit: number;
+  feedback_event_count: number;
+  approved_bullet_count: number;
+  candidate_bullet_count: number;
+  archived_bullet_count: number;
+  reflection_candidate_count: number;
+  promoted_candidate_count: number;
+  warmup_exam_case_count: number;
+  warmup_question_case_count: number;
+  warmup_feedback_case_count: number;
+  top_feedback_categories: NamedCount[];
+  recent_bullets: PlaybookBullet[];
+  recent_candidates: ReflectionCandidate[];
+  last_reflection_run_at?: string | null;
 }
 
 export interface DifficultyDistribution {
@@ -542,12 +781,73 @@ export const exams = {
     return request<ExamListItem[]>("/exams/");
   },
 
+  getQualitySummary() {
+    return request<QualitySummary>("/exams/quality-summary");
+  },
+
+  getFeedbackSummary() {
+    return request<FeedbackStoreSummary>("/exams/feedback-summary");
+  },
+
+  getFeedbackStore(params?: {
+    exam_version_id?: string;
+    question_id?: string;
+    signal_type?: string;
+    review_status?: string;
+    actor_id?: string;
+    event_stage?: string;
+    error_category?: string;
+    linked_eval_sample_id?: string;
+    limit?: number;
+  }) {
+    const search = new URLSearchParams();
+    if (params?.exam_version_id) search.set("exam_version_id", params.exam_version_id);
+    if (params?.question_id) search.set("question_id", params.question_id);
+    if (params?.signal_type) search.set("signal_type", params.signal_type);
+    if (params?.review_status) search.set("review_status", params.review_status);
+    if (params?.actor_id) search.set("actor_id", params.actor_id);
+    if (params?.event_stage) search.set("event_stage", params.event_stage);
+    if (params?.error_category) search.set("error_category", params.error_category);
+    if (params?.linked_eval_sample_id) search.set("linked_eval_sample_id", params.linked_eval_sample_id);
+    if (params?.limit) search.set("limit", String(params.limit));
+    const suffix = search.size > 0 ? `?${search.toString()}` : "";
+    return request<FeedbackEvent[]>(`/exams/feedback-store${suffix}`);
+  },
+
   get(id: string) {
     return request<Exam>(`/exams/${encodeURIComponent(id)}`);
   },
 
   getVersions(id: string) {
     return request<ExamVersion[]>(`/exams/${encodeURIComponent(id)}/versions`);
+  },
+
+  getFeedback(
+    id: string,
+    params?: {
+      exam_version_id?: string;
+      question_id?: string;
+      signal_type?: string;
+      review_status?: string;
+      actor_id?: string;
+      event_stage?: string;
+      error_category?: string;
+      linked_eval_sample_id?: string;
+      limit?: number;
+    },
+  ) {
+    const search = new URLSearchParams();
+    if (params?.exam_version_id) search.set("exam_version_id", params.exam_version_id);
+    if (params?.question_id) search.set("question_id", params.question_id);
+    if (params?.signal_type) search.set("signal_type", params.signal_type);
+    if (params?.review_status) search.set("review_status", params.review_status);
+    if (params?.actor_id) search.set("actor_id", params.actor_id);
+    if (params?.event_stage) search.set("event_stage", params.event_stage);
+    if (params?.error_category) search.set("error_category", params.error_category);
+    if (params?.linked_eval_sample_id) search.set("linked_eval_sample_id", params.linked_eval_sample_id);
+    if (params?.limit) search.set("limit", String(params.limit));
+    const suffix = search.size > 0 ? `?${search.toString()}` : "";
+    return request<FeedbackEvent[]>(`/exams/${encodeURIComponent(id)}/feedback${suffix}`);
   },
 
   publish(id: string) {
@@ -581,15 +881,11 @@ export const generation = {
 
     void (async () => {
       try {
-        const token = getToken();
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-        };
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-
-        const res = await fetch(`${API_URL}/generate/exam/stream`, {
+        const res = await authorizedFetch("/generate/exam/stream", {
           method: "POST",
-          headers,
+          headers: {
+            "Content-Type": "application/json",
+          },
           body: JSON.stringify(data),
           signal: controller.signal,
         });
@@ -653,5 +949,56 @@ export const generation = {
       method: "POST",
       body: JSON.stringify(data),
     });
+  },
+};
+
+export const playbook = {
+  getOverview() {
+    return request<PlaybookOverview>("/playbook/overview");
+  },
+
+  listBullets(params?: { status?: string; bullet_type?: string; limit?: number }) {
+    const search = new URLSearchParams();
+    if (params?.status) search.set("status", params.status);
+    if (params?.bullet_type) search.set("bullet_type", params.bullet_type);
+    if (params?.limit) search.set("limit", String(params.limit));
+    const suffix = search.size > 0 ? `?${search.toString()}` : "";
+    return request<PlaybookBullet[]>(`/playbook/bullets${suffix}`);
+  },
+
+  archiveBullet(id: string) {
+    return request<PlaybookBullet>(`/playbook/bullets/${encodeURIComponent(id)}/archive`, {
+      method: "POST",
+    });
+  },
+
+  listCandidates(params?: { status?: string; limit?: number }) {
+    const search = new URLSearchParams();
+    if (params?.status) search.set("status", params.status);
+    if (params?.limit) search.set("limit", String(params.limit));
+    const suffix = search.size > 0 ? `?${search.toString()}` : "";
+    return request<ReflectionCandidate[]>(`/playbook/candidates${suffix}`);
+  },
+
+  generateCandidates() {
+    return request<ReflectionCandidate[]>("/playbook/candidates/generate", {
+      method: "POST",
+    });
+  },
+
+  promoteCandidate(id: string) {
+    return request<PlaybookBullet>(`/playbook/candidates/${encodeURIComponent(id)}/promote`, {
+      method: "POST",
+    });
+  },
+
+  rejectCandidate(id: string) {
+    return request<ReflectionCandidate>(`/playbook/candidates/${encodeURIComponent(id)}/reject`, {
+      method: "POST",
+    });
+  },
+
+  getWarmupPreview() {
+    return request<WarmupPreview>("/playbook/warmup-preview");
   },
 };

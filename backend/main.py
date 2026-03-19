@@ -22,6 +22,7 @@ from routers import (
     documents_router,
     exams_router,
     generation_router,
+    playbook_router,
 )
 
 logging.basicConfig(
@@ -78,6 +79,7 @@ app.include_router(courses_router, prefix=settings.API_PREFIX)
 app.include_router(documents_router, prefix=settings.API_PREFIX)
 app.include_router(exams_router, prefix=settings.API_PREFIX)
 app.include_router(generation_router, prefix=settings.API_PREFIX)
+app.include_router(playbook_router, prefix=settings.API_PREFIX)
 
 
 @app.get("/")

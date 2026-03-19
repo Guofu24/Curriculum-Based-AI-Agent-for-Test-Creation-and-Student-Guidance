@@ -352,6 +352,8 @@ class GroundingChecker:
             return ""
         if question.question_type == "mcq" and question.options:
             for opt in question.options:
+                if not isinstance(opt, dict):
+                    continue
                 if opt.get("label") == question.correct_answer.strip():
                     return opt.get("text", "")
         return question.correct_answer
@@ -384,6 +386,9 @@ class GroundingChecker:
         all_valid = True
 
         for opt in question.options:
+            if not isinstance(opt, dict):
+                all_valid = False
+                continue
             label = opt.get("label", "")
             if label == correct_label:
                 continue

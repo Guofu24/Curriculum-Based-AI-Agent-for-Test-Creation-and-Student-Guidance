@@ -1,158 +1,30 @@
 """
 Exams Router
 
-Handles exam CRUD operations and publishing.
+Handles exam CRUD operations, quality summary, feedback inspection, and publishing.
 Generation and review edits live under the generation router.
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models.user import User, UserRole
 from routers.auth import get_current_user
+from routers.exam_serializers import format_exam, format_exam_list, format_feedback_event, format_version
 from schemas.exam import (
-    EditOperationResponse,
-    FeedbackEventResponse,
     ExamListResponse,
     ExamResponse,
     ExamVersionResponse,
-    MCQOption,
-    QuestionResponse,
+    FeedbackStoreSummaryResponse,
+    FeedbackEventResponse,
+    QualitySummaryResponse,
 )
+from services.analytics.quality_summary_service import QualitySummaryService
 from services.exam_service import ExamService
+from services.feedback.store_service import FeedbackStoreService
 from utils.security import require_roles
 
 router = APIRouter(prefix="/exams", tags=["exams"])
-
-
-def _enum_value(value):
-    return value.value if hasattr(value, "value") else value
-
-
-def _format_question(q) -> QuestionResponse:
-    options = None
-    if q.options and isinstance(q.options, list):
-        options = [
-            MCQOption(label=str(option.get("label", "")), text=str(option.get("text", "")))
-            for option in q.options
-            if isinstance(option, dict)
-        ]
-
-    return QuestionResponse(
-        id=q.id,
-        question_number=q.question_number,
-        blueprint_cell_key=q.blueprint_cell_key,
-        question_type=_enum_value(q.question_type),
-        bloom_level=_enum_value(q.bloom_level),
-        difficulty_score=q.difficulty_score,
-        content=q.content,
-        options=options,
-        correct_answer=q.correct_answer,
-        rubric=q.rubric_json,
-        explanation=q.explanation,
-        source_citations=q.source_chunks,
-        source_evidence=q.source_evidence_json,
-        scope_tags=q.scope_tags_json or [],
-        warnings=q.warnings_json or [],
-        verification_status=q.verification_status,
-        is_human_edited=bool(q.is_human_edited),
-        is_locked=bool(q.is_locked),
-        is_validated=bool(q.is_validated),
-        quality_score_detail=q.quality_score_json,
-        grounding_report_detail=q.grounding_report_json,
-    )
-
-
-def _get_active_version(exam):
-    if getattr(exam, "current_version", None):
-        return exam.current_version
-    versions = list(getattr(exam, "versions", []) or [])
-    if not versions:
-        return None
-    return max(versions, key=lambda version: version.version_number)
-
-
-def _format_feedback_event(event) -> dict:
-    return FeedbackEventResponse(
-        id=event.id,
-        signal_type=_enum_value(event.signal_type),
-        severity=event.severity,
-        question_id=event.question_id,
-        payload=event.payload_json,
-        created_at=event.created_at,
-    ).model_dump()
-
-
-def _format_version(version) -> dict:
-    questions = sorted(version.questions or [], key=lambda question: question.question_number)
-    operations = sorted(version.edit_operations or [], key=lambda operation: operation.created_at)
-    feedback_events = sorted(version.feedback_events or [], key=lambda event: event.created_at)
-    return ExamVersionResponse(
-        id=version.id,
-        version_number=version.version_number,
-        status=version.status,
-        created_by=version.created_by,
-        parent_version_id=version.parent_version_id,
-        change_summary=version.change_summary,
-        created_at=version.created_at,
-        questions=[_format_question(question) for question in questions],
-        edit_operations=[
-            EditOperationResponse(
-                id=operation.id,
-                edit_type=operation.edit_type,
-                target_question_id=operation.target_question_id,
-                prompt_used=operation.prompt_used,
-                created_at=operation.created_at,
-            )
-            for operation in operations
-        ],
-        feedback_events=[_format_feedback_event(event) for event in feedback_events],
-    ).model_dump()
-
-
-def _format_exam(exam) -> ExamResponse:
-    active_version = _get_active_version(exam)
-    active_questions = sorted(
-        (active_version.questions if active_version else []) or [],
-        key=lambda question: question.question_number,
-    )
-    versions = sorted(list(exam.versions or []), key=lambda version: version.version_number)
-
-    return ExamResponse(
-        id=exam.id,
-        title=exam.title,
-        document_id=exam.textbook_id,
-        course_id=exam.course_id,
-        exam_type=_enum_value(exam.exam_type),
-        difficulty=_enum_value(exam.difficulty),
-        status=_enum_value(exam.status),
-        chapters=exam.chapters or [],
-        variant_number=exam.variant_number,
-        total_questions=exam.total_questions,
-        instructions=exam.instructions,
-        output_language=exam.output_language,
-        strict_scope_flag=bool(exam.strict_scope_flag),
-        quality_score=exam.quality_score,
-        created_at=exam.created_at,
-        updated_at=exam.updated_at,
-        published_at=exam.published_at,
-        questions=[_format_question(question) for question in active_questions],
-        exam_spec=exam.exam_spec_json,
-        blueprint=exam.blueprint_json,
-        selected_scope=exam.selected_scope_json,
-        quality_scores=exam.quality_scores_json,
-        grounding_reports=exam.grounding_reports_json,
-        duplicate_groups=exam.duplicate_groups_json,
-        provider_logs=exam.provider_logs_json,
-        edit_impact_level=exam.edit_impact_level,
-        edit_history=exam.edit_history_json,
-        feedback_events=[
-            _format_feedback_event(event)
-            for event in sorted(list(exam.feedback_events or []), key=lambda item: item.created_at)
-        ],
-        current_version=_format_version(active_version) if active_version else None,
-        versions=[_format_version(version) for version in versions],
-    )
 
 
 @router.get("/", response_model=list[ExamListResponse])
@@ -162,24 +34,90 @@ async def list_exams(
 ):
     service = ExamService(db)
     exams = await service.get_exams(current_user.id)
-    return [
-        ExamListResponse(
-            id=e.id,
-            title=e.title,
-            document_id=e.textbook_id,
-            course_id=e.course_id,
-            exam_type=_enum_value(e.exam_type),
-            difficulty=_enum_value(e.difficulty),
-            status=_enum_value(e.status),
-            chapters=e.chapters or [],
-            total_questions=e.total_questions,
-            strict_scope_flag=bool(e.strict_scope_flag),
-            quality_score=e.quality_score,
-            created_at=e.created_at,
-            updated_at=e.updated_at,
+    return [format_exam_list(exam) for exam in exams]
+
+
+@router.get("/quality-summary", response_model=QualitySummaryResponse)
+async def get_quality_summary(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    payload = await QualitySummaryService(db).build_summary(current_user.id)
+    payload["recent_warnings"] = [format_feedback_event(event) for event in payload["recent_warnings"]]
+    return payload
+
+
+@router.get("/feedback-summary", response_model=FeedbackStoreSummaryResponse)
+async def get_feedback_summary(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    payload = await FeedbackStoreService(db).build_summary(user_id=current_user.id)
+    payload["recent_events"] = [format_feedback_event(event) for event in payload["recent_events"]]
+    return payload
+
+
+@router.get("/feedback-store", response_model=list[FeedbackEventResponse])
+async def get_feedback_store(
+    exam_version_id: str | None = Query(default=None),
+    question_id: str | None = Query(default=None),
+    signal_type: str | None = Query(default=None),
+    review_status: str | None = Query(default=None),
+    actor_id: str | None = Query(default=None),
+    event_stage: str | None = Query(default=None),
+    error_category: str | None = Query(default=None),
+    linked_eval_sample_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    events = await FeedbackStoreService(db).list_events(
+        user_id=current_user.id,
+        exam_version_id=exam_version_id,
+        question_id=question_id,
+        signal_type=signal_type,
+        review_status=review_status,
+        actor_id=actor_id,
+        event_stage=event_stage,
+        error_category=error_category,
+        linked_eval_sample_id=linked_eval_sample_id,
+        limit=limit,
+    )
+    return [format_feedback_event(event) for event in events]
+
+
+@router.get("/{exam_id}/feedback", response_model=list[FeedbackEventResponse])
+async def get_exam_feedback(
+    exam_id: str,
+    exam_version_id: str | None = Query(default=None),
+    question_id: str | None = Query(default=None),
+    signal_type: str | None = Query(default=None),
+    review_status: str | None = Query(default=None),
+    actor_id: str | None = Query(default=None),
+    event_stage: str | None = Query(default=None),
+    error_category: str | None = Query(default=None),
+    linked_eval_sample_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        events = await QualitySummaryService(db).get_feedback_events(
+            user_id=current_user.id,
+            exam_id=exam_id,
+            exam_version_id=exam_version_id,
+            question_id=question_id,
+            signal_type=signal_type,
+            review_status=review_status,
+            actor_id=actor_id,
+            event_stage=event_stage,
+            error_category=error_category,
+            linked_eval_sample_id=linked_eval_sample_id,
+            limit=limit,
         )
-        for e in exams
-    ]
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return [format_feedback_event(event) for event in events]
 
 
 @router.get("/{exam_id}", response_model=ExamResponse)
@@ -192,7 +130,7 @@ async def get_exam(
     exam = await service.get_exam(exam_id, current_user.id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
-    return _format_exam(exam)
+    return format_exam(exam)
 
 
 @router.get("/{exam_id}/versions", response_model=list[ExamVersionResponse])
@@ -206,7 +144,7 @@ async def get_exam_versions(
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
     versions = sorted(list(exam.versions or []), key=lambda version: version.version_number)
-    return [_format_version(version) for version in versions]
+    return [format_version(version) for version in versions]
 
 
 @router.post("/{exam_id}/publish", response_model=ExamResponse)
@@ -220,7 +158,7 @@ async def publish_exam(
         exam = await service.publish_exam(exam_id, current_user.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return _format_exam(exam)
+    return format_exam(exam)
 
 
 @router.delete("/{exam_id}")

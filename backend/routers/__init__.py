@@ -18,6 +18,7 @@ from routers.courses import router as courses_router
 from routers.documents import router as documents_router
 from routers.exams import router as exams_router
 from routers.generation import router as generation_router
+from routers.playbook import router as playbook_router
 
 __all__ = [
     "auth_router",
@@ -25,4 +26,5 @@ __all__ = [
     "documents_router",
     "exams_router",
     "generation_router",
+    "playbook_router",
 ]

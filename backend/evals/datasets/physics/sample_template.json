@@ -1,0 +1,68 @@
+{
+  "sample_id": "physics-sample-template",
+  "split": "dev",
+  "subject": "physics",
+  "language": "vi",
+  "document": {
+    "document_id": "replace-me",
+    "title": "Replace me",
+    "reference": "Optional file or document note"
+  },
+  "scope": {
+    "selected_scope": [
+      {
+        "section_id": "replace-section-id",
+        "scope_type": "lesson",
+        "title": "Replace scope title"
+      }
+    ],
+    "allowed_section_ids": ["replace-section-id"],
+    "expected_section_coverage": ["replace-section-id"]
+  },
+  "exam_request": {
+    "prompt": "Teacher request in Vietnamese",
+    "total_questions": 1
+  },
+  "normalized_spec": {
+    "exam_type": "mcq",
+    "question_type": "mcq_single_answer",
+    "strict_scope_flag": true,
+    "total_questions": 1
+  },
+  "version_count": 1,
+  "questions": [
+    {
+      "question_id": "q1",
+      "question_text": "Question text",
+      "reference_question": "Optional reference answer or stem",
+      "source_evidence": [
+        {
+          "section_id": "replace-section-id",
+          "chunk_id": "chunk-001",
+          "text_preview": "Optional hint from source"
+        }
+      ],
+      "expected_evidence_hints": ["optional keyword"],
+      "retrieval": {
+        "top_section_ids": ["replace-section-id"],
+        "expected_hit_section_ids": ["replace-section-id"]
+      },
+      "verification_status": "passed",
+      "warnings": [],
+      "verifier_expectation": {
+        "expected_status": "passed",
+        "expected_warning_count": 0
+      },
+      "quality_signals": {
+        "scope_leak": false,
+        "weak_evidence": false,
+        "wrong_answer_key": false,
+        "ambiguous_options": false,
+        "duplicate_with_question_id": null,
+        "verbatim_copy": false
+      },
+      "regenerate_count": 0,
+      "human_edit_count": 0
+    }
+  ]
+}

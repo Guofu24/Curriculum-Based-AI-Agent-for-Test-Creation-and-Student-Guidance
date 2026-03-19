@@ -2,48 +2,52 @@
 
 ## Active navigation
 
-- Dashboard
-- Courses & Documents
-- Generate Exam
-- Exam History
+- Quality Dashboard
+- Documents
+- Generate
+- History
+- Playbook
+- Feedback
 - Exam Review (`/dashboard/exams/[id]`)
 - Settings
 
-## Active user journey
+## Active Phase 4 journey
 
 1. Upload a PDF on the documents page.
 2. Wait for parsing, sectioning, and indexing to complete.
-3. Inspect the curriculum tree for the document.
-4. Open the generate page.
-5. Select a document and one or more scope units.
-6. Enter the teacher request and optional exam instructions.
-7. Generate the exam.
-8. Review verifier results, source evidence, and feedback signals.
-9. Edit or regenerate questions.
-10. Save new versions and publish when ready.
+3. Inspect the curriculum tree and document readiness.
+4. Open the generate page and pick a scoped slice of the document.
+5. Enter the teacher request and optional exam instructions.
+6. Generate the exam.
+7. Review verifier signals, source evidence, playbook shadow hints, and version metrics.
+8. Inspect question-level feedback activity, warnings, and evidence gaps.
+9. Open `/dashboard/feedback` to inspect the normalized event stream.
+10. Open `/dashboard/playbook` to inspect approved bullets, reflection candidates, and warmup preview counts.
+11. Promote or reject candidates without pretending the runtime is already adaptive.
+12. Publish when review is acceptable.
 
-## Hidden / removed from the active UI
+## What the UI now emphasizes
 
-- textbooks naming and routes
-- guidance pages
-- advanced export flows
-- essay or mixed exam controls
-- strict scope toggles
-- multi-language selectors
+- system quality state, not just generation success
+- feedback store quality and queryability
+- candidate vs approved playbook separation
+- playbook retrieval mode: `off`, `shadow`, or `limited`
+- evidence visibility per question
+- regenerate and edit history
+- version churn and feedback summaries
 
 ## Manual check checklist
 
-Use this when frontend automation is not available yet:
-
-1. Open `/dashboard/documents` and confirm only document-first wording is visible.
-2. Upload a PDF and confirm the detail dialog shows curriculum-tree readiness.
-3. Open `/dashboard/generate` and confirm generation is blocked until at least one scope unit is selected.
-4. Generate an exam and confirm the review page shows:
+1. Open `/dashboard` and confirm the summary cards show both quality metrics and playbook foundation state.
+2. Open `/dashboard/documents` and confirm the copy stays document-first and scope-readiness focused.
+3. Open `/dashboard/generate` and confirm the page still emphasizes evidence grounding and traceability.
+4. Generate an exam and confirm `/dashboard/exams/[id]` shows:
    - source evidence
-   - verifier warnings/status
-   - version selector
-   - regenerate actions
-   - edit actions
-   - feedback signals
-5. Open `/dashboard/history` and confirm only active actions remain.
-6. Open `/dashboard/settings` and confirm runtime constraints are read-only.
+   - verifier warnings
+   - version metrics
+   - question activity
+   - playbook shadow hints when available
+5. Open `/dashboard/history` and confirm the page still surfaces churn, edits, warnings, and feedback volume.
+6. Open `/dashboard/playbook` and confirm approved bullets and reflection candidates are clearly separated.
+7. Open `/dashboard/feedback` and confirm the store can be filtered by stage and signal type.
+8. Open `/dashboard/settings` and confirm it describes Phase 4 foundation flags instead of generic profile controls.

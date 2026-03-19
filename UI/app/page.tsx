@@ -6,9 +6,8 @@ import { ApiError } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Checkbox } from "@/components/ui/checkbox"
 import {
-  BrainCircuit,
+  Activity,
   BookOpen,
   FileCheck,
   Sparkles,
@@ -87,7 +86,7 @@ export default function LoginPage() {
         <div className="relative z-10">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary-foreground/15 backdrop-blur-sm">
-              <BrainCircuit className="h-5 w-5" />
+              <Activity className="h-5 w-5" />
             </div>
             <span className="text-xl font-semibold tracking-tight">ExamAI</span>
           </div>
@@ -96,10 +95,10 @@ export default function LoginPage() {
         <div className="relative z-10 flex flex-col gap-8">
           <div>
             <h1 className="text-4xl font-semibold leading-tight tracking-tight text-balance">
-              Generate professional exams with AI intelligence.
+              Internal quality workspace for grounded Physics exam generation.
             </h1>
             <p className="mt-4 text-lg text-primary-foreground/70 leading-relaxed max-w-md">
-              Upload course documents, configure scope and constraints, and let AI create validated, curriculum-aligned examinations in minutes.
+              Upload Physics PDFs, generate scoped exams, inspect verifier signals, and turn teacher feedback into structured quality data.
             </p>
           </div>
 
@@ -107,24 +106,24 @@ export default function LoginPage() {
             <FeatureItem
               icon={<BookOpen className="h-4 w-4" />}
               title="Curriculum-Grounded"
-              description="Questions strictly derived from your uploaded course materials"
+              description="Scope, evidence, and retrieval stay anchored to uploaded course materials"
             />
             <FeatureItem
               icon={<Sparkles className="h-4 w-4" />}
-              title="AI-Powered Generation"
-              description="Advanced language models with Bloom taxonomy support"
+              title="Generation + Review"
+              description="Create exam versions, regenerate weak questions, and preserve edit history"
             />
             <FeatureItem
               icon={<FileCheck className="h-4 w-4" />}
-              title="Constraint Validation"
-              description="No hallucination, grade-level scope enforcement"
+              title="Quality Instrumentation"
+              description="Verifier warnings, evidence traces, feedback labels, and playbook readiness for Phase 4 ACE foundation"
             />
           </div>
         </div>
 
         <div className="relative z-10">
           <p className="text-sm text-primary-foreground/50">
-            Trusted by 500+ university lecturers worldwide
+            Internal Phase 4 ACE foundation for Physics only
           </p>
         </div>
       </div>
@@ -135,7 +134,7 @@ export default function LoginPage() {
           {/* Mobile logo */}
           <div className="mb-8 flex items-center gap-3 lg:hidden">
             <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-              <BrainCircuit className="h-4.5 w-4.5" />
+              <Activity className="h-4.5 w-4.5" />
             </div>
             <span className="text-lg font-semibold text-foreground">ExamAI</span>
           </div>

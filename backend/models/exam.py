@@ -20,7 +20,7 @@ from database import Base
 
 class ExamType(str, enum.Enum):
     # Legacy enum values are kept for DB compatibility.
-    # Active Phase 1 runtime accepts MCQ only and rejects essay/mixed at the API/service layer.
+    # Active MVP runtime accepts MCQ only and rejects essay/mixed at the API/service layer.
     MCQ = "mcq"
     ESSAY = "essay"
     MIXED = "mixed"
@@ -44,7 +44,7 @@ class ExamStatus(str, enum.Enum):
 
 class QuestionType(str, enum.Enum):
     # Legacy enum values are kept for DB compatibility.
-    # Active Phase 1 runtime accepts MCQ only.
+    # Active MVP runtime accepts MCQ only.
     MCQ = "mcq"
     ESSAY = "essay"
 
@@ -56,6 +56,7 @@ class FeedbackSignalType(str, enum.Enum):
     HUMAN_EDIT = "human_edit"
     REGENERATE_REQUESTED = "regenerate_requested"
     EXAM_PUBLISHED = "exam_published"
+    PLAYBOOK_SHADOW = "playbook_shadow"
 
 
 class BloomLevel(str, enum.Enum):
@@ -351,6 +352,17 @@ class FeedbackEvent(Base):
         nullable=False,
     )
     severity: Mapped[str] = mapped_column(String(20), nullable=False, default="info")
+    workflow_stage: Mapped[str] = mapped_column(String(50), nullable=True)
+    event_stage: Mapped[str] = mapped_column(String(50), nullable=True)
+    event_source: Mapped[str] = mapped_column(String(50), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(50), nullable=True)
+    source_ref: Mapped[str] = mapped_column(String(255), nullable=True)
+    review_status: Mapped[str] = mapped_column(String(50), nullable=True)
+    reviewed_by_human: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error_categories_json: Mapped[list] = mapped_column(JSON, nullable=True)
+    before_snapshot_ref: Mapped[str] = mapped_column(String(255), nullable=True)
+    after_snapshot_ref: Mapped[str] = mapped_column(String(255), nullable=True)
+    linked_eval_sample_id: Mapped[str] = mapped_column(String(255), nullable=True)
     payload_json: Mapped[dict] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

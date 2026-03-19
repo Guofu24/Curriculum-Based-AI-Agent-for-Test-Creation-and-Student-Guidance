@@ -10,6 +10,7 @@ Responsibilities:
 
 import asyncio
 import json
+import logging
 import re
 from typing import Any
 
@@ -18,7 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rank_bm25 import BM25Okapi
 
 from agents.state import ExamBlueprint, QuestionSlot, RetrievedContext
+from config import settings
 from models.textbook import TextbookChunk
+
+logger = logging.getLogger(__name__)
 
 
 class RetrievalAgent:
@@ -126,7 +130,7 @@ class RetrievalAgent:
         if chapters:
             fetch_k = max(self.TOP_K_VECTOR, self.TOP_K_VECTOR * self.MAX_VECTOR_EXPANSION)
 
-        vector_results = await self.vector_store.asimilarity_search_with_score(
+        vector_results = await self._safe_vector_search(
             query=query,
             k=fetch_k,
         )
@@ -306,7 +310,7 @@ class RetrievalAgent:
             chapter_scope = self._scope_tags_to_chapters(scope_tags)
         fetch_k = top_k if not chapter_scope else max(top_k, top_k * self.MAX_VECTOR_EXPANSION)
 
-        vector_results = await self.vector_store.asimilarity_search_with_score(
+        vector_results = await self._safe_vector_search(
             query=query,
             k=fetch_k,
         )
@@ -349,6 +353,33 @@ class RetrievalAgent:
             chunks=chunks,
             combined_text="\n\n---\n\n".join(c["text"] for c in chunks),
         )
+
+    async def _safe_vector_search(self, query: str, k: int) -> list:
+        if self.vector_store is None or not hasattr(self.vector_store, "asimilarity_search_with_score"):
+            return []
+
+        search_call = self.vector_store.asimilarity_search_with_score(
+            query=query,
+            k=k,
+        )
+        timeout_seconds = max(float(settings.VECTOR_SEARCH_TIMEOUT_SECONDS or 0), 0.0)
+        try:
+            if timeout_seconds > 0:
+                return await asyncio.wait_for(search_call, timeout=timeout_seconds)
+            return await search_call
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Vector search timed out after %.2fs for query '%s'; falling back to BM25/local retrieval.",
+                timeout_seconds,
+                self._truncate_query(query),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Vector search failed for query '%s'; falling back to BM25/local retrieval: %s",
+                self._truncate_query(query),
+                exc,
+            )
+        return []
 
     def _resolve_chapter_scope(
         self,
@@ -428,6 +459,12 @@ class RetrievalAgent:
                 parsed = int(standalone.group(0))
                 return parsed if parsed > 0 else None
         return None
+
+    def _truncate_query(self, query: str, limit: int = 80) -> str:
+        normalized = re.sub(r"\s+", " ", str(query or "").strip())
+        if len(normalized) <= limit:
+            return normalized
+        return f"{normalized[:limit - 3]}..."
 
 
 def score_chunk_relatedness(
