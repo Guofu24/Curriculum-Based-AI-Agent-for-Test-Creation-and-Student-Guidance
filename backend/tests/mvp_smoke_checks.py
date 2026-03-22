@@ -381,6 +381,24 @@ def check_bloom_level_aliases_are_normalized() -> None:
     assert db_question.bloom_level == BloomLevel.ANALYZE
 
 
+def check_question_generator_sanitizes_and_truncates_context() -> None:
+    generator = QuestionGeneratorAgent(llm=None)
+    noisy_text = "C\u00a7x\n\n\uf03d \uf02d\n\nVan toc trung binh duoc tinh bang quang duong chia thoi gian.\n" * 20
+    cleaned = generator._sanitize_source_text(noisy_text, 120)
+
+    assert "\uf03d" not in cleaned
+    assert "\uf02d" not in cleaned
+    assert len(cleaned) <= 120
+    assert "Van toc trung binh" in cleaned
+
+
+def check_rate_limit_header_parser_supports_retry_windows() -> None:
+    generator = QuestionGeneratorAgent(llm=None)
+    assert generator._parse_seconds_header("10") == 10
+    assert generator._parse_seconds_header("59.12s") == 59
+    assert generator._parse_seconds_header("7m12s") == 432
+
+
 def check_document_processing_status_uses_enum_values() -> None:
     assert PROCESSING_STATUS_ENUM.enums == [item.name for item in ProcessingStatus]
     bind_processor = PROCESSING_STATUS_ENUM.bind_processor(None)
@@ -675,6 +693,8 @@ if __name__ == "__main__":
     check_question_generator_rejects_non_mcq_assignments()
     check_question_generator_normalizes_string_options()
     check_bloom_level_aliases_are_normalized()
+    check_question_generator_sanitizes_and_truncates_context()
+    check_rate_limit_header_parser_supports_retry_windows()
     check_document_processing_status_uses_enum_values()
     check_deterministic_fallback_embeddings_are_stable()
     check_noop_vector_store_is_safe()

@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -154,6 +155,29 @@ class QuestionGeneratorAgent:
             assignment_reason=getattr(chunk_assignment, "assignment_reason", "") or "",
         )
 
+    def _sanitize_source_text(self, text: str, max_chars: int) -> str:
+        cleaned_chars: list[str] = []
+        for char in str(text or ""):
+            if char in {"\n", "\t"}:
+                cleaned_chars.append(char)
+                continue
+            if unicodedata.category(char) in {"Cc", "Cf", "Co", "Cs"}:
+                continue
+            cleaned_chars.append(char)
+
+        cleaned = "".join(cleaned_chars)
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        cleaned = cleaned.strip()
+
+        if max_chars > 0 and len(cleaned) > max_chars:
+            cleaned = cleaned[:max_chars].rstrip()
+
+        return cleaned
+
+    def _context_char_budget(self, chunk_count: int = 1) -> int:
+        return settings.MAX_CHUNK_CHARS * max(1, min(chunk_count, 2))
+
     def _format_bundle_segments(
         self,
         bundle: BundleContext,
@@ -164,18 +188,21 @@ class QuestionGeneratorAgent:
         all_chunk_texts: list[str] = []
 
         primary_text = bundle.primary_chunk_text[:max_chars]
+        primary_text = self._sanitize_source_text(primary_text, max_chars)
         segments.append(f"=== PRIMARY CHUNK ===\n\n{primary_text}")
         all_chunk_ids.append(bundle.primary_chunk_id)
-        all_chunk_texts.append(bundle.primary_chunk_text[:500])
+        all_chunk_texts.append(self._sanitize_source_text(bundle.primary_chunk_text, 500))
 
         for index, extra in enumerate(bundle.supporting_chunks, start=1):
-            extra_text = (extra.get("chunk_text", "") or "")[:max_chars]
+            extra_text = self._sanitize_source_text(extra.get("chunk_text", "") or "", max_chars)
             chunk_id = extra.get("chunk_id", f"support-{index}")
             role = bundle.evidence_roles.get(chunk_id, extra.get("role", "support"))
             segments.append(f"=== SUPPORT {index} ({role}) ===\n\n{extra_text}")
             if chunk_id not in all_chunk_ids:
                 all_chunk_ids.append(chunk_id)
-                all_chunk_texts.append((extra.get("chunk_text", "") or "")[:500])
+                all_chunk_texts.append(
+                    self._sanitize_source_text(extra.get("chunk_text", "") or "", 500)
+                )
 
         return segments, all_chunk_ids, all_chunk_texts
 
@@ -368,7 +395,10 @@ class QuestionGeneratorAgent:
             return []
         self._assert_mcq_only_assignments(assignments)
 
-        chunk_text = chunk_assignment.chunk_text[: settings.MAX_CHUNK_CHARS]
+        chunk_text = self._sanitize_source_text(
+            chunk_assignment.chunk_text,
+            settings.MAX_CHUNK_CHARS,
+        )
         task_descriptions = []
         for assignment in assignments:
             difficulty = assignment["difficulty"]
@@ -431,7 +461,7 @@ class QuestionGeneratorAgent:
                     rubric=self._normalize_rubric("mcq", payload),
                     explanation=payload.get("explanation", ""),
                     source_chunks=[chunk_assignment.chunk_id],
-                    source_texts=[chunk_assignment.chunk_text[:500]],
+                    source_texts=[self._sanitize_source_text(chunk_assignment.chunk_text, 500)],
                     source_evidence=list(source_evidence),
                     scope_tags=list(assignment.get("scope_tags") or []),
                 )
@@ -554,7 +584,7 @@ class QuestionGeneratorAgent:
                 error_text = str(exc)
                 is_rate_limit = "429" in error_text or "rate" in error_text.lower()
                 if is_rate_limit and attempt < max_retries - 1:
-                    wait_seconds = 8 * (2 ** attempt)
+                    wait_seconds = self._infer_rate_limit_wait_seconds(exc, attempt)
                     logger.warning(
                         "Rate limit for chunk %s, retry %s/%s in %ss",
                         chunk_id,
@@ -572,6 +602,54 @@ class QuestionGeneratorAgent:
                 )
                 return []
         return []
+
+    def _infer_rate_limit_wait_seconds(self, exc: Exception, attempt: int) -> int:
+        response = self._extract_http_response(exc)
+        if response is not None:
+            retry_after = self._parse_seconds_header(response.headers.get("retry-after"))
+            if retry_after is not None:
+                return max(1, retry_after)
+
+            reset_tokens = self._parse_seconds_header(
+                response.headers.get("x-ratelimit-reset-tokens")
+            )
+            if reset_tokens is not None:
+                return max(1, reset_tokens)
+
+            reset_requests = self._parse_seconds_header(
+                response.headers.get("x-ratelimit-reset-requests")
+            )
+            if reset_requests is not None:
+                return max(1, reset_requests)
+
+        return 8 * (2 ** attempt)
+
+    def _extract_http_response(self, exc: Exception):
+        current = exc
+        visited: set[int] = set()
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            response = getattr(current, "response", None)
+            if response is not None:
+                return response
+            current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+        return None
+
+    def _parse_seconds_header(self, raw_value) -> int | None:
+        if raw_value is None:
+            return None
+        text = str(raw_value).strip().lower()
+        if not text:
+            return None
+        numeric = re.match(r"^(\d+(?:\.\d+)?)s?$", text)
+        if numeric:
+            return max(1, int(float(numeric.group(1))))
+        composite = re.match(r"^(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?$", text)
+        if composite and (composite.group(1) or composite.group(2)):
+            minutes = int(composite.group(1) or 0)
+            seconds = float(composite.group(2) or 0)
+            return max(1, int(minutes * 60 + seconds))
+        return None
 
     async def generate_from_chunks_parallel(
         self,
@@ -648,6 +726,11 @@ class QuestionGeneratorAgent:
                 "Keep the same scope, answerability requirements, and question family."
             )
 
+        context_text = self._sanitize_source_text(
+            context.combined_text,
+            self._context_char_budget(len(context.chunks)),
+        )
+
         user_message = f"""Generate a MCQ question with these specifications:
 
 Chapter: {slot.target_chapter}
@@ -659,7 +742,7 @@ Scope Tags: {', '.join(getattr(slot, 'scope_tags', []) or [])}
 
 === TEXTBOOK CONTEXT (use ONLY this information) ===
 
-{context.combined_text}
+{context_text}
 
 === END CONTEXT ===
 
@@ -692,7 +775,10 @@ Generate the question now.{edit_instruction}"""
             rubric=self._normalize_rubric("mcq", question_data),
             explanation=question_data.get("explanation", ""),
             source_chunks=[chunk["id"] for chunk in context.chunks],
-            source_texts=[chunk["text"] for chunk in context.chunks],
+            source_texts=[
+                self._sanitize_source_text(chunk["text"], 500)
+                for chunk in context.chunks
+            ],
             source_evidence=self._build_context_source_evidence(context),
             scope_tags=list(getattr(slot, "scope_tags", []) or []),
         )
