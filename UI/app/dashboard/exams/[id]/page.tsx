@@ -408,6 +408,9 @@ export default function ExamReviewPage() {
             <CardContent className="space-y-3">
               {playbookShadowEvents.slice().reverse().slice(0, 4).map((event) => {
                 const matchedBullets = Array.isArray(event.payload?.matched_bullets) ? event.payload?.matched_bullets : []
+                const wouldAttachBullets = Array.isArray(event.payload?.would_attach_bullets)
+                  ? event.payload?.would_attach_bullets
+                  : matchedBullets
                 return (
                   <div key={event.id} className="rounded-xl border bg-muted/20 p-4">
                     <div className="flex flex-wrap items-center gap-2">
@@ -416,13 +419,13 @@ export default function ExamReviewPage() {
                       {event.event_stage || event.workflow_stage ? <Badge variant="outline">{event.event_stage || event.workflow_stage}</Badge> : null}
                     </div>
                     <p className="mt-2 text-sm text-muted-foreground">
-                      {matchedBullets.length > 0
-                        ? `${matchedBullets.length} bullet(s) matched for this stage.`
+                      {wouldAttachBullets.length > 0
+                        ? `${wouldAttachBullets.length} bullet(s) would attach for this stage in limited mode.`
                         : "Shadow mode was active but no bullet matched this stage."}
                     </p>
-                    {matchedBullets.length > 0 ? (
+                    {wouldAttachBullets.length > 0 ? (
                       <div className="mt-3 flex flex-wrap gap-2">
-                        {matchedBullets.map((bullet) => (
+                        {wouldAttachBullets.map((bullet) => (
                           <Badge key={`${event.id}-${String((bullet as { bullet_id?: string }).bullet_id || "")}`} variant="outline">
                             {String((bullet as { title?: string }).title || "Untitled")}
                           </Badge>
@@ -734,12 +737,15 @@ function QuestionCard({
                         const matchedBullets = Array.isArray(event.payload?.matched_bullets)
                           ? event.payload.matched_bullets as Array<Record<string, unknown>>
                           : []
-                        if (event.signal_type !== "playbook_shadow" || matchedBullets.length === 0) {
+                        const wouldAttachBullets = Array.isArray(event.payload?.would_attach_bullets)
+                          ? event.payload.would_attach_bullets as Array<Record<string, unknown>>
+                          : matchedBullets
+                        if (event.signal_type !== "playbook_shadow" || wouldAttachBullets.length === 0) {
                           return null
                         }
                         return (
                           <div className="mt-2 flex flex-wrap gap-2">
-                            {matchedBullets.map((bullet) => (
+                            {wouldAttachBullets.map((bullet) => (
                               <Badge key={`${event.id}-${String(bullet.bullet_id || "")}`} variant="outline">
                                 {String(bullet.title || "Untitled")}
                               </Badge>

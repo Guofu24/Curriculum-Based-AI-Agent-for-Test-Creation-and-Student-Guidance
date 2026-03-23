@@ -39,22 +39,33 @@ class PlaybookRetrievalOutcome:
             for bullet in self.attached_bullets
         ]
 
+    def _serialize_bullet(self, bullet: PlaybookBullet) -> dict:
+        return {
+            "bullet_id": bullet.id,
+            "title": bullet.title,
+            "bullet_type": bullet.bullet_type.value,
+            "confidence": bullet.confidence,
+            "tags": list(bullet.tags_json or []),
+        }
+
     def as_event_payload(self) -> dict:
+        serialized_matched = [
+            self._serialize_bullet(bullet)
+            for bullet in self.matched_bullets
+        ]
+        serialized_attached = [
+            self._serialize_bullet(bullet)
+            for bullet in self.attached_bullets
+        ]
         return {
             "retrieval_mode": self.mode,
             "stage": self.stage,
             "matched_count": len(self.matched_bullets),
             "attached_count": len(self.attached_bullets),
-            "matched_bullets": [
-                {
-                    "bullet_id": bullet.id,
-                    "title": bullet.title,
-                    "bullet_type": bullet.bullet_type.value,
-                    "confidence": bullet.confidence,
-                    "tags": list(bullet.tags_json or []),
-                }
-                for bullet in self.matched_bullets
-            ],
+            "would_attach_count": len(self.matched_bullets),
+            "matched_bullets": serialized_matched,
+            "would_attach_bullets": serialized_matched,
+            "attached_bullets": serialized_attached,
         }
 
 

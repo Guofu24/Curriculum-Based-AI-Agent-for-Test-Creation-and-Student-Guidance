@@ -122,6 +122,11 @@ async def check_playbook_retrieval_modes() -> None:
         shadow = await service.retrieve(stage="generation", error_categories=["weak_evidence"])
         assert len(shadow.matched_bullets) == 1
         assert len(shadow.attached_bullets) == 0
+        shadow_payload = shadow.as_event_payload()
+        assert shadow_payload["retrieval_mode"] == "shadow"
+        assert shadow_payload["would_attach_count"] == 1
+        assert len(shadow_payload["would_attach_bullets"]) == 1
+        assert len(shadow_payload["attached_bullets"]) == 0
 
         settings.PLAYBOOK_RETRIEVAL_MODE = "limited"
         limited = await service.retrieve(stage="generation", error_categories=["weak_evidence"])
