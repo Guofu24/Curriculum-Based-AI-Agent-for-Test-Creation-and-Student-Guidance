@@ -1,30 +1,8 @@
 """
-FastAPI Router Registry - MVP Only
+Compatibility router registry.
 
-Active routers for narrow MVP (Physics PDF, MCQ generation, strict scope):
-- auth_router: authentication & authorization
-- courses_router: course management
-- documents_router: PDF upload & parsing
-- exams_router: exam CRUD & versioning
-- generation_router: MVP exam generation pipeline
-
-Deprecated/Legacy routers (not exported, not mounted):
-- backend/legacy/routers/guidance.py
-- backend/legacy/routers/export.py
-- backend/legacy/routers/textbooks.py
+The active router package now lives under `app.api.routers`.
+This module remains as a thin compatibility import surface for older scripts.
 """
-from routers.auth import router as auth_router
-from routers.courses import router as courses_router
-from routers.documents import router as documents_router
-from routers.exams import router as exams_router
-from routers.generation import router as generation_router
-from routers.playbook import router as playbook_router
 
-__all__ = [
-    "auth_router",
-    "courses_router",
-    "documents_router",
-    "exams_router",
-    "generation_router",
-    "playbook_router",
-]
+from app.api.routers import *

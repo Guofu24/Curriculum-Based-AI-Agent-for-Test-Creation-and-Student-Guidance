@@ -14,28 +14,28 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from agents.blueprint import BlueprintAgent, assign_chunks_to_slots
-from agents.document_processor import DocumentProcessorAgent
-from agents.grounding_checker import GroundingChecker
-from agents.question_generator import QuestionGeneratorAgent
-from agents.retrieval import RetrievalAgent
-from agents.state import GeneratedQuestion, RetrievedContext
-from agents.validator import ValidatorAgent
-from config import settings
-from main import app
-from models.curriculum import Section
-from models.exam import BloomLevel
-from models.textbook import PROCESSING_STATUS_ENUM, ProcessingStatus
-from schemas.exam import ExamGenerationRequest
-from services.curriculum.scope_service import CurriculumScopeService, ResolvedScope
-from services.editing.review_edit_service import ReviewEditService
-from services.exam_planning.spec_service import ExamSpecService
-from services.exam_service import ExamService
-from services.generation.mcq_generation_service import MCQGenerationService
-from services.fallback_embeddings import DeterministicHashEmbeddings, NoOpVectorStore
-from services.retrieval.scoped_retrieval_service import ScopedRetrievalService
-from services.verification.mcq_verifier_service import MCQVerifierService
-from utils.bloom_levels import normalize_bloom_level
+from app.core.runtime_models import GeneratedQuestion, RetrievedContext
+from app.core.config import settings
+from app.main import app
+from app.models.curriculum import Section
+from app.models.exam import BloomLevel
+from app.models.textbook import PROCESSING_STATUS_ENUM, ProcessingStatus
+from app.schemas.exam import ExamGenerationRequest
+from app.services.curriculum.scope_service import CurriculumScopeService, ResolvedScope
+from app.services.documents.processor import DocumentProcessor
+from app.services.exam_planning.blueprint_service import BlueprintService, assign_chunks_to_slots
+from app.services.exam_planning.spec_service import ExamSpecService
+from app.services.exams.service import ExamService
+from app.services.generation.mcq_generation_service import MCQGenerationService
+from app.services.generation.question_generator import QuestionGeneratorService
+from app.services.retrieval.fallback_embeddings import DeterministicHashEmbeddings, NoOpVectorStore
+from app.services.retrieval.retrieval_engine import RetrievalEngine
+from app.services.retrieval.scoped_retrieval_service import ScopedRetrievalService
+from app.services.review.review_edit_service import ReviewEditService
+from app.services.verification.grounding_checker import GroundingChecker
+from app.services.verification.mcq_verifier_service import MCQVerifierService
+from app.services.verification.validator import QuestionValidator
+from app.utils.bloom_levels import normalize_bloom_level
 
 
 class _FakeVectorStore:
@@ -282,7 +282,7 @@ async def _build_blueprint_with_section_id():
         document_id="doc-1",
         resolved_scope=resolved_scope,
     )
-    blueprint, _ = await BlueprintAgent().create_blueprint(
+    blueprint, _ = await BlueprintService().create_blueprint(
         prompt=spec.source_prompt,
         exam_type="mcq",
         difficulty="custom",
@@ -321,7 +321,7 @@ def check_blueprint_preserves_section_id() -> None:
 
 
 def check_question_generator_rejects_non_mcq_assignments() -> None:
-    generator = QuestionGeneratorAgent(llm=None)
+    generator = QuestionGeneratorService(llm=None)
     try:
         generator._assert_mcq_only_assignments([{"question_type": "essay"}])
     except ValueError:
@@ -330,7 +330,7 @@ def check_question_generator_rejects_non_mcq_assignments() -> None:
 
 
 def check_question_generator_normalizes_string_options() -> None:
-    generator = QuestionGeneratorAgent(llm=None)
+    generator = QuestionGeneratorService(llm=None)
     options = generator._normalize_options(
         [
             "A. Van toc",
@@ -350,7 +350,7 @@ def check_question_generator_normalizes_string_options() -> None:
 
 
 def check_bloom_level_aliases_are_normalized() -> None:
-    generator = QuestionGeneratorAgent(llm=None)
+    generator = QuestionGeneratorService(llm=None)
     assert normalize_bloom_level("analysis", fallback="remember") == "analyze"
     assert normalize_bloom_level("application", fallback="remember") == "apply"
     assert generator._normalize_payload_bloom_level("analysis", "remember") == "analyze"
@@ -382,7 +382,7 @@ def check_bloom_level_aliases_are_normalized() -> None:
 
 
 def check_question_generator_sanitizes_and_truncates_context() -> None:
-    generator = QuestionGeneratorAgent(llm=None)
+    generator = QuestionGeneratorService(llm=None)
     noisy_text = "C\u00a7x\n\n\uf03d \uf02d\n\nVan toc trung binh duoc tinh bang quang duong chia thoi gian.\n" * 20
     cleaned = generator._sanitize_source_text(noisy_text, 120)
 
@@ -393,7 +393,7 @@ def check_question_generator_sanitizes_and_truncates_context() -> None:
 
 
 def check_rate_limit_header_parser_supports_retry_windows() -> None:
-    generator = QuestionGeneratorAgent(llm=None)
+    generator = QuestionGeneratorService(llm=None)
     assert generator._parse_seconds_header("10") == 10
     assert generator._parse_seconds_header("59.12s") == 59
     assert generator._parse_seconds_header("7m12s") == 432
@@ -428,7 +428,7 @@ def check_noop_vector_store_is_safe() -> None:
 
 
 def check_chunk_section_id_is_attached() -> None:
-    processor = DocumentProcessorAgent(vector_store=_FakeVectorStore())
+    processor = DocumentProcessor(vector_store=_FakeVectorStore())
     formatted_chunks = [
         {
             "chunk_text": "Bai 1. Chuyen dong thang deu la chuyen dong co van toc khong doi.",
@@ -530,7 +530,7 @@ async def _retrieve_with_vector_failure_uses_bm25() -> None:
         chunk_id="chunk-1",
         content="Van toc trung binh duoc tinh bang quang duong chia cho thoi gian.",
     )
-    agent = RetrievalAgent(
+    agent = RetrievalEngine(
         vector_store=_FailingQueryVectorStore(),
         db_session=_FakeDBSession([row]),
     )
@@ -579,7 +579,7 @@ async def _run_component_flow_smoke() -> None:
         document_id="doc-1",
         resolved_scope=resolved_scope,
     )
-    blueprint, _ = await BlueprintAgent().create_blueprint(
+    blueprint, _ = await BlueprintService().create_blueprint(
         prompt=spec.source_prompt,
         exam_type="mcq",
         difficulty="custom",
@@ -638,7 +638,7 @@ async def _run_component_flow_smoke() -> None:
     exam_service = ExamService(db=None)
     exam_service._enrich_source_evidence(generated_questions, chunk_metadata_index, "doc-1")
 
-    verifier_service = MCQVerifierService(ValidatorAgent(grounding_checker=GroundingChecker()))
+    verifier_service = MCQVerifierService(QuestionValidator(grounding_checker=GroundingChecker()))
     verified_questions, summary, _, _, _ = await verifier_service.verify(
         questions=generated_questions,
         blueprint=blueprint,

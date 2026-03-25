@@ -15,10 +15,10 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from evals.phase3_eval import build_error_analysis, build_phase3_report, load_eval_samples
-from models.exam import ExamQuestion, FeedbackSignalType
-from services.analytics.question_quality import question_error_categories
-from services.analytics.quality_summary_service import build_quality_summary, filter_feedback_events
-from services.feedback.feedback_event_service import FeedbackEventService
+from app.models.exam import ExamQuestion, FeedbackSignalType
+from app.services.analytics.question_quality import question_error_categories
+from app.services.analytics.quality_summary_service import build_quality_summary, filter_feedback_events
+from app.services.feedback.feedback_event_service import FeedbackEventService
 
 
 class _FakeDb:

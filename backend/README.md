@@ -1,102 +1,80 @@
-# Backend Phase 4
+# Backend Overview
 
-This backend is hard-locked to the active Physics exam-generation product and now exposes the **ACE foundation** workflow needed for Phase 4.
+This backend is the active runtime for the Physics exam-generation MVP.
 
-## Active boundary
+## Active Product Boundary
 
 - Subject: Physics only
-- Output language: Vietnamese only
-- Input format: PDF only
-- Question type: single-answer MCQ only
-- Scope selection: chapter / lesson / topic only
+- Language: Vietnamese only
+- Input: PDF only
+- Output: single-answer MCQ only
+- Scope: chapter / lesson / topic sections only
 - Review flow: verify, edit, regenerate, version, publish
-- Required: strict scope grounding and source evidence per question
+- Grounding: strict scope + source evidence per question
 
 Not in the active path:
 
-- ACE core online adaptation
 - student guidance
-- essay or mixed exams
-- DOCX or PPTX ingestion
-- export runtime for students
-- unrestricted agent orchestration
+- essay runtime
+- DOCX / PPTX runtime ingestion
+- multi-subject generation
+- ACE adaptive runtime
 
-## Production routers
+## Active Code Path
 
-Mounted at startup:
+All active backend code now lives under [app](e:/Đồ án/Project/backend/app):
 
-- `/api/v1/auth`
-- `/api/v1/courses`
-- `/api/v1/documents`
-- `/api/v1/exams`
-- `/api/v1/generate`
-- `/api/v1/playbook`
-
-Phase 4 feedback + playbook endpoints:
-
-- `GET /api/v1/exams/quality-summary`
-- `GET /api/v1/exams/feedback-summary`
-- `GET /api/v1/exams/feedback-store`
-- `GET /api/v1/exams/{exam_id}/feedback`
-- `GET /api/v1/playbook/overview`
-- `GET /api/v1/playbook/bullets`
-- `GET /api/v1/playbook/candidates`
-- `POST /api/v1/playbook/candidates/generate`
-- `POST /api/v1/playbook/candidates/{candidate_id}/promote`
-- `POST /api/v1/playbook/candidates/{candidate_id}/reject`
-- `GET /api/v1/playbook/warmup-preview`
-
-Kept on disk but not mounted:
-
-- `legacy/routers/guidance.py`
-- `legacy/routers/export.py`
-- `legacy/routers/textbooks.py`
-
-## Phase 4 additions
-
-- hardened `feedback_events` with:
-  - `event_stage`
-  - `source_type`
-  - `source_ref`
-  - `error_categories_json`
-  - `before_snapshot_ref`
-  - `after_snapshot_ref`
-  - `linked_eval_sample_id`
-- `playbook_bullets` persistence with seed approved bullets
-- `reflection_candidates` persistence and promote/reject lifecycle
-- feature-flagged playbook retrieval for generator/verifier:
-  - `PLAYBOOK_RETRIEVAL_MODE=off|shadow|limited`
-  - `PLAYBOOK_RETRIEVAL_LIMIT`
-- warmup export service and script
-- UI-facing playbook / feedback / warmup APIs
-- resilient embedding startup:
-  - default backend still prefers `sentence-transformers`
-  - if the local HuggingFace embedding stack is broken, dev mode can fall back to deterministic hash embeddings via `EMBEDDING_ALLOW_FALLBACK=true`
-  - fallback keeps upload/index/retrieval alive for local work, but retrieval quality is lower than the intended semantic embedding path
-  - when fallback embeddings are active, the runtime automatically disables Pinecone vector I/O and uses BM25/local chunk retrieval to avoid slow retry loops against cloud vector search
-
-## Validation commands
-
-From the `backend` directory:
-
-```bash
-conda activate graduation
-python tests/mvp_smoke_checks.py
-python tests/phase3_quality_checks.py
-python tests/phase4_foundation_checks.py
-python evals/run_phase3_eval.py --split dev
-python evals/run_error_analysis.py --split dev
-python evals/export_warmup_dataset.py --output evals/output/warmup_dataset.json
+```text
+backend/
+  app/
+    api/
+    core/
+    models/
+    repositories/
+    schemas/
+    services/
+    utils/
+  alembic/
+  docs/
+  evals/
+  legacy/
+  tests/
 ```
 
-## Supporting docs
+The old top-level modules such as `backend/services/*`, `backend/agents/*`, `backend/models/*`, `backend/config.py`, and `backend/main.py` are now compatibility shims that forward imports to `backend/app/*`.
 
-- `../docs/evaluation.md`
-- `../docs/ace_foundation.md`
-- `../docs/playbook_model.md`
-- `../docs/feedback_store.md`
-- `../docs/warmup_data.md`
-- `../docs/error_analysis.md`
-- `../docs/data_curation.md`
-- `../docs/ui_flow.md`
-- `../docs/codebase_cleanup.md`
+## Runtime Flow
+
+1. Upload document: router -> document service -> document processor -> sections/chunks/curriculum persistence.
+2. Generate exam: router -> exam service -> scope resolution -> exam spec -> blueprint -> scoped retrieval -> MCQ generation -> verification -> version persistence.
+3. Review/regenerate: edit service -> targeted retrieval -> regenerate -> reverify -> new exam version.
+4. Publish/quality/playbook: analytics, feedback store, reflection candidates, warmup export, playbook retrieval modes.
+
+Primary entrypoints:
+
+- [main.py](e:/Đồ án/Project/backend/app/main.py)
+- [documents service](e:/Đồ án/Project/backend/app/services/documents/service.py)
+- [exam service](e:/Đồ án/Project/backend/app/services/exams/service.py)
+
+## Validation Commands
+
+Run from the repo root:
+
+```bash
+python backend/verify_imports.py
+python backend/tests/mvp_smoke_checks.py
+python backend/tests/phase3_quality_checks.py
+python backend/tests/phase4_foundation_checks.py
+python backend/evals/run_phase3_eval.py --split dev
+python backend/evals/run_error_analysis.py --split dev
+python backend/evals/export_warmup_dataset.py --output backend/evals/output/warmup_dataset.json
+```
+
+## Backend Docs
+
+- [active_backend_flow.md](e:/Đồ án/Project/backend/docs/active_backend_flow.md)
+- [backend_directory_map.md](e:/Đồ án/Project/backend/docs/backend_directory_map.md)
+- [compatibility_zones.md](e:/Đồ án/Project/backend/docs/compatibility_zones.md)
+- [service_responsibilities.md](e:/Đồ án/Project/backend/docs/service_responsibilities.md)
+
+Supporting product docs remain in the repo-level [docs](e:/Đồ án/Project/docs) folder.

@@ -15,18 +15,18 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from config import settings
-from main import app
-from models.exam import FeedbackSignalType
-from models.playbook import PlaybookBulletStatus, PlaybookBulletType
-from services.feedback.feedback_event_service import FeedbackEventService
-from services.feedback.store_service import (
+from app.core.config import settings
+from app.main import app
+from app.models.exam import FeedbackSignalType
+from app.models.playbook import PlaybookBulletStatus, PlaybookBulletType
+from app.services.feedback.feedback_event_service import FeedbackEventService
+from app.services.feedback.store_service import (
     build_feedback_store_summary,
     filter_feedback_events,
 )
-from services.playbook.reflection_service import ReflectionCandidateService
-from services.playbook.retrieval_service import PlaybookRetrievalService
-from services.playbook.warmup_service import build_warmup_export
+from app.services.playbook.reflection_service import ReflectionCandidateService
+from app.services.playbook.retrieval_service import PlaybookRetrievalService
+from app.services.playbook.warmup_service import build_warmup_export
 
 
 class _FakeDb:

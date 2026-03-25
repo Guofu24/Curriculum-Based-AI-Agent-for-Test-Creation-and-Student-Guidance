@@ -1,4 +1,4 @@
-from core.mvp import (
+from app.core.mvp import (
     DEFAULT_OUTPUT_LANGUAGE,
     DEFAULT_QUESTION_TYPE,
     DEFAULT_SECTION_TYPES,
