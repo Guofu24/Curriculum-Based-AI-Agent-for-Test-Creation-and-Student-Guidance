@@ -1,114 +1,91 @@
-import os
-from pathlib import Path
+"""Configuration management using Pydantic Settings."""
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings
-from typing import Optional
-
-_BASE_DIR = Path(__file__).resolve().parent
+from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    # App
-    APP_NAME: str = "ExamAI"
-    APP_ENV: str = "development"
-    DEBUG: bool = True
-    SECRET_KEY: str = "change-this-to-a-secure-random-string"
-    API_PREFIX: str = "/api/v1"
+    """Application settings loaded from environment variables."""
 
     # Database
-    DATABASE_URL: str = "postgresql+asyncpg://examai:examai@localhost:5432/examai"
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/curriculum_ai"
 
-    # LLM
-    LLM_PROVIDER: str = "groq"
-    GROQ_API_KEY: Optional[str] = None
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
-    G4F_MODEL: str = "gpt-4o"
-    G4F_PROVIDER: str = "Blackbox"
-    TOGETHER_API_KEY: Optional[str] = None
-    TOGETHER_MODEL: str = "deepcogito/cogito-v1-preview-qwen-32B"
-    GOOGLE_API_KEY: Optional[str] = None
-    GOOGLE_MODEL: str = "gemini-2.0-flash"
-    OPENAI_API_KEY: Optional[str] = None
-    OPENAI_MODEL: str = "gpt-4o"
-    ANTHROPIC_API_KEY: Optional[str] = None
-    ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
+    # Redis
+    REDIS_URL: str = "redis://localhost:6379/0"
+    CELERY_BROKER_URL: str = "redis://localhost:6379/1"
 
-    # Embedding
-    # Keep model/dimension aligned by default (MiniLM = 384 dims).
-    EMBEDDING_PROVIDER: str = "huggingface"
-    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    EMBEDDING_DIMENSION: int = 384
-    EMBEDDING_ALLOW_FALLBACK: bool = True
-    EMBEDDING_DISABLE_VECTOR_INDEX_WHEN_FALLBACK: bool = True
-    VECTOR_SEARCH_TIMEOUT_SECONDS: float = 6.0
+    # OpenAI
+    OPENAI_API_KEY: str = ""
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_MODEL_ORCHESTRATOR: str = "gpt-4o"
+    OPENAI_MODEL_BUILDER: str = "gpt-4o"
+    OPENAI_MODEL_VALIDATOR: str = "gpt-4o"
+    OPENAI_MODEL_PLANNER: str = "gpt-4o-mini"
+    OPENAI_MODEL_RERANKER: str = "gpt-4o-mini"
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-large"
+    OPENAI_EMBEDDING_DIM: int = 3072
 
-    # Pinecone (free cloud vector DB)
-    PINECONE_API_KEY: Optional[str] = None
-    PINECONE_INDEX_NAME: str = "examai"
+    # Pinecone
+    PINECONE_API_KEY: str = ""
+    PINECONE_INDEX: str = "curriculum-ai"
     PINECONE_CLOUD: str = "aws"
     PINECONE_REGION: str = "us-east-1"
 
-    # Rate limiting — LLM API (Groq free tier: 12K TPM)
-    LLM_REQUEST_DELAY: float = 6.0  # Seconds between LLM calls
-    MAX_CHUNK_CHARS: int = 1200      # Max chars per chunk sent to LLM
+    # AWS S3
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_REGION: str = "ap-southeast-1"
+    S3_BUCKET_NAME: str = "curriculum-ai-uploads"
+    S3_PRESIGNED_URL_TTL: int = 3600
 
-    # File Storage
-    UPLOAD_DIR: str = str(_BASE_DIR / "data" / "uploads")
-    MAX_UPLOAD_SIZE_MB: int = 100
+    # MathPix (formula OCR)
+    MATHPIX_APP_ID: str = ""
+    MATHPIX_APP_KEY: str = ""
+
+    # LangFuse (Observability)
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    LANGFUSE_HOST: str = "https://cloud.langfuse.com"
+    LANGFUSE_ENABLED: bool = True
+
+    # JWT
+    JWT_SECRET_KEY: str = "change-me-in-production"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # Server
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+    DEBUG: bool = False
 
     # CORS
-    CORS_ORIGINS: list[str] = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://192.168.78.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000"
-    ]
+    CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
-    # Auth — JWT tokens
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15              # Short-lived access token (15 phút)
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7                 # Long-lived refresh token (7 ngày)
-    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24    # Email verification link TTL
-    ALGORITHM: str = "HS256"
+    # Agent settings
+    AGENT_MAX_RETRIES: int = 3
+    AGENT_TIMEOUT_RETRIEVAL: int = 30
+    AGENT_TIMEOUT_OUTLINE: int = 20
+    AGENT_TIMEOUT_BUILDER: int = 120
+    AGENT_TIMEOUT_VALIDATOR: int = 60
+    AGENT_TIMEOUT_PLANNER: int = 15
+    AGENT_MAX_VALIDATION_RETRIES: int = 3
+    AGENT_TOKEN_BUDGET: int = 50000
+    AGENT_MAX_WEB_SEARCH_CALLS: int = 10
 
-    # Rate limiting — chống brute-force login
-    LOGIN_RATE_LIMIT_REQUESTS: int = 5                 # Số request tối đa
-    LOGIN_RATE_LIMIT_WINDOW_SECONDS: int = 60          # Trong khoảng thời gian (giây)
+    # RAG settings
+    RAG_TOP_K_PER_CHAPTER: int = 20
+    RAG_TOP_K_AFTER_RERANK: int = 8
+    RAG_CHUNK_SIZE: int = 1200
+    RAG_CHUNK_OVERLAP: int = 200
+    EMBEDDING_CACHE_TTL_SECONDS: int = 604800  # 7 days
 
-    # SMTP (stub — log ra console nếu chưa cấu hình)
-    SMTP_HOST: Optional[str] = None
-    SMTP_PORT: int = 587
-    SMTP_USER: Optional[str] = None
-    SMTP_PASSWORD: Optional[str] = None
-    SMTP_FROM_EMAIL: str = "noreply@examai.local"
-    PLAYBOOK_RETRIEVAL_MODE: str = "off"
-    PLAYBOOK_RETRIEVAL_LIMIT: int = 3
-
-    @field_validator("DEBUG", mode="before")
-    @classmethod
-    def normalize_debug_flag(cls, value):
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on", "debug", "development"}:
-                return True
-            if normalized in {"0", "false", "no", "off", "release", "production"}:
-                return False
-        return value
-
-    @field_validator("PLAYBOOK_RETRIEVAL_MODE", mode="before")
-    @classmethod
-    def normalize_playbook_mode(cls, value):
-        normalized = str(value or "off").strip().lower()
-        if normalized not in {"off", "shadow", "limited"}:
-            return "off"
-        return normalized
-
-    model_config = {"env_file": str(_BASE_DIR / ".env"), "extra": "ignore"}
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
 
 
-settings = Settings()
+@lru_cache
+def get_settings() -> Settings:
+    """Get cached settings instance."""
+    return Settings()

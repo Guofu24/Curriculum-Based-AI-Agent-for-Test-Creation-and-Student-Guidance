@@ -1,2 +1,1 @@
-﻿from app.core.config import settings  # noqa: F401
-
+"""Core infrastructure package."""

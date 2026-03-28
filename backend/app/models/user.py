@@ -1,18 +1,18 @@
-﻿"""
-User model with role-aware authentication metadata.
-"""
-import enum
+"""User model."""
+
 import uuid
 from datetime import datetime
-from typing import Optional
-
-from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from enum import Enum
+from sqlalchemy import Column, String, DateTime, Integer, Boolean, Enum as SAEnum
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 
 from app.core.database import Base
 
 
-class UserRole(str, enum.Enum):
+class UserRole(str, Enum):
+    """User roles for authorization."""
     ADMIN = "admin"
     LECTURER = "lecturer"
     TEACHING_ASSISTANT = "teaching_assistant"
@@ -20,43 +20,28 @@ class UserRole(str, enum.Enum):
 
 
 class User(Base):
+    """User model for teachers and admins."""
+
     __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(
-        String,
-        primary_key=True,
-        default=lambda: str(uuid.uuid4()),
-    )
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[UserRole] = mapped_column(
-        SAEnum(
-            UserRole,
-            native_enum=False,
-            values_callable=lambda enum_cls: [member.value for member in enum_cls],
-        ),
-        default=UserRole.LECTURER,
-        nullable=False,
-    )
-    department: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    university: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    is_email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
-    totp_secret: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0)
-    last_failed_login: Mapped[Optional[datetime]] = mapped_column(
-        DateTime,
-        nullable=True,
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(255), nullable=True)
+    role = Column(String(50), default="teacher")
+    department = Column(String(255), nullable=True)
+    university = Column(String(255), nullable=True)
+    is_email_verified = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True)
+    failed_login_attempts = Column(Integer, default=0)
+    last_failed_login = Column(DateTime(timezone=True), nullable=True)
+    totp_secret = Column(String(64), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    textbooks = relationship("Textbook", back_populates="owner")
-    exams = relationship("Exam", back_populates="owner")
-    owned_courses = relationship(
-        "Course",
-        back_populates="owner",
-        foreign_keys="Course.owner_user_id",
-    )
-    course_memberships = relationship("CourseMembership", back_populates="user")
-
+    # Relationships
+    documents = relationship("Document", back_populates="user", cascade="all, delete-orphan")
+    exams = relationship("Exam", back_populates="user", cascade="all, delete-orphan")
+    courses = relationship("Course", back_populates="owner", cascade="all, delete-orphan")
+    refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
+    preferences = relationship("TeacherPreference", back_populates="user", uselist=False, cascade="all, delete-orphan")

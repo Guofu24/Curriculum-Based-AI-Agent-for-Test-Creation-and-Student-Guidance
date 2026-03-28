@@ -1,375 +1,143 @@
-﻿import enum
+"""Exam model - aligned with frontend's API expectations."""
+
 import uuid
 from datetime import datetime
-
-from sqlalchemy import (
-    JSON,
-    Boolean,
-    DateTime,
-    Enum as SAEnum,
-    Float,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-)
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Column, String, DateTime, Integer, ForeignKey, JSON, Numeric, Text, Boolean
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 
 from app.core.database import Base
 
 
-class ExamType(str, enum.Enum):
-    # Legacy enum values are kept for DB compatibility.
-    # Active MVP runtime accepts MCQ only and rejects essay/mixed at the API/service layer.
-    MCQ = "mcq"
-    ESSAY = "essay"
-    MIXED = "mixed"
-
-
-class DifficultyLevel(str, enum.Enum):
-    BASIC = "basic"
-    ADVANCED = "advanced"
-    APPLICATION = "application"
-    HIGH_APPLICATION = "high_application"
-    CUSTOM = "custom"
-
-
-class ExamStatus(str, enum.Enum):
-    GENERATING = "generating"
-    GENERATED = "generated"
-    FAILED = "failed"
-    REVIEWED = "reviewed"
-    PUBLISHED = "published"
-
-
-class QuestionType(str, enum.Enum):
-    # Legacy enum values are kept for DB compatibility.
-    # Active MVP runtime accepts MCQ only.
-    MCQ = "mcq"
-    ESSAY = "essay"
-
-
-class FeedbackSignalType(str, enum.Enum):
-    RETRIEVAL_SUMMARY = "retrieval_summary"
-    VERIFIER_WARNING = "verifier_warning"
-    VERIFIER_FAILED = "verifier_failed"
-    HUMAN_EDIT = "human_edit"
-    REGENERATE_REQUESTED = "regenerate_requested"
-    EXAM_PUBLISHED = "exam_published"
-    PLAYBOOK_SHADOW = "playbook_shadow"
-
-
-class BloomLevel(str, enum.Enum):
-    REMEMBER = "remember"
-    UNDERSTAND = "understand"
-    APPLY = "apply"
-    ANALYZE = "analyze"
-    EVALUATE = "evaluate"
-    CREATE = "create"
-
-
 class Exam(Base):
+    """Exam model for generated test papers."""
+
     __tablename__ = "exams"
 
-    id: Mapped[str] = mapped_column(
-        String,
-        primary_key=True,
-        default=lambda: str(uuid.uuid4()),
-    )
-    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
-    course_id: Mapped[str] = mapped_column(ForeignKey("courses.id"), nullable=True)
-    textbook_id: Mapped[str] = mapped_column(ForeignKey("textbooks.id"), nullable=False)
-    current_version_id: Mapped[str] = mapped_column(ForeignKey("exam_versions.id"), nullable=True)
-    title: Mapped[str] = mapped_column(String(500), nullable=False)
-    exam_type: Mapped[ExamType] = mapped_column(SAEnum(ExamType, native_enum=False), nullable=False)
-    difficulty: Mapped[DifficultyLevel] = mapped_column(
-        SAEnum(DifficultyLevel, native_enum=False),
-        nullable=False,
-    )
-    status: Mapped[ExamStatus] = mapped_column(
-        SAEnum(ExamStatus, native_enum=False),
-        default=ExamStatus.GENERATING,
-    )
-    chapters: Mapped[list] = mapped_column(JSON, nullable=False)
-    config: Mapped[dict] = mapped_column(JSON, nullable=False)
-    variant_number: Mapped[int] = mapped_column(Integer, default=1)
-    total_questions: Mapped[int] = mapped_column(Integer, default=0)
-    instructions: Mapped[str] = mapped_column(Text, nullable=True, default="")
-    output_language: Mapped[str] = mapped_column(String(20), nullable=False, default="vi")
-    strict_scope_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    selected_scope_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-    exam_spec_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-    blueprint_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-    review_notes_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    edit_history_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    quality_score: Mapped[float] = mapped_column(Float, nullable=True)
-    quality_scores_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    grounding_reports_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    duplicate_groups_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    provider_logs_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    edit_impact_level: Mapped[str] = mapped_column(String(20), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
-    )
-    published_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True)
+    course_id = Column(UUID(as_uuid=True), ForeignKey("courses.id", ondelete="SET NULL"), nullable=True)
 
-    owner = relationship("User", back_populates="exams")
-    course = relationship("Course", back_populates="exams")
-    document = relationship("Textbook")
-    exam_spec_record = relationship(
-        "ExamSpecRecord",
-        back_populates="exam",
-        uselist=False,
-        cascade="all, delete-orphan",
-    )
-    versions = relationship(
-        "ExamVersion",
-        back_populates="exam",
-        cascade="all, delete-orphan",
-        foreign_keys="ExamVersion.exam_id",
-    )
-    feedback_events = relationship(
-        "FeedbackEvent",
-        back_populates="exam",
-        cascade="all, delete-orphan",
-        foreign_keys="FeedbackEvent.exam_id",
-    )
-    current_version = relationship(
-        "ExamVersion",
-        foreign_keys=[current_version_id],
-        post_update=True,
-    )
+    title = Column(String(500), nullable=False)
+    exam_type = Column(String(50), default="mcq")  # mcq, essay, mixed
+    difficulty = Column(String(50), default="medium")
+    status = Column(String(50), default="draft")  # draft, published
 
+    # Scope
+    chapters = Column(JSON, nullable=True)  # [1, 2, 3] - chapter numbers
+    selected_scope = Column(JSON, nullable=True)  # [ScopeUnitPayload, ...]
+    scope = Column(JSON, nullable=True)  # raw scope strings for generation
 
-class ExamSpecRecord(Base):
-    __tablename__ = "exam_specs"
+    # Configuration
+    instructions = Column(Text, nullable=True)
+    output_language = Column(String(10), default="vi")
+    strict_scope_flag = Column(Boolean, default=True)
+    time_limit_minutes = Column(Integer, nullable=True)
 
-    id: Mapped[str] = mapped_column(
-        String,
-        primary_key=True,
-        default=lambda: str(uuid.uuid4()),
-    )
-    exam_id: Mapped[str] = mapped_column(ForeignKey("exams.id"), nullable=False, unique=True)
-    course_id: Mapped[str] = mapped_column(ForeignKey("courses.id"), nullable=True)
-    document_id: Mapped[str] = mapped_column(ForeignKey("textbooks.id"), nullable=True)
-    creator_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
-    exam_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    question_type: Mapped[str] = mapped_column(String(50), nullable=False, default="mcq_single_answer")
-    time_limit_minutes: Mapped[int] = mapped_column(Integer, nullable=True)
-    language: Mapped[str] = mapped_column(String(20), nullable=False, default="vi")
-    instructions: Mapped[str] = mapped_column(Text, nullable=True, default="")
-    normalized_instructions: Mapped[str] = mapped_column(Text, nullable=True, default="")
-    strict_scope_flag: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    bloom_distribution_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-    question_mix_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-    formatting_preferences_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-    total_questions: Mapped[int] = mapped_column(Integer, default=0)
-    selected_scope_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    source_prompt: Mapped[str] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), nullable=True, default="draft")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
-    )
+    # Variant support
+    variant_number = Column(Integer, default=1)
 
-    exam = relationship("Exam", back_populates="exam_spec_record")
-    scopes = relationship(
-        "ExamSpecScopeRecord",
-        back_populates="exam_spec",
-        cascade="all, delete-orphan",
-    )
-    blueprint_cells = relationship(
-        "BlueprintCellRecord",
-        back_populates="exam_spec",
-        cascade="all, delete-orphan",
-    )
+    # Questions (JSON) - structured to match frontend's Question[]
+    questions = Column(JSON, nullable=True)
+    total_questions = Column(Integer, default=0)
 
+    # Spec and blueprint
+    exam_config = Column(JSON, nullable=True)  # raw generation config
+    exam_spec = Column(JSON, nullable=True)
+    blueprint = Column(JSON, nullable=True)
 
-class ExamSpecScopeRecord(Base):
-    __tablename__ = "exam_spec_scopes"
+    # Quality scores
+    quality_score = Column(Numeric(5, 4), nullable=True)
+    quality_scores = Column(JSON, nullable=True)  # [QualityScoreDetail, ...]
+    grounding_reports = Column(JSON, nullable=True)  # [GroundingReportDetail, ...]
+    duplicate_groups = Column(JSON, nullable=True)
 
-    id: Mapped[str] = mapped_column(
-        String,
-        primary_key=True,
-        default=lambda: str(uuid.uuid4()),
-    )
-    exam_spec_id: Mapped[str] = mapped_column(ForeignKey("exam_specs.id"), nullable=False)
-    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), nullable=True)
-    scope_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    scope_type: Mapped[str] = mapped_column(String(50), nullable=False, default="topic")
-    title: Mapped[str] = mapped_column(String(500), nullable=False)
-    chapter_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    page_from: Mapped[int] = mapped_column(Integer, nullable=True)
-    page_to: Mapped[int] = mapped_column(Integer, nullable=True)
-    tags_json: Mapped[list] = mapped_column(JSON, nullable=True)
+    # Cost tracking
+    provider_logs = Column(JSON, nullable=True)
+    total_cost_usd = Column(Numeric(10, 4), nullable=True)
+    total_tokens = Column(Integer, nullable=True)
 
-    exam_spec = relationship("ExamSpecRecord", back_populates="scopes")
+    # Versioning
+    current_version_id = Column(UUID(as_uuid=True), nullable=True)
+    version_count = Column(Integer, default=0)
 
+    # Counts
+    verifier_pass_rate = Column(Numeric(5, 4), nullable=True)
+    evidence_coverage_rate = Column(Numeric(5, 4), nullable=True)
+    regenerate_count = Column(Integer, default=0)
+    human_edit_count = Column(Integer, default=0)
+    warning_count = Column(Integer, default=0)
 
-class BlueprintCellRecord(Base):
-    __tablename__ = "blueprint_cells"
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    published_at = Column(DateTime(timezone=True), nullable=True)
 
-    id: Mapped[str] = mapped_column(
-        String,
-        primary_key=True,
-        default=lambda: str(uuid.uuid4()),
-    )
-    exam_spec_id: Mapped[str] = mapped_column(ForeignKey("exam_specs.id"), nullable=False)
-    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), nullable=True)
-    cell_key: Mapped[str] = mapped_column(String(255), nullable=False)
-    scope_unit_json: Mapped[dict] = mapped_column(JSON, nullable=False)
-    question_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    bloom_level: Mapped[str] = mapped_column(String(50), nullable=False)
-    target_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    generated_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    overgenerate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-
-    exam_spec = relationship("ExamSpecRecord", back_populates="blueprint_cells")
+    # Relationships
+    user = relationship("User", back_populates="exams")
+    document = relationship("Document", back_populates="exams")
+    versions = relationship("ExamVersion", back_populates="exam", cascade="all, delete-orphan")
+    feedback_events = relationship("FeedbackEvent", back_populates="exam", cascade="all, delete-orphan")
 
 
 class ExamVersion(Base):
+    """Versioned snapshot of an exam."""
+
     __tablename__ = "exam_versions"
 
-    id: Mapped[str] = mapped_column(
-        String,
-        primary_key=True,
-        default=lambda: str(uuid.uuid4()),
-    )
-    exam_id: Mapped[str] = mapped_column(ForeignKey("exams.id"), nullable=False)
-    version_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="draft")
-    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
-    parent_version_id: Mapped[str] = mapped_column(ForeignKey("exam_versions.id"), nullable=True)
-    change_summary: Mapped[str] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    exam_id = Column(UUID(as_uuid=True), ForeignKey("exams.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_number = Column(Integer, nullable=False)
+    status = Column(String(50), default="draft")
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    parent_version_id = Column(UUID(as_uuid=True), nullable=True)
+    change_summary = Column(Text, nullable=True)
 
-    exam = relationship("Exam", back_populates="versions", foreign_keys=[exam_id])
-    parent_version = relationship("ExamVersion", remote_side="ExamVersion.id")
-    questions = relationship(
-        "ExamQuestion",
-        back_populates="exam_version",
-        cascade="all, delete-orphan",
-        foreign_keys="ExamQuestion.exam_version_id",
-    )
-    edit_operations = relationship(
-        "EditOperation",
-        back_populates="exam_version",
-        cascade="all, delete-orphan",
-    )
-    feedback_events = relationship(
-        "FeedbackEvent",
-        back_populates="exam_version",
-        cascade="all, delete-orphan",
-        foreign_keys="FeedbackEvent.exam_version_id",
-    )
+    # Full snapshot of this version
+    questions = Column(JSON, nullable=True)
+    edit_operations = Column(JSON, nullable=True)
 
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-class ExamQuestion(Base):
-    __tablename__ = "exam_questions"
-
-    id: Mapped[str] = mapped_column(
-        String,
-        primary_key=True,
-        default=lambda: str(uuid.uuid4()),
-    )
-    exam_id: Mapped[str] = mapped_column(ForeignKey("exams.id"), nullable=False)
-    exam_version_id: Mapped[str] = mapped_column(ForeignKey("exam_versions.id"), nullable=True)
-    question_number: Mapped[int] = mapped_column(Integer, nullable=False)
-    blueprint_cell_key: Mapped[str] = mapped_column(String(128), nullable=True)
-    question_type: Mapped[QuestionType] = mapped_column(
-        SAEnum(QuestionType, native_enum=False),
-        nullable=False,
-    )
-    bloom_level: Mapped[BloomLevel] = mapped_column(
-        SAEnum(BloomLevel, native_enum=False),
-        nullable=False,
-    )
-    difficulty_score: Mapped[float] = mapped_column(Float, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    options: Mapped[list] = mapped_column(JSON, nullable=True)
-    correct_answer: Mapped[str] = mapped_column(Text, nullable=False)
-    rubric_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-    explanation: Mapped[str] = mapped_column(Text, nullable=True)
-    source_chunks: Mapped[list] = mapped_column(JSON, nullable=True)
-    source_evidence_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    scope_tags_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    warnings_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    verification_status: Mapped[str] = mapped_column(
-        String(50),
-        nullable=True,
-        default="pending",
-    )
-    is_human_edited: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_validated: Mapped[bool] = mapped_column(Boolean, default=False)
-    validation_notes: Mapped[str] = mapped_column(Text, nullable=True)
-    quality_score_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-    grounding_report_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-
-    exam_version = relationship("ExamVersion", back_populates="questions", foreign_keys=[exam_version_id])
-
-
-class EditOperation(Base):
-    __tablename__ = "edit_operations"
-
-    id: Mapped[str] = mapped_column(
-        String,
-        primary_key=True,
-        default=lambda: str(uuid.uuid4()),
-    )
-    exam_version_id: Mapped[str] = mapped_column(ForeignKey("exam_versions.id"), nullable=False)
-    actor_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
-    edit_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    target_question_id: Mapped[str] = mapped_column(String(255), nullable=True)
-    old_value: Mapped[dict] = mapped_column(JSON, nullable=True)
-    new_value: Mapped[dict] = mapped_column(JSON, nullable=True)
-    prompt_used: Mapped[str] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-
-    exam_version = relationship("ExamVersion", back_populates="edit_operations")
+    # Relationships
+    exam = relationship("Exam", back_populates="versions")
+    feedback_events = relationship("FeedbackEvent", back_populates="exam_version", cascade="all, delete-orphan")
 
 
 class FeedbackEvent(Base):
+    """Feedback event for observability."""
+
     __tablename__ = "feedback_events"
 
-    id: Mapped[str] = mapped_column(
-        String,
-        primary_key=True,
-        default=lambda: str(uuid.uuid4()),
-    )
-    exam_id: Mapped[str] = mapped_column(ForeignKey("exams.id"), nullable=False)
-    exam_version_id: Mapped[str] = mapped_column(ForeignKey("exam_versions.id"), nullable=True)
-    question_id: Mapped[str] = mapped_column(ForeignKey("exam_questions.id"), nullable=True)
-    actor_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=True)
-    signal_type: Mapped[FeedbackSignalType] = mapped_column(
-        SAEnum(FeedbackSignalType, native_enum=False),
-        nullable=False,
-    )
-    severity: Mapped[str] = mapped_column(String(20), nullable=False, default="info")
-    workflow_stage: Mapped[str] = mapped_column(String(50), nullable=True)
-    event_stage: Mapped[str] = mapped_column(String(50), nullable=True)
-    event_source: Mapped[str] = mapped_column(String(50), nullable=True)
-    source_type: Mapped[str] = mapped_column(String(50), nullable=True)
-    source_ref: Mapped[str] = mapped_column(String(255), nullable=True)
-    review_status: Mapped[str] = mapped_column(String(50), nullable=True)
-    reviewed_by_human: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    error_categories_json: Mapped[list] = mapped_column(JSON, nullable=True)
-    before_snapshot_ref: Mapped[str] = mapped_column(String(255), nullable=True)
-    after_snapshot_ref: Mapped[str] = mapped_column(String(255), nullable=True)
-    linked_eval_sample_id: Mapped[str] = mapped_column(String(255), nullable=True)
-    payload_json: Mapped[dict] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    exam_id = Column(UUID(as_uuid=True), ForeignKey("exams.id", ondelete="CASCADE"), nullable=False, index=True)
+    exam_version_id = Column(UUID(as_uuid=True), ForeignKey("exam_versions.id", ondelete="SET NULL"), nullable=True)
 
-    exam = relationship("Exam", back_populates="feedback_events", foreign_keys=[exam_id])
-    exam_version = relationship(
-        "ExamVersion",
-        back_populates="feedback_events",
-        foreign_keys=[exam_version_id],
-    )
+    actor_id = Column(UUID(as_uuid=True), nullable=True)
+    signal_type = Column(String(50), nullable=False)  # regenerate_requested, edit_text, publish, etc.
+    severity = Column(String(20), default="info")  # info, warning, error
+    workflow_stage = Column(String(50), nullable=True)  # generation, verification, review, etc.
+    event_source = Column(String(50), nullable=True)  # human, agent, system
+    source_type = Column(String(50), nullable=True)  # playbook_shadow, verifier, etc.
+    source_ref = Column(String(200), nullable=True)
 
+    question_id = Column(UUID(as_uuid=True), nullable=True)
+    review_status = Column(String(50), nullable=True)  # accepted, rejected, corrected
+    reviewed_by_human = Column(Boolean, default=False)
+
+    error_categories = Column(JSON, nullable=True)  # ["wrong_answer", "bloom_mismatch", ...]
+
+    # Snapshot refs for before/after comparison
+    before_snapshot_ref = Column(String(200), nullable=True)
+    after_snapshot_ref = Column(String(200), nullable=True)
+
+    # Payload for additional data
+    payload = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    exam = relationship("Exam", back_populates="feedback_events")
+    exam_version = relationship("ExamVersion", back_populates="feedback_events")

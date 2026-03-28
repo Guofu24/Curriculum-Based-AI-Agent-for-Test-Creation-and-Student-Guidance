@@ -1,2 +1,1 @@
-﻿"""Active backend package."""
-
+"""Application package."""

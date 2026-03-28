@@ -1,2 +1,0 @@
-﻿"""Curriculum-domain services."""
-

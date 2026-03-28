@@ -1,0 +1,15 @@
+Curriculum AI Agent - Alembic Migrations
+
+This directory contains Alembic migrations for the Curriculum AI Agent project.
+
+To create a new migration:
+    alembic revision --autogenerate -m "migration name"
+
+To apply migrations:
+    alembic upgrade head
+
+To check current version:
+    alembic current
+
+To downgrade:
+    alembic downgrade -1

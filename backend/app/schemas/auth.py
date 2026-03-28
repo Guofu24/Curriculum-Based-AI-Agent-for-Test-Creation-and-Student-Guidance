@@ -1,90 +1,112 @@
-"""
-Authentication schemas.
-"""
-from typing import Optional
+"""Auth schemas for request/response validation."""
 
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, EmailStr, Field
+from uuid import UUID
 
 
 class UserCreate(BaseModel):
-    """Register a new account."""
-
+    """Schema for user registration - used by the API router."""
     email: EmailStr
-    password: str
-    full_name: str
-    role: str = "lecturer"
-    department: Optional[str] = None
-    university: Optional[str] = None
+    password: str = Field(..., min_length=8, max_length=128)
+    full_name: str | None = Field(None, max_length=255)
+    department: str | None = Field(None, max_length=255)
+    university: str | None = Field(None, max_length=255)
+    role: str = "teacher"
 
-    @field_validator("password")
-    @classmethod
-    def validate_password_strength(cls, value: str) -> str:
-        if len(value) < 8:
-            raise ValueError("Mật khẩu phải có ít nhất 8 ký tự")
-        if not any(char.isupper() for char in value):
-            raise ValueError("Mật khẩu phải có ít nhất 1 chữ hoa")
-        if not any(char.islower() for char in value):
-            raise ValueError("Mật khẩu phải có ít nhất 1 chữ thường")
-        if not any(char.isdigit() for char in value):
-            raise ValueError("Mật khẩu phải có ít nhất 1 chữ số")
-        return value
 
-    @field_validator("full_name")
-    @classmethod
-    def validate_full_name(cls, value: str) -> str:
-        if not value or not value.strip():
-            raise ValueError("Tên không được để trống")
-        return value.strip()
-
-    @field_validator("role")
-    @classmethod
-    def validate_role(cls, value: str) -> str:
-        normalized = (value or "lecturer").strip().lower()
-        allowed = {"admin", "lecturer", "teaching_assistant", "student"}
-        if normalized not in allowed:
-            raise ValueError(f"role must be one of: {', '.join(sorted(allowed))}")
-        return normalized
+class RegisterRequest(BaseModel):
+    """Schema for user registration."""
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=128)
+    full_name: str | None = Field(None, max_length=255)
+    department: str | None = Field(None, max_length=255)
+    university: str | None = Field(None, max_length=255)
 
 
 class LoginRequest(BaseModel):
+    """Schema for user login - matches frontend's expected interface."""
     email: EmailStr
     password: str
-    totp_code: Optional[str] = None
+    totp_code: str | None = None  # Optional 2FA code
 
 
 class RefreshTokenRequest(BaseModel):
-    refresh_token: str
-
-
-class LogoutRequest(BaseModel):
+    """Schema for token refresh."""
     refresh_token: str
 
 
 class TokenResponse(BaseModel):
+    """Schema for authentication response - matches frontend's TokenResponse."""
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
-    expires_in: int
+    expires_in: int  # seconds
+
+
+class AuthResponse(BaseModel):
+    """Schema for authentication response."""
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds
 
 
 class RefreshTokenResponse(BaseModel):
+    """Schema for refresh token response."""
     access_token: str
     token_type: str = "bearer"
-    expires_in: int
+    expires_in: int  # seconds
+
+
+class RefreshResponse(BaseModel):
+    """Schema for refresh token response."""
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds
 
 
 class UserResponse(BaseModel):
-    id: str
+    """Schema for user information - matches frontend's User interface."""
+    id: UUID
     email: str
-    full_name: str
-    role: str
-    department: Optional[str] = None
-    university: Optional[str] = None
+    full_name: str | None = None
+    department: str | None = None
+    university: str | None = None
+    role: str = "teacher"
     is_email_verified: bool = False
 
-    model_config = {"from_attributes": True}
+    class Config:
+        from_attributes = True
+
+
+class LogoutRequest(BaseModel):
+    """Schema for logout request."""
+    refresh_token: str
+
+
+class LogoutResponse(BaseModel):
+    """Schema for logout response."""
+    message: str = "Logged out successfully"
 
 
 class MessageResponse(BaseModel):
+    """Schema for generic message response."""
     message: str
-    detail: Optional[str] = None
+
+
+class ClarificationQuestion(BaseModel):
+    """Schema for clarification questions from Orchestrator."""
+    question_id: str
+    question: str
+    context: str | None = None
+
+
+class ClarificationResponse(BaseModel):
+    """Schema for clarification request response."""
+    clarification_questions: list[ClarificationQuestion]
+
+
+class RewriteRequirementsRequest(BaseModel):
+    """Schema for requirement rewrite confirmation."""
+    approved: bool
+    modifications: str | None = None

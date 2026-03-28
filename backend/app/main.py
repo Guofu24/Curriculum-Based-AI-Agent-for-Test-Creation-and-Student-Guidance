@@ -1,98 +1,211 @@
-﻿"""
-ExamAI Backend - FastAPI Application
+"""FastAPI main application."""
 
-Current MVP runtime:
-  upload PDF -> parse -> curriculum tree -> scoped retrieval
-  -> exam spec -> blueprint -> generate MCQ -> verify -> review/version
-
-Legacy multi-agent modules may still exist on disk for compatibility,
-but the active API path is now grounded around the narrow Physics PDF MVP.
-"""
-import logging
+import asyncio
 from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+import logging
 
-from app.core.config import settings
-from app.core.database import init_db
-from app.api.routers import (
-    auth_router,
-    courses_router,
-    documents_router,
-    exams_router,
-    generation_router,
-    playbook_router,
-)
+from app.core.config import get_settings
+from app.core.database import init_db, close_db
+from app.core.redis_client import close_redis
+from app.routers import auth, documents, exams
 
-logging.basicConfig(
-    level=logging.DEBUG if settings.DEBUG else logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+settings = get_settings()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize resources on startup, cleanup on shutdown."""
-    logger.info(f"Starting {settings.APP_NAME}...")
-    await init_db()
-    logger.info("Database tables created.")
+    """
+    Lifespan event handler for startup and shutdown.
+    Handles: DB init, Redis setup, background tasks.
+    """
+    # Startup
+    logger.info("Starting Curriculum AI Backend...")
 
-    # Pre-load embedding model + Pinecone client at startup
-    # This avoids 60+ second delay on the first upload request
-    # (sentence-transformers imports torch/tensorflow which is very slow)
+    # Initialize database
     try:
-        from app.services.retrieval.rag_service import RAGService
-        logger.info("Pre-loading RAG service (embedding model + Pinecone)...")
-        rag = RAGService.get_instance()
-        rag._get_embeddings()    # Force load embedding model now
-        rag._get_index()         # Force connect to Pinecone now
-        logger.info("RAG service pre-loaded successfully.")
+        await init_db()
+        logger.info("Database initialized")
     except Exception as e:
-        logger.warning(f"Failed to pre-load RAG service: {e}")
-        logger.warning("RAG will be loaded lazily on first request.")
+        logger.warning(f"Database initialization skipped: {e}")
+
+    # Test Redis connection
+    try:
+        from app.core.redis_client import get_redis_client
+        redis = get_redis_client()
+        await redis.client.ping()
+        logger.info("Redis connected")
+    except Exception as e:
+        logger.warning(f"Redis connection skipped: {e}")
 
     yield
-    logger.info(f"Shutting down {settings.APP_NAME}...")
+
+    # Shutdown
+    logger.info("Shutting down...")
+    await close_db()
+    await close_redis()
+    logger.info("Cleanup complete")
 
 
+# Create FastAPI app
 app = FastAPI(
-    title=settings.APP_NAME,
-    description="Grounded exam generation MVP for Physics PDFs",
-    version="1.0.0",
+    title="Curriculum AI Agent API",
+    description="Multi-agent AI system for automatic test paper generation from teaching materials",
+    version="2.0.0",
     lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
+
+# ── Middleware ────────────────────────────────────────────────────────────────
+
 # CORS
+origins = [o.strip() for o in settings.CORS_ORIGINS.split(",")]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Routers
-app.include_router(auth_router, prefix=settings.API_PREFIX)
-app.include_router(courses_router, prefix=settings.API_PREFIX)
-app.include_router(documents_router, prefix=settings.API_PREFIX)
-app.include_router(exams_router, prefix=settings.API_PREFIX)
-app.include_router(generation_router, prefix=settings.API_PREFIX)
-app.include_router(playbook_router, prefix=settings.API_PREFIX)
+# GZip compression
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
-@app.get("/")
-async def root():
+# ── Health Check ─────────────────────────────────────────────────────────────
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    """Health check endpoint."""
     return {
-        "name": settings.APP_NAME,
-        "version": "1.0.0",
-        "status": "running",
+        "status": "healthy",
+        "version": "2.0.0",
+        "service": "curriculum-ai-agent",
+    }
+
+
+@app.get("/ready", tags=["Health"])
+async def readiness_check():
+    """Readiness check endpoint."""
+    checks = {}
+
+    # Database check
+    try:
+        from sqlalchemy import text
+        from app.core.database import async_session_maker
+        async with async_session_maker() as session:
+            await session.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = f"error: {str(e)}"
+
+    # Redis check
+    try:
+        from app.core.redis_client import get_redis_client
+        redis = get_redis_client()
+        await redis.client.ping()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {str(e)}"
+
+    # Pinecone check
+    try:
+        from app.rag.vector_store import get_vector_store
+        store = get_vector_store()
+        stats = await store.describe_index_stats()
+        checks["pinecone"] = "ok" if stats else "unavailable"
+    except Exception as e:
+        checks["pinecone"] = f"error: {str(e)}"
+
+    all_ok = all(v == "ok" for v in checks.values())
+
+    return {
+        "ready": all_ok,
+        "checks": checks,
+    }
+
+
+# ── API Routers ──────────────────────────────────────────────────────────────
+
+app.include_router(auth.router)
+app.include_router(documents.router)
+app.include_router(exams.router)
+
+
+# ── WebSocket Endpoint ─────────────────────────────────────────────────────────
+
+from fastapi import WebSocket
+from app.websocket.manager import get_connection_manager
+
+
+@app.websocket("/ws/exam/{exam_id}")
+async def websocket_exam_stream(websocket: WebSocket, exam_id: str):
+    """
+    WebSocket endpoint for real-time exam generation streaming.
+    Clients connect to receive live generation progress events.
+    """
+    manager = get_connection_manager()
+    await manager.connect(websocket, exam_id)
+    try:
+        while True:
+            # Keep connection alive - events are pushed from the server
+            data = await websocket.receive_text()
+            # Clients can send ping/pong for keep-alive
+            if data == "ping":
+                await websocket.send_text("pong")
+    except Exception:
+        pass
+    finally:
+        await manager.disconnect(websocket, exam_id)
+
+
+# ── Error Handlers ──────────────────────────────────────────────────────────
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler."""
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal server error",
+            "path": str(request.url),
+        },
+    )
+
+
+# ── Root ────────────────────────────────────────────────────────────────────
+
+@app.get("/", tags=["Root"])
+async def root():
+    """Root endpoint."""
+    return {
+        "service": "Curriculum AI Agent",
+        "version": "2.0.0",
         "docs": "/docs",
     }
 
 
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
+# ── Run ─────────────────────────────────────────────────────────────────────
 
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "app.main:app",
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=settings.DEBUG,
+    )
