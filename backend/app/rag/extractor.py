@@ -2,7 +2,7 @@
 
 import re
 import base64
-from typing import Literal
+from typing import Literal, Optional
 from dataclasses import dataclass
 
 
@@ -15,21 +15,17 @@ class FormulaInfo:
     formula_type: Literal["inline", "display", "image"] = "inline"
 
 
-@dataclass
-class ImageInfo:
-    """Information about a detected image."""
-    description: str
-    alt_text: str | None = None
-
-
 class FormulaExtractionError(Exception):
     """Raised when formula extraction fails."""
     pass
 
 
-def extract_formulas(text: str, context: str = "") -> list[FormulaInfo]:
+def extract_formulas(text: str, context: str = "") -> list[dict]:
     """
-    Extract formulas from text.
+    Extract formulas from text and return as list of dicts per spec.
+
+    Returns list of {text_repr, latex_repr, location}.
+
     Handles: inline LaTeX ($...$), display LaTeX ($$...$$), ASCII formulas.
     """
     formulas = []
@@ -39,37 +35,43 @@ def extract_formulas(text: str, context: str = "") -> list[FormulaInfo]:
     for match in re.finditer(display_pattern, text, re.DOTALL):
         raw = match.group(1).strip()
         latex = _normalize_latex(raw)
-        formulas.append(FormulaInfo(
-            text_repr=raw,
-            latex_repr=latex,
-            formula_type="display",
-            source_location=context[:100] if context else None,
-        ))
+        location = f"pos:{match.start()}-{match.end()}"
+        formulas.append({
+            "text_repr": raw,
+            "latex_repr": latex,
+            "location": location,
+        })
 
     # Inline LaTeX: $...$
     inline_pattern = r"(?<!\$)\$(.+?)\$(?!\$)"
     for match in re.finditer(inline_pattern, text):
         raw = match.group(1).strip()
-        # Skip if it looks like a dollar amount
         if re.match(r"^\d+(\.\d+)?$", raw):
             continue
         latex = _normalize_latex(raw)
-        formulas.append(FormulaInfo(
-            text_repr=raw,
-            latex_repr=latex,
-            formula_type="inline",
-            source_location=context[:100] if context else None,
-        ))
+        location = f"pos:{match.start()}-{match.end()}"
+        formulas.append({
+            "text_repr": raw,
+            "latex_repr": latex,
+            "location": location,
+        })
 
     return formulas
 
 
-def extract_formulas_from_image(image_bytes: bytes, context: str = "") -> FormulaInfo | None:
+def _normalize_latex(raw: str) -> str:
+    """Normalize LaTeX formula string."""
+    latex = raw.strip()
+    latex = latex.replace("\\ ", " ")
+    latex = latex.replace("  ", " ")
+    return latex
+
+
+def extract_formulas_from_image(image_bytes: bytes, context: str = "") -> Optional[FormulaInfo]:
     """
     Extract formula from image using OCR.
     Tries Nougat first (offline/free), then MathPix API as fallback.
     """
-    # Try Nougat first (Meta's offline formula OCR)
     try:
         latex = _extract_with_nougat(image_bytes)
         if latex:
@@ -82,9 +84,15 @@ def extract_formulas_from_image(image_bytes: bytes, context: str = "") -> Formul
     except Exception:
         pass
 
-    # Fallback to MathPix API
     try:
-        latex = _extract_with_mathpix(image_bytes)
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        latex = loop.run_until_complete(_extract_with_mathpix(image_bytes))
         if latex:
             return FormulaInfo(
                 text_repr=latex,
@@ -98,28 +106,9 @@ def extract_formulas_from_image(image_bytes: bytes, context: str = "") -> Formul
     return None
 
 
-def _normalize_latex(raw: str) -> str:
-    """Normalize LaTeX formula string."""
-    # Basic normalization
-    latex = raw.strip()
-    # Remove common OCR artifacts
-    latex = latex.replace("\\ ", " ")
-    latex = latex.replace("  ", " ")
-    return latex
-
-
-async def _extract_with_nougat(image_bytes: bytes) -> str | None:
+def _extract_with_nougat(image_bytes: bytes) -> str | None:
     """Extract LaTeX from image using Nougat (Meta)."""
-    try:
-        import torch
-        from PIL import Image as PILImage
-
-        # This would use the nougat-ocr package
-        # For now, return None to trigger fallback
-        # Actual implementation would load Nougat model and run inference
-        return None
-    except ImportError:
-        return None
+    return None
 
 
 async def _extract_with_mathpix(image_bytes: bytes) -> str | None:
@@ -151,35 +140,19 @@ async def _extract_with_mathpix(image_bytes: bytes) -> str | None:
         if response.status_code == 200:
             data = response.json()
             return data.get("latex", [None])[0]
-
     except Exception:
         return None
 
     return None
 
 
-def extract_images_descriptions(images: list[dict]) -> list[ImageInfo]:
+async def extract_image_description(image_bytes: bytes, context: str = "") -> str:
     """
-    Extract text descriptions from images using GPT-4o Vision.
-    images: list of {image_bytes, page_num, position}
-    Returns: list of ImageInfo with descriptions
+    Use GPT-4o Vision to generate a text description of an image.
+    System prompt: mô tả hình ảnh sách vật lý tiếng Việt.
+
+    Returns: text description string.
     """
-    # This would be called from the extraction pipeline
-    # with GPT-4o Vision for image description
-    descriptions = []
-
-    for img_data in images:
-        desc = _describe_image_with_vision(img_data.get("image_bytes"))
-        descriptions.append(ImageInfo(
-            description=desc or "",
-            alt_text=img_data.get("alt_text"),
-        ))
-
-    return descriptions
-
-
-async def _describe_image_with_vision(image_bytes: bytes) -> str | None:
-    """Use GPT-4o Vision to describe an image."""
     from app.agents.llm import get_llm_client
 
     try:
@@ -187,36 +160,18 @@ async def _describe_image_with_vision(image_bytes: bytes) -> str | None:
 
         base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": """Bạn là assistant mô tả hình ảnh trong sách giáo khoa.
+        response = await client.chat_vision(
+            messages=[{"role": "user", "content": """Bạn là assistant mô tả hình ảnh trong sách giáo khoa vật lý tiếng Việt.
 Mô tả hình ảnh một cách chính xác, bao gồm:
 - Loại hình (đồ thị, sơ đồ, hình minh họa thực nghiệm, ...)
 - Các đại lượng vật lý có trong hình
 - Mô tả ngắn gọn nội dung cần truyền đạt
-Trả về dưới dạng text thuần, không dùng markdown."""
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{base64_image}"
-                        }
-                    }
-                ]
-            }
-        ]
-
-        response = await client.client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=300,
+Trả về dưới dạng text thuần, không dùng markdown. Nếu không thể mô tả, trả về chuỗi rỗng."""}],
+            image_base64=base64_image,
+            image_media_type="image/png",
         )
 
-        return response.choices[0].message.content
+        return response.strip()
 
     except Exception:
-        return None
+        return ""

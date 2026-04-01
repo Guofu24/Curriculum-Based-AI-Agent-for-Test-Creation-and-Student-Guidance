@@ -8,9 +8,16 @@ from app.agents.base import AgentStatus, AgentMetrics, TokenUsage, ValidatorOutp
 from app.agents.llm import get_llm_client
 from app.agents.skills.bloom_classifier import BloomClassifierSkill
 from app.agents.skills.scope_checker import ScopeCheckerSkill
+from app.agents.memory.short_term import ShortTermMemory
+from app.observability.tracer import get_tracer
 from app.core.config import get_settings
 
 settings = get_settings()
+tracer = get_tracer()
+
+
+# G9: Max retry loops before giving up
+MAX_VALIDATION_RETRIES = 3
 
 
 class ValidationIssue:
@@ -85,11 +92,14 @@ Output format:
   "approved_for_publish": false
 }"""
 
-    def __init__(self):
+    def __init__(self, redis=None):
         self.llm = get_llm_client()
         self.bloom_skill = BloomClassifierSkill()
         self.scope_skill = ScopeCheckerSkill()
+        # G9: ShortTermMemory for persisting retry issues across Celery worker restarts
+        self.short_term = ShortTermMemory(redis) if redis else None
 
+    @tracer.agent_span("validator_agent")
     async def validate(
         self,
         questions: list[dict],
@@ -97,13 +107,78 @@ Output format:
         retrieved_context: list[dict] | None = None,
         trace_id: str = "",
     ) -> ValidatorOutput:
-        """Validate all questions."""
+        """
+        Validate all questions.
+
+        G9: Issues are persisted to Redis via ShortTermMemory so they survive
+        Celery worker restarts. Max 3 retry loops enforced.
+        """
         start_time = time.time()
         trace_id = trace_id or str(time.time())
         metrics = AgentMetrics(trace_id=trace_id)
         warnings: list[str] = []
+        exam_id = trace_id.split("_retry_")[0]  # Strip retry suffix for key
+        issues: list[dict] = []  # G9: accumulate from skills + LLM
 
         try:
+            # G9: Load persisted retry issues from Redis before validation
+            prior_issues: list[dict] = []
+            if self.short_term:
+                try:
+                    prior_issues = await self.short_term.load_retry_issues(exam_id)
+                    if prior_issues:
+                        warnings.append(
+                            f"Loaded {len(prior_issues)} prior issues from Redis "
+                            f"(from previous retry attempt)"
+                        )
+                except Exception:
+                    pass
+
+            # Apply bloom_classifier skill to each question
+            for q in questions:
+                try:
+                    bloom_result = await self.bloom_skill.run(
+                        question_stem=q.get("stem", ""),
+                        question_type=q.get("type", "mcq"),
+                    )
+                    q["bloom_classified"] = bloom_result.get("bloom_level")
+                    # Track bloom mismatch as issue
+                    expected_bloom = q.get("bloom_level", "")
+                    actual_bloom = bloom_result.get("bloom_level", "")
+                    if expected_bloom and actual_bloom and expected_bloom != actual_bloom:
+                        issues.append({
+                            "question_id": q.get("question_id", ""),
+                            "issue_type": "bloom_mismatch",
+                            "detail": f"Expected bloom '{expected_bloom}', classified as '{actual_bloom}'",
+                            "suggestion": "Review bloom level classification",
+                        })
+                except Exception:
+                    pass
+
+            # Apply scope_checker skill to each question
+            for q in questions:
+                try:
+                    scope_result = await self.scope_skill.run(
+                        question_stem=q.get("stem", ""),
+                        allowed_scope=exam_config.get("scope", []),
+                    )
+                    if not scope_result.get("in_scope", True):
+                        issues.append({
+                            "question_id": q.get("question_id", ""),
+                            "issue_type": "scope_violation",
+                            "detail": scope_result.get("reason", "Out of scope"),
+                            "suggestion": scope_result.get("suggestion", "Restrict to allowed scope"),
+                        })
+                except Exception:
+                    pass
+
+            # G9: Save current issues to Redis before returning
+            if self.short_term and issues:
+                try:
+                    await self.short_term.save_retry_issues(exam_id, issues)
+                except Exception:
+                    pass
+
             # Build validation prompt
             prompt = self._build_validation_prompt(questions, exam_config, retrieved_context)
 
@@ -113,16 +188,12 @@ Output format:
                     {"role": "system", "content": self.VALIDATOR_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                model=settings.OPENAI_MODEL_VALIDATOR,
-                response_format={"type": "json_object"},
+                role="validator",
                 max_tokens=6000,
                 temperature=0.1,
             )
 
-            metrics.prompt_tokens = response["usage"]["prompt_tokens"]
-            metrics.completion_tokens = response["usage"]["completion_tokens"]
-
-            result = json.loads(response["content"])
+            result = json.loads(response)
 
             validation_passed = result.get("validation_passed", False)
             issues_data = result.get("issues", [])

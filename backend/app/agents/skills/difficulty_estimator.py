@@ -1,9 +1,18 @@
 """Difficulty estimator skill."""
 
 import json
-from pydantic import BaseModel
-from typing import Literal
+from typing import Literal, Optional
 from app.agents.llm import get_llm_client
+from app.observability.tracer import get_tracer
+
+
+# G15 Fix: default solution_steps mapped from bloom_level
+BLOOM_SOLUTION_STEPS = {
+    "nhan_biet": 1,
+    "thong_hieu": 2,
+    "van_dung": 3,
+    "van_dung_cao": 5,
+}
 
 
 class DifficultyEstimatorSkill:
@@ -39,19 +48,27 @@ Trả về JSON:
   "complexity_factors": ["list of factors"]
 }"""
 
+    @get_tracer().skill_span("difficulty_estimator")
     async def estimate(
         self,
         question_stem: str,
         bloom_level: Literal["nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"] = "thong_hieu",
-        solution_steps: int | None = None,
+        solution_steps: Optional[int] = None,
     ) -> dict:
-        """Estimate difficulty of a question."""
+        """Estimate difficulty of a question.
+
+        G15 Fix: solution_steps defaults to BLOOM_SOLUTION_STEPS
+        if not explicitly provided.
+        """
+        # G15 Fix: apply default from bloom_level when solution_steps is None
+        if solution_steps is None:
+            solution_steps = BLOOM_SOLUTION_STEPS.get(bloom_level, 2)
+
         client = get_llm_client()
 
         user_content = f"""Câu hỏi: {question_stem}
-Bloom level: {bloom_level}"""
-        if solution_steps:
-            user_content += f"\nSố bước giải: {solution_steps}"
+Bloom level: {bloom_level}
+Số bước giải: {solution_steps}"""
 
         messages = [
             {"role": "system", "content": self.DIFFICULTY_PROMPT},
@@ -59,14 +76,14 @@ Bloom level: {bloom_level}"""
         ]
 
         try:
-            response = await client.client.chat.completions.create(
-                model="gpt-4o-mini",
+            response = await client.chat(
                 messages=messages,
-                response_format={"type": "json_object"},
+                role="skills",
                 max_tokens=200,
+                temperature=0.1,
             )
 
-            result = json.loads(response.choices[0].message.content)
+            result = json.loads(response)
 
             return {
                 "difficulty_score": float(result.get("difficulty_score", 0.5)),
@@ -75,13 +92,12 @@ Bloom level: {bloom_level}"""
             }
 
         except Exception:
-            # Fallback: map bloom level to difficulty
             return self._fallback_estimate(bloom_level, solution_steps)
 
     def _fallback_estimate(
         self,
         bloom_level: str,
-        solution_steps: int | None,
+        solution_steps: Optional[int],
     ) -> dict:
         """Fallback estimation based on Bloom level."""
         bloom_to_difficulty = {
@@ -93,7 +109,7 @@ Bloom level: {bloom_level}"""
 
         score, time = bloom_to_difficulty.get(bloom_level, (0.5, 5))
 
-        if solution_steps:
+        if solution_steps is not None:
             time = min(solution_steps * 3, 30)
 
         return {
@@ -101,3 +117,12 @@ Bloom level: {bloom_level}"""
             "estimated_solve_time_minutes": time,
             "complexity_factors": [],
         }
+
+    async def run(
+        self,
+        question_stem: str,
+        bloom_level: Literal["nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"] = "thong_hieu",
+        solution_steps: Optional[int] = None,
+    ) -> dict:
+        """Alias for estimate() to match skill interface."""
+        return await self.estimate(question_stem, bloom_level, solution_steps)

@@ -48,6 +48,9 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down...")
+    # Close all WebSocket listeners before shutting down Redis
+    manager = get_connection_manager()
+    await manager.shutdown()
     await close_db()
     await close_redis()
     logger.info("Cleanup complete")
@@ -85,7 +88,11 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 @app.get("/health", tags=["Health"])
 async def health_check():
-    """Health check endpoint."""
+    """
+    Liveness probe — basic health check.
+    Returns status 'healthy' when the service is running.
+    For full service readiness (postgres + redis + pinecone), use /ready instead.
+    """
     return {
         "status": "healthy",
         "version": "2.0.0",
@@ -93,7 +100,20 @@ async def health_check():
     }
 
 
-@app.get("/ready", tags=["Health"])
+@app.get(
+    "/ready",
+    tags=["Health"],
+    summary="Readiness check — verify all dependencies",
+    description="Deep health check that verifies connectivity to all external services: "
+                 "PostgreSQL (database), Redis (caching/pubsub), and Pinecone (vector store). "
+                 "Use this as a Kubernetes readiness probe. "
+                 "Returns `ready: true` only when ALL services respond 'ok'. "
+                 "Individual service status is returned in the `checks` object.",
+    responses={
+        200: {"description": "Service readiness status with per-service checks"},
+        503: {"description": "Service unavailable — one or more dependencies down"},
+    },
+)
 async def readiness_check():
     """Readiness check endpoint."""
     checks = {}
@@ -152,16 +172,21 @@ async def websocket_exam_stream(websocket: WebSocket, exam_id: str):
     """
     WebSocket endpoint for real-time exam generation streaming.
     Clients connect to receive live generation progress events.
+
+    Flow:
+    1. connect() → accept + replay stored events from Redis (G19)
+    2. listen_redis() → subscribe to Redis channel exam:{exam_id} and forward
+       all events to the client
+    3. On disconnect → ConnectionManager.disconnect() cleans up the connection
     """
     manager = get_connection_manager()
     await manager.connect(websocket, exam_id)
+
     try:
-        while True:
-            # Keep connection alive - events are pushed from the server
-            data = await websocket.receive_text()
-            # Clients can send ping/pong for keep-alive
-            if data == "ping":
-                await websocket.send_text("pong")
+        # G19: Subscribe to Redis channel exam:{exam_id} and forward events
+        await manager.listen_redis(exam_id)
+    except WebSocketDisconnect:
+        pass
     except Exception:
         pass
     finally:
@@ -191,7 +216,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.get("/", tags=["Root"])
 async def root():
-    """Root endpoint."""
+    """Root endpoint — returns service info and links to documentation."""
     return {
         "service": "Curriculum AI Agent",
         "version": "2.0.0",

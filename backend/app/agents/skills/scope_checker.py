@@ -1,9 +1,9 @@
 """Scope checker skill - verifies questions are within the selected scope."""
 
 import json
-from pydantic import BaseModel
 from typing import Literal
 from app.agents.llm import get_llm_client
+from app.observability.tracer import get_tracer
 
 
 class ScopeCheckerSkill:
@@ -29,6 +29,7 @@ Trả về JSON:
   "reasoning": "Giải thích ngắn"
 }"""
 
+    @get_tracer().skill_span("scope_checker")
     async def check(
         self,
         question_stem: str,
@@ -47,10 +48,9 @@ Trả về JSON:
 
         client = get_llm_client()
 
-        # Build content summary
         content_summary = "\n\n".join([
             f"[Chunk {chunk.get('chunk_id', 'unknown')}]: {chunk.get('content', '')[:300]}"
-            for chunk in allowed_content[:10]  # Limit to 10 chunks
+            for chunk in allowed_content[:10]
         ])
 
         scope_str = ", ".join(scope_chapters)
@@ -69,14 +69,14 @@ Kiến thức có sẵn (các chunk):
         ]
 
         try:
-            response = await client.client.chat.completions.create(
-                model="gpt-4o-mini",
+            response = await client.chat(
                 messages=messages,
-                response_format={"type": "json_object"},
+                role="skills",
                 max_tokens=300,
+                temperature=0.1,
             )
 
-            result = json.loads(response.choices[0].message.content)
+            result = json.loads(response)
 
             return {
                 "in_scope": result.get("in_scope", True),
@@ -87,7 +87,6 @@ Kiến thức có sẵn (các chunk):
             }
 
         except Exception as e:
-            # Fallback: basic containment check
             return self._fallback_check(question_stem, allowed_content)
 
     def _fallback_check(self, question_stem: str, allowed_content: list[dict]) -> dict:
@@ -97,7 +96,6 @@ Kiến thức có sẵn (các chunk):
         matching_chunks = []
         for chunk in allowed_content:
             content_lower = chunk.get("content", "").lower()
-            # Simple overlap check
             words = set(stem_lower.split()) & set(content_lower.split())
             if len(words) >= 3:
                 matching_chunks.append(chunk.get("chunk_id", "unknown"))
@@ -118,3 +116,12 @@ Kiến thức có sẵn (các chunk):
             "confidence": 0.3,
             "reasoning": "No matching content found (fallback)",
         }
+
+    async def run(
+        self,
+        question_stem: str,
+        allowed_content: list[dict],
+        scope_chapters: list[str],
+    ) -> dict:
+        """Alias for check() to match skill interface."""
+        return await self.check(question_stem, allowed_content, scope_chapters)

@@ -2,14 +2,140 @@
 
 import asyncio
 import uuid
+from typing import Any
 
 from celery import Task
 
-from app.tasks.celery_app import celery_app
+from app.core.config import get_settings
 from app.core.database import async_session_maker
-from app.core.redis_client import get_redis_client, RedisClient
+from app.core.redis_client import get_redis_client
 from app.services.exam_service import ExamService
+from app.tasks.celery_app import celery_app
 from app.websocket.manager import get_connection_manager, SSEvent
+
+settings = get_settings()
+
+
+def _build_demo_payload(
+    exam_id: str | None,
+    scope: list | None,
+    exam_config: dict | None,
+    user_prompt: str | None,
+) -> dict[str, Any]:
+    """Build deterministic demo questions so the UI can be shown without full AI deps."""
+    exam_config = exam_config or {}
+    scope = list(scope or exam_config.get("scope") or ["Chuong 1"])
+    prompt = user_prompt or exam_config.get("user_prompt") or "De kiem tra demo"
+    mcq_count = min(int(exam_config.get("mcq_count", 6) or 6), 12)
+    essay_count = min(int(exam_config.get("essay_count", 1) or 1), 3)
+    bloom_distribution = exam_config.get("bloom_distribution") or {
+        "nhan_biet": 20,
+        "thong_hieu": 30,
+        "van_dung": 30,
+        "van_dung_cao": 20,
+    }
+    bloom_levels = [k for k, v in bloom_distribution.items() if v > 0] or ["nhan_biet"]
+    stem_seed = prompt[:80]
+
+    questions: list[dict[str, Any]] = []
+    for index in range(mcq_count):
+        bloom = bloom_levels[index % len(bloom_levels)]
+        chapter = scope[index % len(scope)]
+        qid = f"MCQ_{index + 1:03d}"
+        questions.append(
+            {
+                "id": qid,
+                "question_id": qid,
+                "type": "mcq",
+                "question_type": "mcq",
+                "stem": f"[DEMO] {chapter}: Cau hoi {index + 1} cho yeu cau '{stem_seed}'",
+                "content": f"[DEMO] {chapter}: Cau hoi {index + 1} cho yeu cau '{stem_seed}'",
+                "options": {
+                    "A": "Lua chon A",
+                    "B": "Lua chon B",
+                    "C": "Lua chon C",
+                    "D": "Lua chon D",
+                },
+                "correct_answer": ["A", "B", "C", "D"][index % 4],
+                "bloom_level": bloom,
+                "difficulty_level": "medium",
+                "quality_score": 0.92,
+                "warnings": [],
+                "source_evidence": [],
+                "source_citations": [f"Demo source: {chapter}"],
+                "verification_status": "passed",
+                "is_validated": True,
+            }
+        )
+
+    for index in range(essay_count):
+        bloom = bloom_levels[(mcq_count + index) % len(bloom_levels)]
+        chapter = scope[index % len(scope)]
+        qid = f"ESSAY_{index + 1:03d}"
+        questions.append(
+            {
+                "id": qid,
+                "question_id": qid,
+                "type": "essay",
+                "question_type": "essay",
+                "stem": f"[DEMO] {chapter}: Tu luan {index + 1} cho yeu cau '{stem_seed}'",
+                "content": f"[DEMO] {chapter}: Tu luan {index + 1} cho yeu cau '{stem_seed}'",
+                "rubric": [
+                    {"score": 0.5, "description": "Neu dung y chinh"},
+                    {"score": 0.5, "description": "Lap luan ro rang"},
+                ],
+                "correct_answer": "Tra loi theo dap an mau",
+                "bloom_level": bloom,
+                "difficulty_level": "medium",
+                "quality_score": 0.9,
+                "warnings": [],
+                "source_evidence": [],
+                "source_citations": [f"Demo source: {chapter}"],
+                "verification_status": "passed",
+                "is_validated": True,
+            }
+        )
+
+    by_chapter = {
+        chapter: sum(1 for q in questions if chapter in (q.get("source_citations") or [""])[0])
+        for chapter in scope
+    }
+    blueprint = {
+        "distribution": bloom_distribution,
+        "chapters": [
+            {
+                "name": chapter,
+                "nhan_biet": sum(1 for q in questions if q.get("bloom_level") == "nhan_biet" and chapter in (q.get("source_citations") or [""])[0]),
+                "thong_hieu": sum(1 for q in questions if q.get("bloom_level") == "thong_hieu" and chapter in (q.get("source_citations") or [""])[0]),
+                "van_dung": sum(1 for q in questions if q.get("bloom_level") == "van_dung" and chapter in (q.get("source_citations") or [""])[0]),
+                "van_dung_cao": sum(1 for q in questions if q.get("bloom_level") == "van_dung_cao" and chapter in (q.get("source_citations") or [""])[0]),
+            }
+            for chapter in scope
+        ],
+        "summary": {"by_chapter": by_chapter},
+    }
+
+    return {
+        "exam_id": exam_id,
+        "questions": questions,
+        "blueprint": blueprint,
+        "distribution_summary": {
+            "by_bloom": {
+                level: sum(1 for q in questions if q.get("bloom_level") == level)
+                for level in bloom_levels
+            },
+            "by_chapter": by_chapter,
+        },
+        "cost_report": {
+            "mode": "demo",
+            "breakdown": {"demo_generator": {"total_tokens": 0, "estimated_cost_usd": 0.0}},
+            "total_tokens": 0,
+            "total_cost_usd": 0.0,
+            "blueprint": blueprint,
+        },
+        "status": "success",
+        "warnings": ["Demo mode: generated local sample questions."],
+    }
 
 
 def _run_async_task(
@@ -34,31 +160,89 @@ def _run_async_task(
             redis_client = get_redis_client()
             manager = get_connection_manager()
 
+            from app.observability.tracer import get_tracer
+            tracer = get_tracer()
+
+            trace_meta = {
+                "user_id": user_id,
+                "document_id": document_id,
+                "scope": scope,
+                "bloom_distribution": (exam_config or {}).get("bloom_distribution"),
+                "demo_mode": settings.DEMO_MODE or not document_id,
+            }
+
+            # Setup stream callback for WebSocket + Redis pub/sub
             async def stream_callback(event: dict):
-                channel = f"exam:{exam_id}" if exam_id else f"trace:{trace_id}"
+                channel = exam_id if exam_id else f"trace:{trace_id}"
                 await manager.emit(channel, event)
 
-            # Import here to avoid circular imports
-            from app.agents.orchestrator import OrchestratorAgent
-
-            orchestrator = OrchestratorAgent(redis=redis_client, db_session=db)
-            orchestrator.set_stream_callback(stream_callback)
-
-            try:
+            with tracer.trace(exam_id=exam_id or trace_id, metadata=trace_meta):
                 await manager.emit(
-                    f"exam:{exam_id}",
-                    SSEvent.plan_step("Bat dau sinh de...", 0, 5)
+                    exam_id or trace_id,
+                    SSEvent.plan_step("Bat dau sinh de...", 0, 5),
                 )
 
-                result = await orchestrator.generate_exam(
-                    user_id=user_id,
-                    document_id=document_id,
-                    scope=scope or [],
-                    exam_config=exam_config or {},
-                    user_prompt=user_prompt,
-                    extra_instructions=extra_instructions,
-                    trace_id=trace_id,
-                )
+                use_demo_mode = settings.DEMO_MODE or not document_id
+                if use_demo_mode:
+                    await manager.emit(
+                        exam_id or trace_id,
+                        SSEvent.plan_step("Dang tao de demo local...", 1, 5),
+                    )
+                    result = _build_demo_payload(exam_id, scope, exam_config, user_prompt)
+                    for question in result["questions"]:
+                        await manager.emit(
+                            exam_id or trace_id,
+                            SSEvent.question_generated(
+                                question_id=question.get("question_id", ""),
+                                question=question,
+                            ),
+                        )
+                    await manager.emit(
+                        exam_id or trace_id,
+                        SSEvent.validation_result(
+                            passed=True,
+                            issues_count=0,
+                            issues=[],
+                        ),
+                    )
+                    await manager.emit(
+                        exam_id or trace_id,
+                        SSEvent.hitl_checkpoint(
+                            checkpoint_id=2,
+                            data={
+                                "exam_id": exam_id,
+                                "questions": result["questions"],
+                                "validation_passed": True,
+                                "issues": [],
+                                "warnings": result["warnings"],
+                            },
+                        ),
+                    )
+                    await manager.emit(
+                        exam_id or trace_id,
+                        SSEvent.hitl_checkpoint(
+                            checkpoint_id=3,
+                            data={
+                                "exam_id": exam_id,
+                                "questions": result["questions"],
+                                "cost_report": result["cost_report"],
+                            },
+                        ),
+                    )
+                else:
+                    # Import here to avoid circular imports and to skip heavy stack in demo mode
+                    from app.agents.orchestrator import OrchestratorAgent
+
+                    orchestrator = OrchestratorAgent(redis=redis_client, db_session=db)
+                    orchestrator.set_stream_callback(stream_callback)
+                    result = await orchestrator.generate_exam(
+                        exam_id=exam_id,
+                        user_id=user_id,
+                        exam_config=exam_config or {},
+                        user_prompt=user_prompt,
+                        extra_instructions=extra_instructions,
+                        document_id=document_id,
+                    )
 
                 if exam_id:
                     exam_service = ExamService(db, redis_client)
@@ -76,16 +260,19 @@ def _run_async_task(
 
                     if is_success:
                         await manager.emit(
-                            f"exam:{exam_id}",
-                            SSEvent.completed(exam_id)
+                            exam_id,
+                            SSEvent.completed(
+                                exam_id,
+                                total_cost_usd=result.get("cost_report", {}).get("total_cost_usd"),
+                            )
                         )
                     else:
                         await manager.emit(
-                            f"exam:{exam_id}",
+                            exam_id,
                             SSEvent.error(
                                 "Exam generation completed with warnings",
                                 "orchestrator"
-                            )
+                            ),
                         )
 
                 return {
@@ -94,31 +281,33 @@ def _run_async_task(
                     "trace_id": trace_id,
                 }
 
-            except Exception as e:
-                if exam_id:
-                    await manager.emit(
-                        f"exam:{exam_id}",
-                        SSEvent.error(str(e), "orchestrator")
-                    )
-                raise
-
-    # Use run_until_complete to avoid nested event loop in ThreadPoolExecutor
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        # No running loop - create one (standard Celery worker case)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        return loop.run_until_complete(_run())
+    except Exception as e:
+        if exam_id:
+            try:
+                # Best-effort fallback event so the frontend is not left hanging.
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                manager = get_connection_manager()
+                loop.run_until_complete(
+                    manager.emit(
+                        exam_id,
+                        SSEvent.error(str(e), "orchestrator"),
+                    )
+                )
+            finally:
+                loop.close()
+                asyncio.set_event_loop(None)
+        raise
+    finally:
         try:
-            return loop.run_until_complete(_run())
-        finally:
             loop.close()
-    else:
-        # Already in an event loop - create a new task and run it
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(loop.run_until_complete, _run())
-            return future.result()
+        except Exception:
+            pass
+        asyncio.set_event_loop(None)
 
 
 @celery_app.task(
@@ -161,31 +350,3 @@ def generate_exam_task(
     )
 
 
-@celery_app.task(bind=True, max_retries=2, ignore_result=True)
-def regenerate_questions_task(
-    self: Task,
-    exam_id: str,
-    user_id: str,
-    question_ids: list[str] | None = None,
-) -> dict:
-    """Regenerate specific questions or all questions."""
-    trace_id = str(uuid.uuid4())
-
-    async def _run():
-        async with async_session_maker() as db:
-            return {"exam_id": exam_id, "status": "pending", "trace_id": trace_id}
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            return loop.run_until_complete(_run())
-        finally:
-            loop.close()
-    else:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(loop.run_until_complete, _run())
-            return future.result()

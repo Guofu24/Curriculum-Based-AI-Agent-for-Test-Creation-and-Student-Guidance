@@ -15,6 +15,7 @@ from app.agents.planner import PlannerAgent
 from app.agents.memory import ShortTermMemory, LongTermMemory
 from app.agents.skills.bloom_classifier import BloomClassifierSkill
 from app.agents.skills.scope_checker import ScopeCheckerSkill
+from app.observability.tracer import get_tracer
 from app.core.redis_client import RedisClient
 from app.core.config import get_settings
 
@@ -69,7 +70,7 @@ Trả về JSON:
         self.retrieval = RetrievalAgent(redis)
         self.outline = OutlineAgent()
         self.builder = BuilderAgent(redis)
-        self.validator = ValidatorAgent()
+        self.validator = ValidatorAgent(redis)
         self.planner = PlannerAgent()
         self._stream_callback: StreamingCallback | None = None
         self._pending_blueprint: list[dict] = []
@@ -83,6 +84,27 @@ Trả về JSON:
         """Emit a streaming event."""
         if self._stream_callback:
             await self._stream_callback(event)
+
+    # ── G6: _is_complex_request ─────────────────────────────────────────────────
+
+    def _is_complex_request(self, user_prompt: str, exam_config: dict) -> bool:
+        """
+        Determine if request is complex enough to need Planner Agent.
+        G6: Returns True when sum(signals) >= 2.
+
+        Signals:
+        1. Prompt length > 200 characters
+        2. Contains special keywords (tập trung, thực tế, ưu tiên, hạn chế, tránh)
+        3. Has extra_instructions (non-empty)
+        4. Has bloom_distribution AND prompt > 100 chars
+        """
+        signals = [
+            len(user_prompt) > 200,
+            any(kw in user_prompt for kw in ["tập trung", "thực tế", "ưu tiên", "hạn chế", "tránh"]),
+            exam_config.get("extra_instructions") not in (None, ""),
+            exam_config.get("bloom_distribution") is not None and len(user_prompt) > 100,
+        ]
+        return sum(signals) >= 2
 
     async def _check_clarity(self, user_prompt: str, exam_config: dict) -> dict | None:
         """Check if requirements are clear, return clarification questions if not."""
@@ -102,12 +124,11 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             client = get_llm_client()
             response = await client.chat(
                 messages=messages,
-                model=settings.OPENAI_MODEL_PLANNER,
-                response_format={"type": "json_object"},
+                role="planner",
                 max_tokens=1000,
                 temperature=0.3,
             )
-            result = json.loads(response["content"])
+            result = json.loads(response)
             if not result.get("requirements_clear", True):
                 questions = result.get("clarification_questions", [])
                 if questions:
@@ -118,20 +139,19 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
 
     async def generate_exam(
         self,
+        exam_id: str,
         user_id: str,
-        document_id: str,
-        scope: list[str],
         exam_config: dict,
         user_prompt: str | None = None,
         extra_instructions: str | None = None,
-        trace_id: str = "",
+        document_id: str | None = None,
     ) -> dict:
         """
         Main entry point: orchestrate the full exam generation pipeline.
 
         Returns:
             {
-                "exam_id": UUID,
+                "exam_id": str,
                 "questions": [...],
                 "blueprint": {...},
                 "cost_report": {...},
@@ -139,12 +159,15 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "warnings": [...],
             }
         """
-        trace_id = trace_id or str(uuid.uuid4())
         start_time = time.time()
+        trace_id = exam_id
         warnings: list[str] = []
         cost_report: dict[str, Any] = {}
 
-        # Merge exam config
+        # Merge exam config — scope and document_id come from exam_config dict
+        scope = exam_config.get("scope", [])
+        doc_id = document_id or exam_config.get("document_id", "")
+
         full_config = {
             "scope": scope,
             "user_prompt": user_prompt or "",
@@ -159,6 +182,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "type": "clarification_needed",
                 "data": clarification,
             })
+            # Return early - frontend should handle clarification flow
             return {
                 "exam_id": trace_id,
                 "questions": [],
@@ -173,10 +197,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         await self.short_term.save_session(
             exam_id=trace_id,
             user_id=user_id,
-            exam_config_original=full_config,
+            exam_config=full_config,
             topics_used=[],
-            conversation_history=[],
-            retry_count=0,
         )
 
         # Step 2: Load long-term memory (teacher preferences)
@@ -190,8 +212,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             except Exception:
                 pass
 
-        # Step 3: Determine if complex (needs Planner) or simple
-        is_complex = self.planner.is_complex_request(
+        # Step 3: Determine if complex (needs Planner) or simple — G6
+        is_complex = self._is_complex_request(
             full_config.get("user_prompt", ""), full_config
         )
 
@@ -233,7 +255,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
 
         bloom_targets = list(full_config.get("bloom_distribution", {}).keys())
         retrieval_result = await self.retrieval.retrieve(
-            document_id=document_id,
+            document_id=doc_id,
             scope_chapters=scope,
             bloom_targets=bloom_targets,
             trace_id=trace_id,
@@ -244,12 +266,23 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         elif retrieval_result.status == AgentStatus.FAILED:
             warnings.append("Retrieval failed - proceeding with empty context")
 
+        # Extract retrieved chunks from the result
         retrieved_chunks = []
         if hasattr(retrieval_result, 'retrieved_chunks'):
             retrieved_chunks = retrieval_result.retrieved_chunks
 
         cost_report["retrieval"] = retrieval_result.token_usage.model_dump()
 
+        # Store retrieved_context + metadata in session for reject_blueprint (G8)
+        await self.short_term.save_session(
+            exam_id=trace_id,
+            user_id=user_id,
+            retrieved_context=retrieved_chunks,
+            scope=scope,
+            document_id=doc_id,
+        )
+
+        # Build allowed_concepts from retrieved chunks for ScopeGuard
         allowed_concepts = []
         for chunk in retrieved_chunks:
             content = chunk.get("content", "")[:200]
@@ -270,6 +303,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             trace_id=trace_id,
         )
 
+        # Extract blueprint from the result
         blueprint = []
         if hasattr(outline_result, 'blueprint'):
             blueprint = outline_result.blueprint
@@ -282,10 +316,11 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         if outline_result.status != AgentStatus.SUCCESS:
             warnings.append("Outline creation had issues")
 
+        # Store for HITL checkpoint
         self._pending_blueprint = blueprint
         self._pending_distribution = distribution_summary
 
-        # ─── HITL Checkpoint 1: Blueprint Review ───
+        # ─── HITL Checkpoint 1: Blueprint Review — PAUSE, wait for approval ───
         await self._emit({
             "type": "hitl_checkpoint",
             "checkpoint_id": 1,
@@ -295,7 +330,6 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             },
         })
 
-        blueprint_approved = True
         if not blueprint:
             warnings.append("Blueprint is empty - stopping generation")
             return {
@@ -305,6 +339,25 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "cost_report": cost_report,
                 "status": AgentStatus.FAILED,
                 "warnings": warnings,
+            }
+
+        # Poll Redis for HITL approval (frontend sets this via approve_blueprint)
+        approved = await self._wait_for_blueprint_approval(trace_id, timeout_seconds=1800)
+        if not approved:
+            await self._emit({
+                "type": "pipeline_paused",
+                "checkpoint_id": 1,
+                "message": "Chờ phê duyệt blueprint...",
+            })
+            return {
+                "exam_id": trace_id,
+                "questions": [],
+                "blueprint": blueprint,
+                "distribution_summary": distribution_summary,
+                "cost_report": cost_report,
+                "status": AgentStatus.RETRY_NEEDED,
+                "warnings": warnings + ["Blueprint chưa được phê duyệt - đang chờ"],
+                "checkpoint": 1,
             }
 
         # Step 6: Build questions
@@ -327,6 +380,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             trace_id=trace_id,
         )
 
+        # Extract questions from the result
         questions = []
         if hasattr(builder_result, 'questions'):
             questions = builder_result.questions
@@ -338,11 +392,13 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         if builder_result.status != AgentStatus.SUCCESS:
             warnings.append("Builder had issues generating questions")
 
+        # Update short-term memory with topics
         if questions:
             new_topics = [q.get("topic_hint", "") for q in questions if q.get("topic_hint")]
             topics_used = list(set(topics_used + new_topics))
             await self.short_term.update_topics(trace_id, user_id, topics_used)
 
+        # Emit individual question events for streaming
         for q in questions:
             await self._emit({
                 "type": "question_generated",
@@ -367,6 +423,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
 
         cost_report["validator"] = validation_result.token_usage.model_dump()
 
+        # Extract issues from validation result
         issues = []
         if hasattr(validation_result, 'issues'):
             issues = validation_result.issues
@@ -379,8 +436,12 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         while (
             validation_result.status in [AgentStatus.RETRY_NEEDED, AgentStatus.PARTIAL]
             and retry_count < max_retries
-            and issues
         ):
+            # G9: Load issues from Redis (survives Celery worker restarts)
+            issues = await self.short_term.load_retry_issues(trace_id)
+            if not issues:
+                break  # No issues to retry on
+
             retry_count += 1
             await self.short_term.increment_retry(trace_id, user_id)
             warnings.append(f"Validation issues found - retry {retry_count}/{max_retries}")
@@ -392,9 +453,11 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "total_steps": 5,
             })
 
+            # Filter blueprint to exclude already-good slots
             bad_question_ids = {issue["question_id"] for issue in issues}
             filtered_blueprint = [s for s in blueprint if s.get("question_id") not in bad_question_ids]
 
+            # Regenerate only the bad slots
             builder_result = await self.builder.build(
                 blueprint=filtered_blueprint,
                 retrieved_context=retrieved_chunks,
@@ -410,6 +473,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             elif hasattr(builder_result, 'generated_questions'):
                 retry_questions = builder_result.generated_questions
 
+            # Replace bad questions with new ones
             new_q_dict = {q.get("question_id"): q for q in retry_questions}
             updated_questions = []
             for q in questions:
@@ -435,6 +499,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         if validation_result.status != AgentStatus.SUCCESS:
             warnings.append("Validation did not pass after max retries")
 
+        # Emit validation result
         await self._emit({
             "type": "validation_result",
             "passed": validation_result.status == AgentStatus.SUCCESS,
@@ -454,6 +519,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             },
         })
 
+        # Calculate total cost
         total_tokens = sum(
             (cost_report.get(k, {}).get("total_tokens", 0) or 0)
             for k in ["retrieval", "outline", "builder", "validator"]
@@ -502,6 +568,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         user_prompt = exam_config.get("user_prompt", "")
         extra = exam_config.get("extra_instructions", "")
 
+        # Build structured summary
         total = sum(bloom_dist.values()) if bloom_dist else 100
         summary_parts = []
         if bloom_dist:
@@ -511,6 +578,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         else:
             summary_parts.append("- Bloom distribution: default (20/30/30/20)")
 
+        # Suggest bloom distribution from teacher prefs if available
         suggested_bloom = ""
         if teacher_prefs.get("preferred_bloom_distribution"):
             suggested_bloom = f" (gợi ý từ sở thích giảng viên: {teacher_prefs['preferred_bloom_distribution']})"
@@ -526,40 +594,133 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             "suggested_exam_type": exam_config.get("exam_type", "mixed"),
         }
 
+    async def _wait_for_blueprint_approval(
+        self,
+        exam_id: str,
+        timeout_seconds: int = 1800,
+    ) -> bool:
+        """
+        Poll Redis for HITL blueprint approval.
+        Returns True if approved, False if rejected/timeout.
+        """
+        import asyncio
+        key = f"hitl:approved:{exam_id}:1"
+        elapsed = 0
+        interval = 2.0  # poll every 2 seconds
+
+        while elapsed < timeout_seconds:
+            val = await self.redis.get(key)
+            if val == "true":
+                return True
+            if val == "rejected":
+                return False
+            await asyncio.sleep(interval)
+            elapsed += interval
+
+        return False  # timeout
+
+    async def reject_blueprint(
+        self,
+        exam_id: str,
+        user_id: str,
+        feedback: str,
+    ) -> dict:
+        """
+        G8: Re-generate outline with HITL feedback.
+        Saves rejection history into Redis session.
+        Dispatches a new Celery task to re-run the pipeline from the beginning.
+        Frontend receives updated blueprint immediately via WebSocket.
+        """
+        session = await self.short_term.load_session(exam_id, user_id)
+        if not session:
+            return {
+                "status": "failed",
+                "error": "Session not found. Cannot reject blueprint.",
+            }
+
+        original_config = session.get("exam_config_original", {})
+        if not original_config:
+            original_config = session.get("exam_config", {})
+
+        # Store feedback as additional instruction
+        original_config["outline_feedback"] = feedback
+
+        # Save rejection history in Redis
+        history_key = f"hitl:rejection_history:{exam_id}"
+        try:
+            import json
+            existing = await self.redis.get(history_key)
+            history = json.loads(existing) if existing else []
+            history.append({"feedback": feedback, "timestamp": time.time()})
+            await self.redis.set(history_key, json.dumps(history), ttl=3600)
+        except Exception:
+            pass
+
+        # Emit updated HITL checkpoint 1 with new blueprint immediately
+        # (Celery task will re-run and emit via WebSocket again)
+        # For immediate response: re-run outline now and emit result
+        try:
+            outline_result = await self.outline.create_outline(
+                retrieved_context=session.get("retrieved_context", []),
+                exam_config=original_config,
+                trace_id=f"{exam_id}_outline_reject",
+            )
+
+            blueprint = []
+            distribution_summary = {}
+            if hasattr(outline_result, 'blueprint'):
+                blueprint = outline_result.blueprint
+            if hasattr(outline_result, 'distribution_summary'):
+                distribution_summary = outline_result.distribution_summary
+        except Exception:
+            blueprint = []
+            distribution_summary = {}
+
+        # Emit new HITL checkpoint 1 with updated blueprint
+        await self._emit({
+            "type": "hitl_checkpoint",
+            "checkpoint_id": 1,
+            "data": {
+                "blueprint": blueprint,
+                "distribution_summary": distribution_summary,
+                "rejection_history": feedback,
+            },
+        })
+
+        # Dispatch Celery task to re-run full pipeline from scratch
+        try:
+            from app.tasks.exam_task import generate_exam_task
+            generate_exam_task.delay(
+                exam_id=exam_id,
+                user_id=user_id,
+                document_id=session.get("document_id"),
+                scope=session.get("scope", []),
+                exam_config={**original_config},
+                user_prompt=original_config.get("user_prompt", ""),
+                extra_instructions=original_config.get("extra_instructions", ""),
+            )
+        except Exception:
+            pass  # Non-blocking
+
+        return {
+            "status": "rejected_with_feedback",
+            "blueprint": blueprint,
+            "distribution_summary": distribution_summary,
+            "message": "Blueprint đã được điều chỉnh theo phản hồi của bạn. Đề đang được sinh lại.",
+        }
+
     async def approve_blueprint(
         self,
         exam_id: str,
         user_id: str,
-        approved: bool,
-        feedback: str | None = None,
-    ) -> dict:
-        """Handle blueprint approval/rejection from HITL checkpoint 1."""
-        if not approved and feedback:
-            session = await self.short_term.load_session(exam_id, user_id)
-            if session:
-                original_config = session.get("exam_config_original", {})
-                original_config["outline_feedback"] = feedback
-
-                outline_result = await self.outline.create_outline(
-                    retrieved_context=[],
-                    exam_config=original_config,
-                    trace_id=f"{exam_id}_outline_regen",
-                )
-
-                blueprint = []
-                if hasattr(outline_result, 'blueprint'):
-                    blueprint = outline_result.blueprint
-
-                return {
-                    "status": "rejected_with_feedback",
-                    "blueprint": blueprint,
-                    "message": "Blueprint đã được điều chỉnh theo phản hồi của bạn",
-                }
-
-        return {
-            "status": "approved",
-            "message": "Blueprint đã được phê duyệt. Bắt đầu sinh câu hỏi.",
-        }
+    ) -> None:
+        """
+        Unblock pipeline at HITL checkpoint 1.
+        Saves Redis key: hitl:approved:{exam_id}:1
+        Called by frontend after teacher reviews the blueprint.
+        """
+        key = f"hitl:approved:{exam_id}:1"
+        await self.redis.set(key, "true", ttl=3600)
 
     async def submit_review(
         self,
@@ -587,48 +748,90 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             }
 
         if approved:
+            # G14: Persist teacher preferences to long-term memory after approval
+            if self.long_term:
+                try:
+                    exam_config = session.get("exam_config_original", {})
+                    await self.long_term.save_preferences(
+                        user_id=UUID(user_id),
+                        preferred_bloom_distribution=exam_config.get("bloom_distribution"),
+                        preferred_exam_types={"types": [exam_config.get("exam_type", "mixed")]},
+                        subject_focus=",".join(exam_config.get("scope", [])),
+                    )
+                except Exception:
+                    pass  # Non-blocking — preferences save failure shouldn't block approval
+
+            # Snapshot exam_history with change_type='published'
+            history_key = f"exam_history:{exam_id}"
+            try:
+                import json as _json
+                history_entry = {
+                    "change_type": "published",
+                    "timestamp": time.time(),
+                    "user_id": user_id,
+                    "exam_config": session.get("exam_config_original", {}),
+                    "topics_used": session.get("topics_used", []),
+                    "questions_count": len(session.get("questions", [])) if session.get("questions") else 0,
+                }
+                existing_hist = await self.redis.get(history_key)
+                hist_list = _json.loads(existing_hist) if existing_hist else []
+                hist_list.append(history_entry)
+                await self.redis.set(history_key, _json.dumps(hist_list), ttl=86400)
+            except Exception:
+                pass
+
             await self.short_term.save_session(exam_id, user_id, {
-                **session,
+                "exam_config_original": session.get("exam_config_original", {}),
+                "topics_used": session.get("topics_used", []),
+                "conversation_history": session.get("conversation_history", []),
+                "retry_count": session.get("retry_count", 0),
                 "review_approved": True,
                 "review_feedback": feedback,
             })
+
+            # HITL Checkpoint 2: Set Redis key so orchestrator's poll loop unblocks
+            await self.redis.set(f"hitl:approved:{exam_id}:2", "true", ttl=3600)
+
             return {
                 "status": "approved",
                 "message": "Đề đã được phê duyệt và sẵn sàng xuất.",
                 "exam_id": exam_id,
             }
         else:
+            # G8 (checkpoint 2 reject): Queue Celery task for regeneration
             original_config = session.get("exam_config_original", {})
             if feedback:
                 original_config["review_feedback"] = feedback
             if direct_edits:
                 original_config["direct_edits"] = direct_edits
 
+            # Store the review feedback for the regeneration task
             await self.short_term.save_session(exam_id, user_id, {
                 **session,
                 "review_feedback": feedback,
                 "direct_edits": direct_edits,
             })
 
+            # Dispatch Celery task — do NOT call generate_exam directly (would block HTTP)
             try:
-                result = await self.generate_exam(
+                from app.tasks.exam_task import generate_exam_task
+                generate_exam_task.delay(
+                    exam_id=exam_id,
                     user_id=user_id,
                     document_id=session.get("document_id"),
                     scope=session.get("scope", []),
-                    exam_config=original_config,
+                    exam_config={**original_config, "review_feedback": feedback},
                     user_prompt=original_config.get("user_prompt", ""),
                     extra_instructions=feedback,
                 )
-                return {
-                    "status": "regenerating",
-                    "message": "Đề đang được sinh lại theo phản hồi của bạn.",
-                    "result": result,
-                }
-            except Exception as e:
-                return {
-                    "status": "failed",
-                    "error": f"Regeneration failed: {str(e)}",
-                }
+            except Exception:
+                pass  # Non-blocking
+
+            return {
+                "status": "regenerating",
+                "message": "Đề đang được sinh lại theo phản hồi của bạn.",
+                "checkpoint": 2,
+            }
 
     async def edit_via_prompt(
         self,
@@ -640,6 +843,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         Handle prompt-based editing.
         Load session from Redis, build full context, process edit.
         """
+        # Load session from Redis
         session = await self.short_term.load_session(exam_id, user_id)
         if not session:
             return {
@@ -647,12 +851,15 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "error": "Session not found. Please start a new generation.",
             }
 
+        # Build full context for LLM
         exam_config_original = session.get("exam_config_original", {})
         topics_used = session.get("topics_used", [])
         conversation_history = session.get("conversation_history", [])
 
+        # Append user prompt to history
         await self.short_term.append_history(exam_id, user_id, "user", prompt)
 
+        # Build edit prompt
         history_str = "\n".join(
             f"[{h.get('role')}]: {h.get('content')}"
             for h in conversation_history[-5:]
@@ -693,18 +900,18 @@ Trả về JSON:
                     {"role": "system", "content": "Bạn là chuyên gia phân tích yêu cầu chỉnh sửa đề kiểm tra."},
                     {"role": "user", "content": edit_prompt},
                 ],
-                model=settings.OPENAI_MODEL_BUILDER,
-                response_format={"type": "json_object"},
+                role="builder",
                 max_tokens=2000,
                 temperature=0.3,
             )
-            edit_plan = json.loads(response["content"])
+            edit_plan = json.loads(response)
         except Exception as e:
             return {
                 "status": "partial",
                 "error": f"Failed to parse edit request: {str(e)}",
             }
 
+        # Process the edit plan (simplified)
         response_msg = f"Đã xử lý yêu cầu: {edit_plan.get('edit_plan', {}).get('edit_type', 'unknown')}"
         await self.short_term.append_history(exam_id, user_id, "assistant", response_msg)
 

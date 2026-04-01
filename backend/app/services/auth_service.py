@@ -1,10 +1,9 @@
 """Auth service with JWT + bcrypt + refresh token rotation."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
-import hashlib
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, status
 
@@ -90,7 +89,7 @@ class AuthService:
         refresh_token = create_refresh_token(str(user.id))
 
         # Store refresh token (hash)
-        expires_at = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
         db_refresh_token = RefreshToken(
             user_id=user.id,
             token_hash=RefreshToken.hash_token(refresh_token),
@@ -125,7 +124,7 @@ class AuthService:
                 RefreshToken.user_id == UUID(user_id),
                 RefreshToken.token_hash == token_hash,
                 RefreshToken.revoked == False,
-                RefreshToken.expires_at > datetime.utcnow(),
+                RefreshToken.expires_at > datetime.now(timezone.utc),
             )
         )
         db_token = result.scalar_one_or_none()
@@ -144,7 +143,7 @@ class AuthService:
         new_refresh_token = create_refresh_token(user_id)
 
         # Store new refresh token
-        expires_at = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
         new_db_token = RefreshToken(
             user_id=UUID(user_id),
             token_hash=RefreshToken.hash_token(new_refresh_token),

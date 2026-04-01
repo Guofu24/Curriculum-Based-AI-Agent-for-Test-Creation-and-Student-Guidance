@@ -29,7 +29,19 @@ def get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a new teacher account",
+    description="Create a new teacher account with email, password, and full name. "
+                 "Password is hashed with bcrypt before storage.",
+    responses={
+        201: {"description": "Teacher account created successfully"},
+        400: {"description": "Invalid request data or email already registered"},
+        422: {"description": "Validation error in request body"},
+    },
+)
 async def register(
     request: RegisterRequest,
     db: AsyncSession = Depends(get_db),
@@ -45,7 +57,23 @@ async def register(
     return UserResponse.model_validate(user)
 
 
-@router.post("/login", response_model=AuthResponse)
+@router.post(
+    "/login",
+    response_model=AuthResponse,
+    summary="Login and receive JWT tokens",
+    description="Authenticate with email and password. Returns JWT access token "
+                 "(15 min TTL) and refresh token (7 day TTL). Refresh token is "
+                 "rotated on each use for security.",
+    responses={
+        200: {"description": "Login successful, tokens returned"},
+        401: {"description": "Invalid credentials"},
+        422: {"description": "Validation error in request body"},
+    },
+    example={
+        "email": "teacher@school.edu.vn",
+        "password": "SecurePassword123!",
+    },
+)
 async def login(
     request: LoginRequest,
     http_request: Request,
@@ -62,7 +90,19 @@ async def login(
     )
 
 
-@router.post("/refresh", response_model=RefreshResponse)
+@router.post(
+    "/refresh",
+    response_model=RefreshResponse,
+    summary="Refresh access token",
+    description="Exchange a valid refresh token for a new access token. "
+                 "Uses refresh token rotation — the old refresh token is revoked "
+                 "and a new one is issued. Refresh token TTL: 7 days.",
+    responses={
+        200: {"description": "Access token refreshed successfully"},
+        401: {"description": "Refresh token expired or revoked"},
+        422: {"description": "Validation error"},
+    },
+)
 async def refresh_token(
     request: RefreshTokenRequest,
     db: AsyncSession = Depends(get_db),
@@ -73,7 +113,18 @@ async def refresh_token(
     return await service.refresh(request.refresh_token)
 
 
-@router.post("/logout", response_model=LogoutResponse)
+@router.post(
+    "/logout",
+    response_model=LogoutResponse,
+    summary="Logout and revoke refresh token",
+    description="Logout by revoking the provided refresh token. "
+                 "The access token remains valid until its TTL expires.",
+    responses={
+        200: {"description": "Logout successful, refresh token revoked"},
+        401: {"description": "Refresh token not found or already revoked"},
+        422: {"description": "Validation error"},
+    },
+)
 async def logout(
     request: RefreshTokenRequest,
     db: AsyncSession = Depends(get_db),
@@ -85,7 +136,17 @@ async def logout(
     return LogoutResponse()
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    summary="Get current user profile",
+    description="Returns the authenticated user's profile information. "
+                 "Requires a valid access token in the Authorization header.",
+    responses={
+        200: {"description": "Current user profile"},
+        401: {"description": "Missing or invalid access token"},
+    },
+)
 async def get_me(current_user: User = Depends(get_current_user)):
     """Get current user information."""
     return UserResponse.model_validate(current_user)

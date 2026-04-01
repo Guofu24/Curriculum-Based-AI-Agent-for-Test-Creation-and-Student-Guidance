@@ -1,80 +1,327 @@
-"""Observability: LangFuse tracing and cost tracking."""
+"""Observability: LangFuse tracing and cost tracking.
 
-from typing import Any, Optional
-from uuid import UUID
-import time
+Phase 15 — LangFuse Tracing + Cost Tracking
+============================================
+This module provides:
+- LangfuseClient singleton (lazy init, graceful fallback)
+- CurriculumTracer: trace context manager + agent/skill/llm decorators
+- ExamCostTracker: per-exam cost aggregation
+- Hash helpers for input/output deduplication
+
+Design principles:
+- ALWAYS calls span.end() in finally block — no span leaks
+- LangFuse is non-critical: if init fails, all tracing methods become no-ops
+- Cost calculation uses MODEL_PRICING dict — never hardcoded numbers
+- Root trace is created once per exam in exam_task.py
+"""
+
+from __future__ import annotations
+
+import functools
 import hashlib
+import json
+import logging
+import time
+from typing import TYPE_CHECKING, Any, Callable, Optional
+from contextlib import contextmanager
 
 from app.core.config import get_settings
 
+if TYPE_CHECKING:
+    from langfuse import Langfuse
+
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-class LangFuseTracer:
+# ── Hash helpers ────────────────────────────────────────────────────────────────
+
+def hash_input(data: dict) -> str:
+    """Short hash of input dict for span metadata."""
+    try:
+        content = json.dumps(data, sort_keys=True, default=str)
+        return hashlib.sha256(content.encode()).hexdigest()[:16]
+    except Exception:
+        return hashlib.sha256(str(data).encode()).hexdigest()[:16]
+
+
+def hash_output(data: Any) -> str:
+    """Short hash of output for span metadata."""
+    try:
+        content = json.dumps(data, sort_keys=True, default=str)
+        return hashlib.sha256(content.encode()).hexdigest()[:16]
+    except Exception:
+        return hashlib.sha256(str(data).encode()).hexdigest()[:16]
+
+
+# ── LangfuseClient accessor ────────────────────────────────────────────────────
+
+def _get_lf() -> Optional[Any]:
+    """Get Langfuse client (lazy import, no error if not configured)."""
+    try:
+        from langfuse import Langfuse
+        from app.core.config import get_settings
+        s = get_settings()
+
+        if not s.LANGFUSE_ENABLED:
+            return None
+        if not s.LANGFUSE_PUBLIC_KEY or not s.LANGFUSE_SECRET_KEY:
+            return None
+
+        return Langfuse(
+            public_key=s.LANGFUSE_PUBLIC_KEY,
+            secret_key=s.LANGFUSE_SECRET_KEY,
+            host=s.LANGFUSE_HOST,
+        )
+    except ImportError:
+        logger.debug("langfuse not installed — tracing disabled")
+        return None
+    except Exception as e:
+        logger.debug(f"Langfuse init failed: {e}")
+        return None
+
+
+# ── CurriculumTracer ───────────────────────────────────────────────────────────
+
+class CurriculumTracer:
     """
-    LangFuse tracing wrapper for multi-agent observability.
-    Emits structured spans for each agent call.
+    LangFuse tracing wrapper for the multi-agent exam generation pipeline.
+
+    Wraps every agent call, LLM call, and skill call as a LangFuse span.
+    Provides a trace context manager for root exam-level traces.
+
+    Non-critical: all methods safely no-op when LangFuse is unavailable.
     """
 
-    def __init__(self, enabled: bool = True):
-        self.enabled = enabled and settings.LANGFUSE_ENABLED
-        self._client = None
+    def __init__(self, enabled: Optional[bool] = None):
+        self._lf: Optional[Any] = None
+        self._enabled: bool = (enabled is not False) and settings.LANGFUSE_ENABLED
+
+    @property
+    def enabled(self) -> bool:
+        if not self._enabled:
+            return False
+        if self._lf is None:
+            self._lf = _get_lf()
+        return self._lf is not None
+
+    # ── Root trace context manager ─────────────────────────────────────────────
+
+    @contextmanager
+    def trace(self, exam_id: str, metadata: Optional[dict] = None):
+        """
+        Root trace context manager for an entire exam generation session.
+
+        Usage:
+            tracer = get_tracer()
+            with tracer.trace(exam_id="...", metadata={...}):
+                # all agent spans are children of this trace
+                ...
+
+        Ensures trace.flush() is called on exit.
+        """
+        trace_obj: Any = None
 
         if self.enabled:
             try:
-                from langfuse import Langfuse
-                self._client = Langfuse(
-                    public_key=settings.LANGFUSE_PUBLIC_KEY,
-                    secret_key=settings.LANGFUSE_SECRET_KEY,
-                    host=settings.LANGFUSE_HOST,
+                trace_obj = self._lf.trace(
+                    name=f"exam_generate_{exam_id}",
+                    id=exam_id,
+                    metadata={
+                        "exam_id": exam_id,
+                        **(metadata or {}),
+                    },
                 )
-            except ImportError:
-                self.enabled = False
-            except Exception:
-                self.enabled = False
-
-    def create_trace(self, name: str, exam_id: str) -> Optional[Any]:
-        """Create a new trace for an exam generation."""
-        if not self.enabled:
-            return None
+            except Exception as e:
+                logger.warning(f"Failed to create Langfuse trace: {e}")
 
         try:
-            trace = self._client.trace(
-                name=name,
-                metadata={
-                    "exam_id": exam_id,
-                    "user_id": None,
-                }
-            )
-            return trace
-        except Exception:
-            return None
+            yield trace_obj
+        finally:
+            if trace_obj is not None:
+                try:
+                    trace_obj.flush()
+                except Exception as e:
+                    logger.warning(f"Langfuse trace flush failed: {e}")
 
-    def create_span(
-        self,
-        trace: Any,
-        name: str,
-        agent: str,
-        input_data: dict | None = None,
-        metadata: dict | None = None,
-    ) -> Optional[Any]:
-        """Create a span within a trace."""
-        if not self.enabled or trace is None:
-            return None
+    # ── Agent span decorator ───────────────────────────────────────────────────
 
-        try:
-            span = trace.span(
-                name=name,
-                metadata={
-                    "agent": agent,
-                    **(metadata or {}),
-                }
-            )
-            return span
-        except Exception:
-            return None
+    def agent_span(self, agent_name: str) -> Callable:
+        """
+        Decorator that wraps an async agent method with a LangFuse span.
 
-    def emit_llm_call(
+        The decorated method must return an AgentBaseOutput (or dict with
+        'token_usage' and 'status' keys). The span metadata is updated
+        after the method returns with token_usage and cost data.
+
+        Usage:
+            @tracer.agent_span("outline_agent")
+            async def create_outline(self, ...) -> OutlineOutput:
+                ...
+        """
+        def decorator(func: Callable) -> Callable:
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs) -> Any:
+                start_time = time.time()
+                status = "success"
+                error_msg: Optional[str] = None
+                span: Any = None
+
+                if self.enabled:
+                    try:
+                        span = self._lf.span(
+                            name=f"agent:{agent_name}",
+                            metadata={
+                                "agent": agent_name,
+                                "type": "agent",
+                                "input_hash": hash_input({"args": str(args[:3]), "kwargs": list(kwargs.keys())}),
+                            },
+                        )
+                    except Exception as e:
+                        logger.debug(f"Failed to create agent span: {e}")
+
+                try:
+                    result = await func(*args, **kwargs)
+
+                    # Extract token_usage from result for cost tracking
+                    token_usage_data: dict[str, Any] = {}
+                    if hasattr(result, "token_usage"):
+                        tu = result.token_usage
+                        if hasattr(tu, "model_dump"):
+                            token_usage_data = tu.model_dump()
+                        else:
+                            token_usage_data = {"prompt_tokens": 0, "completion_tokens": 0}
+                    elif isinstance(result, dict):
+                        tu = result.get("token_usage", {})
+                        token_usage_data = {
+                            "prompt_tokens": tu.get("prompt_tokens", 0),
+                            "completion_tokens": tu.get("completion_tokens", 0),
+                            "total_tokens": tu.get("total_tokens", 0),
+                            "estimated_cost_usd": tu.get("estimated_cost_usd", 0.0),
+                        }
+
+                    # Compute cost
+                    from app.observability.cost import calculate_cost
+                    model = kwargs.get("model", settings.LLM_MODEL_STRONG)
+                    cost_usd = calculate_cost(
+                        model,
+                        token_usage_data.get("prompt_tokens", 0),
+                        token_usage_data.get("completion_tokens", 0),
+                    )
+
+                    elapsed_ms = int((time.time() - start_time) * 1000)
+
+                    if span is not None:
+                        try:
+                            span.update(
+                                metadata={
+                                    "latency_ms": elapsed_ms,
+                                    "token_usage": token_usage_data,
+                                    "estimated_cost_usd": cost_usd,
+                                    "status": status,
+                                    "agent_status": getattr(result, "status", None),
+                                }
+                            )
+                        except Exception as e:
+                            logger.debug(f"Failed to update agent span: {e}")
+
+                    return result
+
+                except Exception as exc:
+                    status = "error"
+                    error_msg = str(exc)
+
+                    if span is not None:
+                        try:
+                            span.update(
+                                level="ERROR",
+                                status_message=error_msg,
+                            )
+                        except Exception:
+                            pass
+                    raise
+
+                finally:
+                    if span is not None:
+                        try:
+                            span.end()
+                        except Exception:
+                            pass
+
+            return wrapper
+        return decorator
+
+    # ── Skill span decorator ─────────────────────────────────────────────────
+
+    def skill_span(self, skill_name: str) -> Callable:
+        """
+        Decorator that wraps an async skill method with a LangFuse span.
+
+        Usage:
+            @tracer.skill_span("bloom_classifier")
+            async def classify(self, ...) -> dict:
+                ...
+        """
+        def decorator(func: Callable) -> Callable:
+            @functools.wraps(func)
+            async def wrapper(*args, **kwargs) -> Any:
+                start_time = time.time()
+                span: Any = None
+
+                if self.enabled:
+                    try:
+                        span = self._lf.span(
+                            name=f"skill:{skill_name}",
+                            metadata={
+                                "skill_name": skill_name,
+                                "type": "skill",
+                            },
+                        )
+                    except Exception:
+                        pass
+
+                try:
+                    result = await func(*args, **kwargs)
+
+                    if span is not None:
+                        elapsed_ms = int((time.time() - start_time) * 1000)
+                        try:
+                            span.update(
+                                metadata={
+                                    "latency_ms": elapsed_ms,
+                                    "output_hash": hash_output(result),
+                                    "status": "success",
+                                }
+                            )
+                        except Exception:
+                            pass
+
+                    return result
+
+                except Exception as exc:
+                    if span is not None:
+                        try:
+                            span.update(
+                                level="ERROR",
+                                status_message=str(exc),
+                            )
+                        except Exception:
+                            pass
+                    raise
+
+                finally:
+                    if span is not None:
+                        try:
+                            span.end()
+                        except Exception:
+                            pass
+
+            return wrapper
+        return decorator
+
+    # ── LLM generation span helper ────────────────────────────────────────────
+
+    def generation(
         self,
         span: Any,
         model: str,
@@ -84,7 +331,19 @@ class LangFuseTracer:
         cost_usd: float,
         status: str = "success",
     ) -> None:
-        """Emit an LLM call within a span."""
+        """
+        Emit an LLM generation span within a parent span.
+
+        Usage:
+            tracer.generation(
+                parent_span,
+                model="gpt-4o",
+                prompt_tokens=100,
+                completion_tokens=50,
+                latency_ms=200,
+                cost_usd=0.001,
+            )
+        """
         if not self.enabled or span is None:
             return
 
@@ -97,76 +356,46 @@ class LangFuseTracer:
                 usage_amount=cost_usd,
                 status=status,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to emit LLM generation: {e}")
 
-    def emit_event(
+    # ── Generic span helpers ─────────────────────────────────────────────────
+
+    def event(
         self,
         span: Any,
         name: str,
-        metadata: dict | None = None,
+        metadata: Optional[dict] = None,
     ) -> None:
-        """Emit an event within a span."""
+        """Emit a named event within a span."""
         if not self.enabled or span is None:
             return
-
         try:
-            span.event(
-                name=name,
-                metadata=metadata or {},
-            )
-        except Exception:
-            pass
-
-    def finalize_span(
-        self,
-        span: Any,
-        output: Any = None,
-        status: str = "success",
-        error: str | None = None,
-    ) -> None:
-        """Finalize a span."""
-        if not self.enabled or span is None:
-            return
-
-        try:
-            if error:
-                span.level = "ERROR"
-            span.end()
-        except Exception:
-            pass
-
-    def finalize_trace(self, trace: Any) -> None:
-        """Finalize and flush a trace."""
-        if not self.enabled or trace is None:
-            return
-
-        try:
-            trace.flush()
+            span.event(name=name, metadata=metadata or {})
         except Exception:
             pass
 
 
-# Singleton
-_tracer: LangFuseTracer | None = None
+# ── Singleton ─────────────────────────────────────────────────────────────────
+
+_tracer: Optional[CurriculumTracer] = None
 
 
-def get_tracer() -> LangFuseTracer:
-    """Get the singleton tracer."""
+def get_tracer() -> CurriculumTracer:
+    """Get the singleton CurriculumTracer instance."""
     global _tracer
     if _tracer is None:
-        _tracer = LangFuseTracer()
+        _tracer = CurriculumTracer()
     return _tracer
 
 
-# ── Cost Tracking ────────────────────────────────────────────────────────────
+# ── ExamCostTracker (kept for compatibility) ──────────────────────────────────
 
 class ExamCostTracker:
     """
-    Tracks token usage and cost for each exam generation.
-    Aggregates data from all agents.
+    Deprecated: prefer ExamCostReport from app/observability/cost.py.
+    Kept for any existing code that imports from here.
     """
-
     def __init__(self):
         self.agents: dict[str, dict] = {}
         self.total_tokens: int = 0
@@ -182,7 +411,6 @@ class ExamCostTracker:
         cost_usd: float,
         latency_ms: int,
     ) -> None:
-        """Record token usage for an agent."""
         self.agents[agent_name] = {
             "tokens": prompt_tokens + completion_tokens,
             "prompt_tokens": prompt_tokens,
@@ -196,26 +424,17 @@ class ExamCostTracker:
         self.models_used[agent_name] = model
 
     def get_report(self) -> dict:
-        """Get the cost report for the exam."""
-        breakdown = {}
-        for agent, data in self.agents.items():
-            breakdown[agent] = {
-                "tokens": data["tokens"],
-                "cost": round(data["cost"], 6),
-                "model": data["model"],
-                "latency_ms": data["latency_ms"],
-            }
-
         return {
             "total_tokens": self.total_tokens,
             "total_cost_usd": round(self.total_cost_usd, 6),
-            "breakdown": breakdown,
+            "breakdown": {
+                name: {
+                    "tokens": d["tokens"],
+                    "cost": round(d["cost"], 6),
+                    "model": d["model"],
+                    "latency_ms": d["latency_ms"],
+                }
+                for name, d in self.agents.items()
+            },
             "model_used": self.models_used,
         }
-
-    @staticmethod
-    def hash_input(data: dict) -> str:
-        """Create a hash of input data for deduplication."""
-        import json
-        content = json.dumps(data, sort_keys=True)
-        return hashlib.sha256(content.encode()).hexdigest()[:16]

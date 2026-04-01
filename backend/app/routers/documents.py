@@ -1,111 +1,131 @@
-"""Document router: upload, list, status, curriculum-tree, delete - aligned with frontend API."""
+"""Document router per spec — aligned with Phase 5 spec.
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks, Form
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+Endpoints:
+- POST /api/v1/documents/upload — upload S3 → create DB record → trigger Celery task
+- GET  /api/v1/documents — list user's documents
+- GET  /api/v1/documents/{id} — detail + heading_tree
+- GET  /api/v1/documents/{id}/status — processing status
+- DELETE /api/v1/documents/{id} — delete DB + S3 + Pinecone vectors
+- GET  /api/v1/documents/{id}/refresh-url — generate new presigned URL (G20)
+"""
+
 from uuid import UUID
-from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.redis_client import get_redis_client, RedisClient
 from app.services.document_service import DocumentService, DocumentServiceError
 from app.schemas.document import (
     DocumentUploadResponse,
     DocumentListItem,
     DocumentDetail,
     DocumentStatus,
-    ScopeUnitPayload,
-    DocumentUpdateTreeRequest,
-    CurriculumNode,
+    DocumentListResponse,
+    RefreshUrlResponse,
+    HeadingTree,
+    ChapterSchema,
+    SectionSchema,
+    SubsectionSchema,
 )
 from app.dependencies import get_current_user
 from app.models.user import User
-from app.models.document import Document
 from app.tasks.document_task import process_document_task
 
 router = APIRouter(prefix="/api/v1/documents", tags=["Documents"])
 
 
-def _doc_to_list_item(doc: Document) -> DocumentListItem:
+def _doc_to_list_item(doc) -> DocumentListItem:
     """Convert Document model to DocumentListItem schema."""
-    curriculum_tree = doc.curriculum_tree or []
-    chapter_count = len([n for n in curriculum_tree if isinstance(n, dict) and n.get("level") == 1])
     return DocumentListItem(
         id=str(doc.id),
-        course_id=str(doc.course_id) if doc.course_id else None,
-        title=doc.title or doc.file_name,
-        file_name=doc.file_name,
+        title=doc.original_filename.rsplit(".", 1)[0] if doc.original_filename else "",
+        original_filename=doc.original_filename,
         file_type=doc.file_type,
-        file_size=doc.file_size or 0,
-        status=doc.status or "pending",
-        version=doc.version or 1,
+        file_size=getattr(doc, "file_size", 0) or 0,
+        processing_status=doc.processing_status,
+        total_chapters=doc.total_chapters,
         total_pages_or_slides=doc.total_pages_or_slides or 0,
         total_chunks=doc.total_chunks or 0,
-        chapter_count=chapter_count,
-        created_at=doc.created_at,
-        updated_at=doc.updated_at,
+        uploaded_at=doc.uploaded_at,
     )
 
 
-def _doc_to_detail(doc: Document) -> DocumentDetail:
+def _heading_tree_from_dict(data: dict | None) -> HeadingTree | None:
+    """Convert heading_tree dict to HeadingTree schema."""
+    if not data:
+        return None
+    try:
+        chapters = []
+        for ch in data.get("chapters", []):
+            sections = []
+            for sec in ch.get("sections", []):
+                subsections = [
+                    SubsectionSchema(section_id=sub["section_id"], title=sub["title"])
+                    for sub in sec.get("subsections", [])
+                ]
+                sections.append(SectionSchema(
+                    section_id=sec["section_id"],
+                    title=sec["title"],
+                    subsections=subsections,
+                ))
+            chapters.append(ChapterSchema(
+                chapter_id=ch["chapter_id"],
+                title=ch["title"],
+                sections=sections,
+            ))
+        return HeadingTree(chapters=chapters)
+    except Exception:
+        return None
+
+
+def _doc_to_detail(doc) -> DocumentDetail:
     """Convert Document model to DocumentDetail schema."""
-    tree = doc.curriculum_tree or []
-    curriculum_nodes = [_dict_to_curriculum_node(n) for n in tree]
     return DocumentDetail(
         id=str(doc.id),
-        course_id=str(doc.course_id) if doc.course_id else None,
-        title=doc.title or doc.file_name,
-        file_name=doc.file_name,
+        title=doc.original_filename.rsplit(".", 1)[0] if doc.original_filename else "",
+        original_filename=doc.original_filename,
         file_type=doc.file_type,
-        file_size=doc.file_size or 0,
-        file_hash=doc.file_hash,
-        file_storage_url=doc.file_storage_url,
-        language=doc.language or "vi",
-        status=doc.status or "pending",
-        version=doc.version or 1,
+        file_size=getattr(doc, "file_size", 0) or 0,
+        s3_key=doc.s3_key,
+        processing_status=doc.processing_status,
+        parse_error_message=doc.parse_error_message,
+        heading_tree=_heading_tree_from_dict(doc.heading_tree),
+        total_chapters=doc.total_chapters,
         total_pages_or_slides=doc.total_pages_or_slides or 0,
         total_chunks=doc.total_chunks or 0,
-        created_at=doc.created_at,
-        updated_at=doc.updated_at,
-        curriculum_tree=curriculum_nodes,
+        uploaded_at=doc.uploaded_at,
     )
 
 
-def _dict_to_curriculum_node(d: dict) -> CurriculumNode:
-    """Convert a dict to CurriculumNode, handling nested children recursively."""
-    children = []
-    for child in d.get("children", []):
-        children.append(_dict_to_curriculum_node(child))
-    return CurriculumNode(
-        id=d.get("id"),
-        title=d.get("title", ""),
-        section_type="topic",
-        section_order=0,
-        chapter_number=d.get("level", 1),
-        page_from=d.get("page_number"),
-        page_to=None,
-        scope_label=None,
-        summary=d.get("content_preview"),
-        metadata=None,
-        children=children,
-    )
-
-
-@router.post("/upload", response_model=DocumentUploadResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/upload",
+    response_model=DocumentUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload a document for RAG processing",
+    description="Upload a PDF, DOCX, or PPTX file to S3 storage. Creates a DB record "
+                 "and triggers the Celery document-processing pipeline in background. "
+                 "Poll /documents/{id}/status to track processing progress.",
+    responses={
+        201: {"description": "Document uploaded and processing started"},
+        400: {"description": "Unsupported file type or file too large (>100MB)"},
+        401: {"description": "Authentication required"},
+        422: {"description": "Validation error in request body"},
+    },
+    tags=["Documents"],
+)
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    course_id: Annotated[str | None, Form()] = None,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis_client),
     current_user: User = Depends(get_current_user),
 ):
     """Upload a document for processing. Triggers the RAG pipeline in background."""
-    allowed_types = [
+    allowed_types = {
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    ]
+    }
     if file.content_type not in allowed_types:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -119,55 +139,79 @@ async def upload_document(
             detail="File too large. Maximum size is 100MB.",
         )
 
-    course_uuid = UUID(course_id) if course_id else None
-
-    service = DocumentService(db, redis)
+    service = DocumentService(db)
     try:
         document = await service.upload_document(
             user_id=current_user.id,
             file_content=content,
             filename=file.filename or "document",
-            course_id=course_uuid,
         )
     except DocumentServiceError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
+    # Trigger Celery task for background RAG processing
     process_document_task.delay(str(document.id))
 
     return DocumentUploadResponse(
         document_id=document.id,
         message="Document uploaded. Processing started in background.",
-        s3_key=document.file_storage_url or "",
+        s3_key=document.s3_key,
     )
 
 
-@router.get("", response_model=list[DocumentListItem])
+@router.get(
+    "",
+    response_model=DocumentListResponse,
+    summary="List all user documents",
+    description="Returns a paginated list of all documents owned by the authenticated user. "
+                 "Documents are sorted by upload date (newest first).",
+    responses={
+        200: {"description": "Paginated list of documents"},
+        401: {"description": "Authentication required"},
+    },
+    tags=["Documents"],
+)
 async def list_documents(
     page: int = 1,
     limit: int = 20,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis_client),
     current_user: User = Depends(get_current_user),
 ):
     """List all documents for the current user."""
-    service = DocumentService(db, redis)
-    documents, _ = await service.list_documents(
+    service = DocumentService(db)
+    documents, total = await service.list_documents(
         user_id=current_user.id,
         page=page,
         limit=limit,
     )
-    return [_doc_to_list_item(d) for d in documents]
+    return DocumentListResponse(
+        items=[_doc_to_list_item(d) for d in documents],
+        total=total,
+        page=page,
+        limit=limit,
+    )
 
 
-@router.get("/{document_id}", response_model=DocumentDetail)
+@router.get(
+    "/{document_id}",
+    response_model=DocumentDetail,
+    summary="Get document details",
+    description="Returns full document metadata including heading_tree (chapters, sections, "
+                 "subsections), processing status, chunk counts, and S3 key.",
+    responses={
+        200: {"description": "Document details with heading_tree"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Document not found"},
+    },
+    tags=["Documents"],
+)
 async def get_document(
     document_id: UUID,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis_client),
     current_user: User = Depends(get_current_user),
 ):
-    """Get document details including curriculum tree."""
-    service = DocumentService(db, redis)
+    """Get document details including heading_tree."""
+    service = DocumentService(db)
     document = await service.get_document(document_id, current_user.id)
 
     if not document:
@@ -176,15 +220,26 @@ async def get_document(
     return _doc_to_detail(document)
 
 
-@router.get("/{document_id}/status", response_model=DocumentStatus)
+@router.get(
+    "/{document_id}/status",
+    response_model=DocumentStatus,
+    summary="Get document processing status",
+    description="Returns the current processing status of a document: pending, processing, "
+                 "completed, or failed. Use this to poll for completion after upload.",
+    responses={
+        200: {"description": "Current processing status"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Document not found"},
+    },
+    tags=["Documents"],
+)
 async def get_document_status(
     document_id: UUID,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis_client),
     current_user: User = Depends(get_current_user),
 ):
     """Get document processing status."""
-    service = DocumentService(db, redis)
+    service = DocumentService(db)
     document = await service.get_document(document_id, current_user.id)
 
     if not document:
@@ -192,137 +247,80 @@ async def get_document_status(
 
     return DocumentStatus(
         id=str(document.id),
-        course_id=str(document.course_id) if document.course_id else None,
-        status=document.status or "pending",
+        processing_status=document.processing_status,
         parse_error_message=document.parse_error_message,
         total_pages_or_slides=document.total_pages_or_slides or 0,
         total_chunks=document.total_chunks or 0,
-        updated_at=document.updated_at,
+        uploaded_at=document.uploaded_at,
     )
 
 
-@router.get("/{document_id}/curriculum-tree")
-async def get_curriculum_tree(
-    document_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis_client),
-    current_user: User = Depends(get_current_user),
-):
-    """Get the curriculum tree for scope selection."""
-    service = DocumentService(db, redis)
-    document = await service.get_document(document_id, current_user.id)
-
-    if not document:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-
-    ready_statuses = {"processed", "structured", "indexed"}
-    if document.status not in ready_statuses:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Document is not ready. Status: {document.status}",
-        )
-
-    tree = document.curriculum_tree or []
-    nodes = [_dict_to_curriculum_node(n) for n in tree]
-
-    return {
-        "document_id": str(document.id),
-        "curriculum_tree": nodes,
-        "flattened_scope": _flatten_to_scope_payload(document),
-    }
-
-
-def _flatten_to_scope_payload(document: Document) -> list[ScopeUnitPayload]:
-    """Convert curriculum tree to frontend's ScopeUnitPayload format."""
-    if not document.curriculum_tree:
-        return []
-
-    scope_units = []
-
-    def traverse(node: dict, chapter_num: int = 0):
-        level = node.get("level", 1)
-        title = node.get("title", "")
-
-        if level == 1:
-            chapter_num = len(scope_units) + 1
-
-        if level >= 1 and level <= 3:
-            scope_units.append(ScopeUnitPayload(
-                scope_id=node.get("id"),
-                section_id=None,
-                scope_type="chapter" if level == 1 else "section" if level == 2 else "subsection",
-                title=title,
-                chapter_number=chapter_num,
-                page_from=node.get("page_number"),
-                page_to=None,
-                tags=[],
-            ))
-
-        for child in node.get("children", []):
-            traverse(child, chapter_num)
-
-    for root_node in document.curriculum_tree:
-        traverse(root_node)
-
-    return scope_units
-
-
-@router.patch("/{document_id}/curriculum-tree")
-async def update_curriculum_tree(
-    document_id: UUID,
-    request: DocumentUpdateTreeRequest,
-    db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis_client),
-    current_user: User = Depends(get_current_user),
-):
-    """Update the curriculum tree structure."""
-    service = DocumentService(db, redis)
-    document = await service.get_document(document_id, current_user.id)
-
-    if not document:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
-
-    # Convert CurriculumNode to dict
-    tree_dict = [_curriculum_node_to_dict(n) for n in request.curriculum_tree]
-
-    from sqlalchemy import update
-    await db.execute(
-        update(Document)
-        .where(Document.id == document_id)
-        .values(
-            curriculum_tree=tree_dict,
-            status="structured",
-        )
-    )
-    await db.commit()
-
-    return {"message": "Curriculum tree updated", "document_id": str(document_id)}
-
-
-def _curriculum_node_to_dict(node: CurriculumNode) -> dict:
-    """Convert CurriculumNode to dict for DB storage."""
-    return {
-        "id": node.id,
-        "title": node.title,
-        "level": node.chapter_number,
-        "page_number": node.page_from,
-        "children": [_curriculum_node_to_dict(c) for c in (node.children or [])],
-        "content_preview": node.summary or "",
-    }
-
-
-@router.delete("/{document_id}")
+@router.delete(
+    "/{document_id}",
+    summary="Delete a document",
+    description="Permanently removes a document from the database, S3 storage, and "
+                 "Pinecone vector store. This action cannot be undone.",
+    responses={
+        200: {"description": "Document deleted successfully"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Document not found"},
+    },
+    tags=["Documents"],
+)
 async def delete_document(
     document_id: UUID,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis_client),
     current_user: User = Depends(get_current_user),
 ):
-    """Delete a document and all its vectors."""
-    service = DocumentService(db, redis)
+    """Delete a document: removes from DB, S3, and Pinecone vectors."""
+    service = DocumentService(db)
     deleted = await service.delete_document(document_id, current_user.id)
 
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     return {"message": "Document deleted successfully"}
+
+
+@router.get(
+    "/{document_id}/refresh-url",
+    response_model=RefreshUrlResponse,
+    summary="Generate a new presigned download URL (G20)",
+    description="Generates a fresh presigned S3 URL for downloading the document. "
+                 "Use this when the previous URL has expired (default TTL: 1 hour). "
+                 "Document must be in processing or completed state.",
+    responses={
+        200: {"description": "Fresh presigned URL generated"},
+        400: {"description": "Document processing has not started yet"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Document not found"},
+    },
+    tags=["Documents"],
+)
+async def refresh_document_url(
+    document_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Generate a fresh presigned URL for downloading the document (G20).
+    Used when the previous presigned URL has expired.
+    """
+    service = DocumentService(db)
+    document = await service.get_document(document_id, current_user.id)
+
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if document.processing_status == "pending":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document processing has not started yet.",
+        )
+
+    presigned_url = service.get_presigned_url(document)
+
+    return RefreshUrlResponse(
+        presigned_url=presigned_url,
+        expires_in=3600,
+    )

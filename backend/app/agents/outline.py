@@ -8,9 +8,11 @@ from app.agents.base import AgentBaseOutput, AgentStatus, AgentMetrics, TokenUsa
 from app.agents.llm import get_llm_client
 from app.agents.skills.bloom_classifier import BloomClassifierSkill
 from app.agents.skills.difficulty_estimator import DifficultyEstimatorSkill
+from app.observability.tracer import get_tracer
 from app.core.config import get_settings
 
 settings = get_settings()
+tracer = get_tracer()
 
 
 class OutlineAgent:
@@ -66,6 +68,7 @@ Trả về JSON:
         self.bloom_skill = BloomClassifierSkill()
         self.difficulty_skill = DifficultyEstimatorSkill()
 
+    @tracer.agent_span("outline_agent")
     async def create_outline(
         self,
         retrieved_context: list[dict],
@@ -91,17 +94,12 @@ Trả về JSON:
                     {"role": "system", "content": self.OUTLINE_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                model=settings.OPENAI_MODEL_PLANNER,
-                response_format={"type": "json_object"},
+                role="outline",
                 max_tokens=4000,
                 temperature=0.3,
             )
 
-            metrics.prompt_tokens = response["usage"]["prompt_tokens"]
-            metrics.completion_tokens = response["usage"]["completion_tokens"]
-
-            # Parse response
-            result = json.loads(response["content"])
+            result = json.loads(response)
             blueprint = result.get("blueprint", [])
             distribution_summary = result.get("distribution_summary", {})
 
@@ -182,28 +180,39 @@ Trả về JSON:
         bloom_dist = exam_config.get("bloom_distribution", {})
         user_prompt = exam_config.get("user_prompt", "")
         extra_instructions = exam_config.get("extra_instructions", "")
+        # G8: HITL feedback from rejected blueprint
+        outline_feedback = exam_config.get("outline_feedback", "")
 
-        prompt = f"""Tạo sườn đề kiểm tra với cấu hình sau:
+        feedback_section = ""
+        if outline_feedback:
+            feedback_section = f"""
+## Phan hoi tu giang vien (HITL - G8):
+{outline_feedback}
 
-## Scope (phạm vi bài kiểm tra):
+Hay dieu chinh blueprint theo phan hoi tren.
+"""
+
+        prompt = f"""Tao suon de kiem tra voi cau hinh sau:
+
+## Scope (pham vi bai kiem tra):
 {json.dumps(scope, ensure_ascii=False)}
 
-## Cấu hình đề:
-- Tổng số câu MCQ: {mcq_count}
-- Tổng số câu Essay: {essay_count}
-- Phân bổ Bloom:
+## Cau hinh de:
+- Tong so cau MCQ: {mcq_count}
+- Tong so cau Essay: {essay_count}
+- Phan bo Bloom:
 {json.dumps(bloom_dist, ensure_ascii=False, indent=2)}
 
-## Kiến thức đã truy xuất:
+## Kien thuc da truy xuat:
 {self._build_context_summary(retrieved_context)}
 
-## Yêu cầu từ giảng viên:
-{user_prompt or "Không có yêu cầu đặc biệt."}
+## Yeu cau tu giang vien:
+{user_prompt or "Khong co yeu cau dac biet."}
 
-## Hướng dẫn bổ sung:
-{extra_instructions or "Sinh câu hỏi chuẩn mực, phù hợp với chương trình phổ thông Việt Nam."}
-
-Tạo blueprint chi tiết:"""
+## Huong dan bo sung:
+{extra_instructions or "Sinh cau hoi chuan muc, phu hop voi chuong trinh pho thong Viet Nam."}
+{feedback_section}
+Tao blueprint chi tiet:"""
 
         return prompt
 

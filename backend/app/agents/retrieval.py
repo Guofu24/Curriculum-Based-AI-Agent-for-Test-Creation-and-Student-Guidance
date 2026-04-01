@@ -1,5 +1,6 @@
 """Retrieval Agent - queries vector DB for knowledge chunks."""
 
+import asyncio
 import time
 import uuid
 from typing import Any
@@ -7,12 +8,14 @@ from uuid import UUID
 
 from app.agents.base import AgentBaseOutput, AgentStatus, AgentMetrics, TokenUsage, RetrievalOutput
 from app.agents.llm import get_llm_client
+from app.observability.tracer import get_tracer
 from app.rag.vector_store import get_vector_store
 from app.rag.embedder import EmbeddingService
 from app.core.redis_client import RedisClient
 from app.core.config import get_settings
 
 settings = get_settings()
+tracer = get_tracer()
 
 
 class RetrievalAgent:
@@ -36,6 +39,7 @@ class RetrievalAgent:
         self.embedder = EmbeddingService(redis)
         self.redis = redis
 
+    @tracer.agent_span("retrieval_agent")
     async def retrieve(
         self,
         document_id: str,
@@ -51,24 +55,27 @@ class RetrievalAgent:
         trace_id = metrics.trace_id
 
         try:
-            # Step 1: Generate query variants
+            # Step 1: Generate query variants (G11)
             expanded_queries = await self._expand_queries(
                 scope_chapters, bloom_targets or [], query_hints or []
             )
 
-            # Step 2: Parallel retrieval per chapter
-            all_chunks = []
-            coverage_map: dict[str, list[str]] = {}
+            # Step 2: Parallel retrieval per chapter — G10
+            all_chunks, retrieval_warnings = await self._parallel_query_chapters(
+                document_id=document_id,
+                chapters=scope_chapters,
+                expanded_queries=expanded_queries,
+                top_k=settings.RAG_TOP_K_PER_CHAPTER,
+            )
+            warnings.extend(retrieval_warnings)
 
-            for chapter in scope_chapters:
-                chapter_chunks = await self._retrieve_for_chapter(
-                    document_id=document_id,
-                    chapter=chapter,
-                    queries=expanded_queries,
-                    top_k=settings.RAG_TOP_K_PER_CHAPTER,
-                )
-                all_chunks.extend(chapter_chunks)
-                coverage_map[chapter] = [c["chunk_id"] for c in chapter_chunks]
+            # Build coverage map
+            coverage_map: dict[str, list[str]] = {}
+            for chunk in all_chunks:
+                ch = chunk.get("metadata", {}).get("chapter", "unknown")
+                if ch not in coverage_map:
+                    coverage_map[ch] = []
+                coverage_map[ch].append(chunk["chunk_id"])
 
             # Step 3: Rerank and dedupe
             if len(all_chunks) > settings.RAG_TOP_K_AFTER_RERANK:
@@ -125,13 +132,18 @@ class RetrievalAgent:
                 coverage_map={},
             )
 
+    # ── G11: Query expansion ─────────────────────────────────────────────────────
+
     async def _expand_queries(
         self,
         chapters: list[str],
         bloom_targets: list[str],
         hints: list[str],
     ) -> list[str]:
-        """Generate query variants for better recall."""
+        """
+        Generate 3-5 query variants from bloom_target + chapter using GPT-4o-mini.
+        G11: Query expansion for better recall.
+        """
         prompt = f"""Bạn là chuyên gia tạo câu truy vấn cho hệ thống RAG.
 Tạo 3-5 câu truy vấn khác nhau để tìm kiếm kiến thức cho việc sinh câu hỏi.
 
@@ -145,22 +157,18 @@ Tạo các câu truy vấn đa dạng, bao gồm:
 - Câu truy vấn cho các mức Bloom cao (van_dung, van_dung_cao)
 
 Trả về JSON:
-{{"queries": ["query 1", "query 2", "query 3"]}}"""
+{{"queries": ["query 1", "query 2", "query 3", "query 4", "query 5"]}}"""
 
         try:
             response = await self.llm.chat(
                 messages=[{"role": "user", "content": prompt}],
-                model=settings.OPENAI_MODEL_RERANKER,
-                response_format={"type": "json_object"},
+                role="planner",
                 max_tokens=500,
                 temperature=0.3,
             )
 
             import json
-            data = json.loads(response["content"])
-            metrics = AgentMetrics()
-            metrics.prompt_tokens = response["usage"]["prompt_tokens"]
-            metrics.completion_tokens = response["usage"]["completion_tokens"]
+            data = json.loads(response)
 
             queries = data.get("queries", [])
             # Always include the original chapter names
@@ -170,6 +178,42 @@ Trả về JSON:
         except Exception:
             # Fallback: just use chapter names
             return chapters[:3]
+
+    # ── G10: Parallel chapter retrieval ─────────────────────────────────────────
+
+    async def _parallel_query_chapters(
+        self,
+        document_id: str,
+        chapters: list[str],
+        expanded_queries: list[str],
+        top_k: int = 20,
+    ) -> tuple[list[dict], list[str]]:
+        """
+        Retrieve chunks from all chapters in parallel.
+        G10: Uses asyncio.gather(return_exceptions=True) so 1 chapter failure
+        doesn't fail the entire retrieval — logs warning and continues.
+        """
+        async def _query_one(chapter: str) -> list[dict]:
+            return await self._retrieve_for_chapter(
+                document_id=document_id,
+                chapter=chapter,
+                queries=expanded_queries,
+                top_k=top_k,
+            )
+
+        tasks = [_query_one(ch) for ch in chapters]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        all_chunks: list[dict] = []
+        warnings: list[str] = []
+
+        for chapter, result in zip(chapters, results):
+            if isinstance(result, Exception):
+                warnings.append(f"Chapter '{chapter}' retrieval failed: {str(result)}")
+                continue
+            all_chunks.extend(result)
+
+        return all_chunks, warnings
 
     async def _retrieve_for_chapter(
         self,
@@ -224,7 +268,7 @@ Trả về JSON:
                 query=query,
                 candidates=candidates,
                 top_k=top_k,
-                model=settings.OPENAI_MODEL_RERANKER,
+                role="reranker",
             )
 
             # Reorder chunks based on reranking

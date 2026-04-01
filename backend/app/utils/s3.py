@@ -3,7 +3,6 @@
 import uuid
 import boto3
 from botocore.exceptions import ClientError
-from fastapi import UploadFile
 
 from app.core.config import get_settings
 
@@ -83,6 +82,14 @@ def generate_presigned_url(s3_key: str, ttl_seconds: int | None = None) -> str:
         raise S3Error(f"Failed to generate presigned URL: {str(e)}")
 
 
+def generate_fresh_url(s3_key: str, ttl: int = 3600) -> str:
+    """
+    Alias for generate_presigned_url, used for /refresh-url endpoint (G20).
+    Generates a new presigned URL with fresh TTL.
+    """
+    return generate_presigned_url(s3_key, ttl_seconds=ttl)
+
+
 def generate_upload_presigned_url(
     s3_key: str,
     content_type: str = "application/pdf",
@@ -135,6 +142,37 @@ async def download_file_from_s3(s3_key: str) -> bytes:
 
     except ClientError as e:
         raise S3Error(f"Failed to download file: {str(e)}")
+
+
+# ── Spec-named aliases ─────────────────────────────────────────────────────────
+
+async def upload_file(
+    file_bytes: bytes,
+    filename: str,
+    user_id: str,
+    file_type: str = "pdf",
+) -> str:
+    """
+    Upload a file to S3 (spec naming).
+    Returns the S3 key.
+    """
+    content_type = get_file_content_type(filename)
+    return await upload_file_to_s3(
+        file_content=file_bytes,
+        original_filename=filename,
+        user_id=user_id,
+        content_type=content_type,
+    )
+
+
+async def download_file(s3_key: str) -> bytes:
+    """Download file content from S3 (spec naming)."""
+    return await download_file_from_s3(s3_key)
+
+
+async def delete_file(s3_key: str) -> None:
+    """Delete a file from S3 (spec naming)."""
+    await delete_file_from_s3(s3_key)
 
 
 def get_file_content_type(filename: str) -> str:

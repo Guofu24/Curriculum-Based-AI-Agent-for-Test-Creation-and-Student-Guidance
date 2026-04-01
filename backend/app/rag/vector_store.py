@@ -1,10 +1,6 @@
 """Pinecone vector store operations."""
 
-from typing import Any
-import uuid
-
 from app.core.config import get_settings
-from app.rag.chunker import Chunk
 
 settings = get_settings()
 
@@ -20,25 +16,26 @@ class VectorStore:
         """Lazy-load Pinecone index."""
         if self._index is None:
             try:
-                from pinecone import Pinecone
+                from pinecone import Pinecone, ServerlessSpec
                 pc = Pinecone(api_key=settings.PINECONE_API_KEY)
 
-                # Check if index exists, create if not
-                existing = [idx.name for idx in pc.list_indexes()]
+                existing = pc.list_indexes().names()
 
                 if settings.PINECONE_INDEX not in existing:
                     pc.create_index(
                         name=settings.PINECONE_INDEX,
                         dimension=settings.OPENAI_EMBEDDING_DIM,
                         metric="cosine",
-                        cloud=settings.PINECONE_CLOUD,
-                        region=settings.PINECONE_REGION,
+                        spec=ServerlessSpec(
+                            cloud=settings.PINECONE_CLOUD,
+                            region=settings.PINECONE_REGION,
+                        ),
                     )
 
                 self._index = pc.Index(settings.PINECONE_INDEX)
 
             except ImportError:
-                self._index = None  # Pinecone not available
+                self._index = None
             except Exception:
                 self._index = None
 
@@ -47,106 +44,126 @@ class VectorStore:
     async def upsert_chunks(
         self,
         document_id: str,
-        chunks: list[Chunk],
-        embeddings: list[list[float]],
-    ) -> bool:
-        """Upsert chunks to Pinecone with namespace per chapter."""
+        chapter_id: str,
+        chunks: list[dict],
+    ) -> None:
+        """
+        Upsert chunks to Pinecone with namespace per chapter.
+
+        Namespace: {doc_id}_{chapter_id} (e.g., "doc123_ch1")
+        Each chunk dict must have: chunk_id, content, chapter, chapter_id,
+        section, section_id, content_type, latex_repr, page_number.
+        Chunks must already have an "embedding" field.
+        """
         index = await self._get_index()
         if not index:
-            return False
+            return
 
-        # Group chunks by chapter
-        chapter_groups: dict[str, list[dict]] = {}
+        namespace = f"{document_id}_{chapter_id}"
+        records = []
 
-        for chunk, embedding in zip(chunks, embeddings):
-            namespace = f"{document_id}_{chunk.chapter_id}"
+        for chunk in chunks:
+            embedding = chunk.get("embedding")
+            if not embedding:
+                continue
 
-            if namespace not in chapter_groups:
-                chapter_groups[namespace] = []
-
-            record = {
-                "id": chunk.chunk_id,
+            records.append({
+                "id": chunk.get("chunk_id", ""),
                 "values": embedding,
                 "metadata": {
                     "document_id": document_id,
-                    "chunk_id": chunk.chunk_id,
-                    "chapter": chunk.chapter,
-                    "chapter_id": chunk.chapter_id,
-                    "section": chunk.section,
-                    "section_id": chunk.section_id,
-                    "content_type": chunk.content_type,
-                    "content": chunk.content[:2000],  # Truncate for storage
-                    "latex_repr": chunk.latex_repr or "",
-                    "page_number": chunk.page_number or 0,
+                    "chunk_id": chunk.get("chunk_id", ""),
+                    "chapter": chunk.get("chapter", ""),
+                    "chapter_id": chunk.get("chapter_id", ""),
+                    "section": chunk.get("section", ""),
+                    "section_id": chunk.get("section_id", ""),
+                    "content_type": chunk.get("content_type", "text"),
+                    "content": chunk.get("content", "")[:2000],
+                    "latex_repr": chunk.get("latex_repr", "") or "",
+                    "page_number": chunk.get("page_number") or 0,
                 },
-            }
-            chapter_groups[namespace].append(record)
+            })
 
-        # Upsert each namespace
-        for namespace, records in chapter_groups.items():
-            try:
-                # Upsert in batches of 100
-                for i in range(0, len(records), 100):
-                    batch = records[i:i + 100]
-                    index.upsert(vectors=batch, namespace=namespace)
-            except Exception:
-                continue
+        if not records:
+            return
 
-        return True
+        try:
+            for i in range(0, len(records), 100):
+                batch = records[i:i + 100]
+                index.upsert(vectors=batch, namespace=namespace)
+        except Exception:
+            pass
 
-    async def query(
+    async def query_namespace(
         self,
-        document_id: str,
-        chapter_ids: list[str],
+        doc_id: str,
+        chapter_id: str,
         query_embedding: list[float],
         top_k: int = 20,
-        filter_dict: dict | None = None,
     ) -> list[dict]:
-        """Query chunks from specific chapters in document."""
+        """
+        Query chunks from a specific chapter namespace.
+
+        Namespace: {doc_id}_{chapter_id}
+        Returns top_k results sorted by score (descending).
+        """
         index = await self._get_index()
         if not index:
             return []
 
-        all_results = []
+        namespace = f"{doc_id}_{chapter_id}"
 
-        for chapter_id in chapter_ids:
-            namespace = f"{document_id}_{chapter_id}"
+        try:
+            result = index.query(
+                vector=query_embedding,
+                top_k=top_k,
+                namespace=namespace,
+                include_metadata=True,
+            )
+
+            all_results = []
+            for match in result.get("matches", []):
+                all_results.append({
+                    "chunk_id": match["id"],
+                    "score": match["score"],
+                    "metadata": match.get("metadata", {}),
+                })
+
+            all_results.sort(key=lambda x: x["score"], reverse=True)
+            return all_results
+
+        except Exception:
+            return []
+
+    async def delete_document_vectors(
+        self,
+        doc_id: str,
+        chapters: list[str],
+    ) -> None:
+        """
+        Delete all vectors for specific chapters of a document.
+
+        Deletes namespace {doc_id}_{chapter_id} for each chapter in the list.
+        """
+        index = await self._get_index()
+        if not index:
+            return
+
+        for chapter_id in chapters:
+            namespace = f"{doc_id}_{chapter_id}"
             try:
-                result = index.query(
-                    vector=query_embedding,
-                    top_k=top_k,
-                    namespace=namespace,
-                    include_metadata=True,
-                    filter=filter_dict,
-                )
-
-                for match in result.get("matches", []):
-                    all_results.append({
-                        "chunk_id": match["id"],
-                        "score": match["score"],
-                        "metadata": match.get("metadata", {}),
-                    })
-
+                index.delete(delete_all=True, namespace=namespace)
             except Exception:
                 continue
 
-        # Sort by score and deduplicate
-        all_results.sort(key=lambda x: x["score"], reverse=True)
-
-        return all_results[:top_k]
-
-    async def delete_document_vectors(self, document_id: str) -> bool:
-        """Delete all vectors for a document."""
+    async def delete_all_document_vectors(self, doc_id: str) -> bool:
+        """Delete all vectors for a document (all namespaces)."""
         index = await self._get_index()
         if not index:
             return False
 
         try:
-            # Delete by metadata filter
-            index.delete(
-                filter={"document_id": {"$eq": document_id}},
-                delete_all=False,
-            )
+            index.delete(filter={"document_id": {"$eq": doc_id}})
             return True
         except Exception:
             return False
@@ -163,7 +180,6 @@ class VectorStore:
             return None
 
 
-# Singleton instance
 _vector_store: VectorStore | None = None
 
 

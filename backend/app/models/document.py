@@ -1,48 +1,56 @@
-"""Document model - aligned with frontend's API expectations."""
+"""Document model for uploaded teaching materials."""
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Integer, ForeignKey, JSON, BigInteger
+from typing import Optional, List, TYPE_CHECKING
+
+from sqlalchemy import String, Integer, ForeignKey, func, DateTime
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
+if TYPE_CHECKING:
+    from app.models.user import User
+    from app.models.exam import Exam
+
 
 class Document(Base):
-    """Document model for uploaded teaching materials."""
+    """Document model for uploaded teaching materials.
+
+    Fields per spec:
+    - id, user_id, original_filename, file_type, s3_key
+    - processing_status: pending | processing | completed | failed
+    - heading_tree: JSONB — full nested heading structure
+    - total_chapters: int — number of level-1 headings detected
+    - uploaded_at
+    """
 
     __tablename__ = "documents"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    course_id = Column(UUID(as_uuid=True), ForeignKey("courses.id", ondelete="SET NULL"), nullable=True, index=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    original_filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    file_type: Mapped[str] = mapped_column(String(10), nullable=False)  # pdf, docx, pptx
+    s3_key: Mapped[str] = mapped_column(String(1000), nullable=False)
+    processing_status: Mapped[str] = mapped_column(
+        String(50), default="pending"
+    )  # pending, processing, completed, failed
+    parse_error_message: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)
+    heading_tree: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    total_chapters: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_pages_or_slides: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_chunks: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    uploaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
-    title = Column(String(500), nullable=False)
-    file_name = Column(String(500), nullable=False)
-    file_type = Column(String(10), nullable=False)  # pdf, docx, pptx
-    file_size = Column(BigInteger, default=0)
-    file_hash = Column(String(64), nullable=True)  # SHA256 hash for deduplication
-    file_storage_url = Column(String(1000), nullable=True)  # S3 presigned URL or path
-
-    language = Column(String(10), default="vi")
-
-    status = Column(String(50), default="pending")  # pending, processing, processed, structured, indexed, failed
-    parse_error_message = Column(String(2000), nullable=True)
-    version = Column(Integer, default=1)
-
-    # RAG pipeline outputs
-    total_pages_or_slides = Column(Integer, default=0)
-    total_chunks = Column(Integer, default=0)
-
-    # Curriculum tree (matches frontend's CurriculumNode[])
-    curriculum_tree = Column(JSON, nullable=True)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    # Relationships
-    user = relationship("User", back_populates="documents")
-    course = relationship("Course", back_populates="documents")
-    exams = relationship("Exam", back_populates="document")
+    user: Mapped["User"] = relationship("User", back_populates="documents")
+    exams: Mapped[List["Exam"]] = relationship(
+        "Exam", back_populates="document", cascade="all, delete-orphan"
+    )

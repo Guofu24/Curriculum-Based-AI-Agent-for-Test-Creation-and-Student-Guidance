@@ -3,6 +3,7 @@
 import json
 from pydantic import BaseModel
 from app.agents.llm import get_llm_client
+from app.observability.tracer import get_tracer
 
 
 class DedupCheckerSkill:
@@ -29,6 +30,7 @@ Trả về JSON:
   "suggestion": "Đề xuất: chuyển sang chủ đề khác hoặc null"
 }"""
 
+    @get_tracer().skill_span("dedup_checker")
     async def check(
         self,
         new_question_topic: str,
@@ -61,14 +63,14 @@ Các câu hỏi đã có:
         ]
 
         try:
-            response = await client.client.chat.completions.create(
-                model="gpt-4o-mini",
+            response = await client.chat(
                 messages=messages,
-                response_format={"type": "json_object"},
+                role="skills",
                 max_tokens=300,
+                temperature=0.1,
             )
 
-            result = json.loads(response.choices[0].message.content)
+            result = json.loads(response)
 
             return {
                 "is_duplicate": result.get("similarity_score", 0) >= 0.75,
@@ -78,7 +80,6 @@ Các câu hỏi đã có:
             }
 
         except Exception:
-            # Fallback: keyword-based check
             return self._fallback_check(new_question_topic, existing_topics)
 
     def _fallback_check(self, new_topic: str, existing_topics: list[str]) -> dict:
@@ -107,3 +108,11 @@ Các câu hỏi đã có:
             "similarity_score": 0.0,
             "suggestion": None,
         }
+
+    async def run(
+        self,
+        new_question_topic: str,
+        existing_topics: list[str],
+    ) -> dict:
+        """Alias for check() to match skill interface."""
+        return await self.check(new_question_topic, existing_topics)

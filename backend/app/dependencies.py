@@ -77,6 +77,30 @@ def decode_token(token: str) -> dict:
         )
 
 
+def get_current_user_from_token(token: str) -> dict:
+    """Decode JWT and return payload without DB lookup.
+
+    Raises HTTPException if token is invalid or expired.
+    Use this when you need the token payload (e.g. user_id) but don't need
+    the full User object from the database.
+    """
+    payload = decode_token(token)
+    if payload.get("type") != "access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return payload
+
+
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
@@ -90,26 +114,11 @@ async def get_current_user(
         )
 
     token = credentials.credentials
-    payload = decode_token(token)
-
-    if payload.get("type") != "access":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    payload = get_current_user_from_token(token)
 
     user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
     result = await db.execute(
-        select(User)
-        .where(User.id == user_id)
+        select(User).where(User.id == user_id)
     )
     user = result.scalar_one_or_none()
 

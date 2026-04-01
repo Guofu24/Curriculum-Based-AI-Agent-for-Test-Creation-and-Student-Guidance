@@ -6,8 +6,10 @@ from dataclasses import dataclass, field
 
 from app.core.config import get_settings
 from app.agents.base import ContentFilterRules
+from app.observability.tracer import get_tracer
 
 settings = get_settings()
+tracer = get_tracer()
 
 
 @dataclass
@@ -47,8 +49,7 @@ class TokenBudgetGuard:
 
 class OutputParser:
     """
-    Parses LLM output with automatic retry.
-    Wraps instructor for Pydantic validation.
+    Parses LLM output with automatic retry using chat_structured.
     """
 
     def __init__(self, max_retries: int = 3):
@@ -56,47 +57,27 @@ class OutputParser:
 
     async def parse(
         self,
-        llm_call: Callable,
-        expected_type: type,
-        **llm_kwargs,
+        messages: list[dict],
+        response_model: type,
+        role: str = "skills",
+        model: str | None = None,
+        temperature: float = 0.3,
     ) -> Any:
         """
         Call LLM and parse response into Pydantic model.
         Retries on parse failure.
         """
-        import instructor
-        from openai import AsyncOpenAI
         from app.agents.llm import get_llm_client
 
         client = get_llm_client()
-
-        try:
-            instructor_client = instructor.from_openai(client.client)
-
-            response = await instructor_client.chat.completions.create(
-                messages=llm_kwargs.get("messages", []),
-                model=llm_kwargs.get("model", "gpt-4o"),
-                response_model=expected_type,
-                max_retries=self.max_retries,
-                temperature=llm_kwargs.get("temperature", 0.3),
-            )
-            return response
-
-        except Exception as e:
-            # Fallback: parse JSON manually
-            content = await self._raw_call(client, **llm_kwargs)
-            try:
-                import json
-                data = json.loads(content)
-                return expected_type(**data)
-            except Exception:
-                raise ValueError(f"Failed to parse output: {str(e)}")
-
-    async def _raw_call(self, client, **kwargs) -> str:
-        """Make a raw LLM call and return content."""
-        from app.agents.llm import get_llm_client
-        result = await client.chat(**kwargs)
-        return result["content"]
+        return await client.chat_structured(
+            messages=messages,
+            response_model=response_model,
+            role=role,
+            model=model,
+            temperature=temperature,
+            max_retries=self.max_retries,
+        )
 
 
 @dataclass

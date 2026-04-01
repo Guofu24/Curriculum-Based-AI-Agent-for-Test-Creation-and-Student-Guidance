@@ -1,4 +1,4 @@
-"""Document schemas - aligned with frontend's API expectations."""
+"""Document schemas — aligned with spec and updated model."""
 
 from pydantic import BaseModel, Field
 from uuid import UUID
@@ -6,154 +6,202 @@ from datetime import datetime
 from typing import Any, Literal
 
 
-# ── Curriculum ─────────────────────────────────────────────────────────────────
-
-class CurriculumNode(BaseModel):
-    """Schema matching frontend's CurriculumNode interface."""
-    id: str | None = None
-    title: str
-    section_type: str = "topic"
-    section_order: int = 0
-    chapter_number: int = 0
-    page_from: int | None = None
-    page_to: int | None = None
-    scope_label: str | None = None
-    summary: str | None = None
-    metadata: dict | None = None
-    children: list["CurriculumNode"] = []
-
-
-class CurriculumNodeResponse(BaseModel):
-    """Schema matching the response type for curriculum nodes."""
-    id: str | None = None
-    title: str
-    section_type: str = "topic"
-    section_order: int = 0
-    chapter_number: int = 0
-    page_from: int | None = None
-    page_to: int | None = None
-    scope_label: str | None = None
-    summary: str | None = None
-    metadata: dict | None = None
-    children: list["CurriculumNodeResponse"] = []
-
-
-class CurriculumTreePatchRequest(BaseModel):
-    """Schema for patching curriculum tree."""
-    curriculum_tree: list[CurriculumNodeResponse]
-
-
-# ── Document Responses ─────────────────────────────────────────────────────────
+# ── Upload Response ────────────────────────────────────────────────────────────
 
 class DocumentUploadResponse(BaseModel):
-    """Schema for document upload response."""
-    document_id: UUID
-    message: str = "Document uploaded successfully"
-    s3_key: str
+    """
+    Response from POST /api/v1/documents/upload.
 
+    - **document_id**: UUID of the newly created document record
+    - **s3_key**: S3 object key where the file is stored
+    - **message**: Confirmation message
+
+    After upload, poll GET /documents/{id}/status until status='completed'.
+    """
+    document_id: UUID = Field(..., description="UUID of the newly created document record.")
+    message: str = Field(
+        default="Document uploaded. Processing started in background.",
+        description="Confirmation message.",
+    )
+    s3_key: str = Field(..., description="S3 object key where the file is stored.")
+
+
+# ── Heading Tree (spec format: chapters/sections/subsections) ─────────────────
+
+class SubsectionSchema(BaseModel):
+    """Subsection within a section."""
+    section_id: str
+    title: str
+
+
+class SectionSchema(BaseModel):
+    """Section within a chapter."""
+    section_id: str
+    title: str
+    subsections: list[SubsectionSchema] = []
+
+
+class ChapterSchema(BaseModel):
+    """Chapter in the heading tree."""
+    chapter_id: str
+    title: str
+    sections: list[SectionSchema] = []
+
+
+class HeadingTree(BaseModel):
+    """Document heading tree per spec format."""
+    chapters: list[ChapterSchema] = []
+
+
+# ── Document Responses ────────────────────────────────────────────────────────
 
 class DocumentListItem(BaseModel):
-    """Schema matching frontend's DocumentListItem."""
-    id: str
-    course_id: str | None = None
-    title: str
-    file_name: str
-    file_type: str
-    file_size: int = 0
-    status: str
-    version: int = 1
-    total_pages_or_slides: int = 0
-    total_chunks: int = 0
-    chapter_count: int | None = None
-    created_at: datetime
-    updated_at: datetime | None = None
+    """
+    Document summary in list view.
 
-
-class DocumentListResponse(BaseModel):
-    """Schema for document list response."""
-    items: list[DocumentListItem]
-    total: int
-    page: int = 1
-    limit: int = 20
+    - **id**: Document UUID
+    - **title**: Document title (derived from filename without extension)
+    - **processing_status**: One of 'pending', 'processing', 'completed', 'failed'
+    - **total_chapters**: Number of chapters detected in the document
+    - **total_pages_or_slides**: Total pages (PDF/DOCX) or slides (PPTX)
+    - **total_chunks**: Number of text chunks stored in Pinecone
+    """
+    id: str = Field(..., description="Document UUID.")
+    title: str = Field(..., description="Document title derived from filename.")
+    original_filename: str = Field(..., description="Original uploaded filename.")
+    file_type: str = Field(..., description="File type: 'pdf', 'docx', or 'pptx'.")
+    file_size: int = Field(default=0, description="File size in bytes.")
+    processing_status: str = Field(
+        ...,
+        description="Processing status: 'pending', 'processing', 'completed', or 'failed'.",
+    )
+    total_chapters: int | None = Field(
+        None,
+        description="Number of chapters detected in the heading_tree.",
+    )
+    total_pages_or_slides: int = Field(
+        default=0,
+        description="Total pages (PDF/DOCX) or slides (PPTX).",
+    )
+    total_chunks: int = Field(
+        default=0,
+        description="Number of text chunks indexed in Pinecone.",
+    )
+    uploaded_at: datetime
 
 
 class DocumentDetail(BaseModel):
-    """Schema matching frontend's Document."""
-    id: str
-    course_id: str | None = None
-    title: str
-    file_name: str
-    file_type: str
-    file_size: int = 0
-    file_hash: str | None = None
-    file_storage_url: str | None = None
-    language: str | None = "vi"
-    status: str
-    version: int = 1
-    total_pages_or_slides: int = 0
-    total_chunks: int = 0
-    created_at: datetime
-    updated_at: datetime | None = None
-    curriculum_tree: list[CurriculumNode] = []
+    """
+    Full document detail including heading_tree.
+
+    - **heading_tree**: Hierarchical structure of chapters, sections, and subsections
+      detected from the document. Used for scope selection during exam generation.
+    - **s3_key**: Internal S3 object key (not a public URL)
+    """
+    id: str = Field(..., description="Document UUID.")
+    title: str = Field(..., description="Document title derived from filename.")
+    original_filename: str = Field(..., description="Original uploaded filename.")
+    file_type: str = Field(..., description="File type: 'pdf', 'docx', or 'pptx'.")
+    file_size: int = Field(default=0, description="File size in bytes.")
+    s3_key: str | None = Field(None, description="Internal S3 object key.")
+    processing_status: str = Field(
+        ...,
+        description="Processing status: 'pending', 'processing', 'completed', or 'failed'.",
+    )
+    parse_error_message: str | None = Field(
+        None,
+        description="Error message if processing failed.",
+    )
+    heading_tree: HeadingTree | None = Field(
+        None,
+        description="Hierarchical heading structure. Use this for scope selection.",
+    )
+    total_chapters: int | None = Field(
+        None,
+        description="Number of chapters in the heading_tree.",
+    )
+    total_pages_or_slides: int = Field(
+        default=0,
+        description="Total pages (PDF/DOCX) or slides (PPTX).",
+    )
+    total_chunks: int = Field(
+        default=0,
+        description="Number of text chunks indexed in Pinecone.",
+    )
+    uploaded_at: datetime
 
 
 class DocumentResponse(BaseModel):
-    """Schema for document response matching frontend's Document interface."""
-    id: str
-    course_id: str | None = None
-    title: str
-    file_name: str
-    file_type: str
-    file_size: int = 0
-    file_hash: str | None = None
-    file_storage_url: str | None = None
-    language: str | None = "vi"
-    status: str
-    version: int = 1
-    total_pages_or_slides: int = 0
-    total_chunks: int = 0
-    chapter_count: int | None = None
-    created_at: datetime
-    updated_at: datetime | None = None
-    curriculum_tree: list[CurriculumNodeResponse] = []
+    """
+    Document response schema — alias of DocumentDetail matching the frontend Document interface.
+    """
+    id: str = Field(..., description="Document UUID.")
+    title: str = Field(..., description="Document title derived from filename.")
+    original_filename: str = Field(..., description="Original uploaded filename.")
+    file_type: str = Field(..., description="File type: 'pdf', 'docx', or 'pptx'.")
+    file_size: int = Field(default=0, description="File size in bytes.")
+    processing_status: str = Field(..., description="Processing status.")
+    total_chapters: int | None = Field(None, description="Number of chapters.")
+    total_pages_or_slides: int = Field(default=0, description="Total pages or slides.")
+    total_chunks: int = Field(default=0, description="Number of Pinecone chunks.")
+    uploaded_at: datetime = Field(..., description="Upload timestamp (UTC).")
+    heading_tree: HeadingTree | None = Field(
+        None,
+        description="Hierarchical heading structure for scope selection.",
+    )
 
+
+class DocumentListResponse(BaseModel):
+    """
+    Paginated document list response.
+
+    - **items**: List of DocumentListItem for the current page
+    - **total**: Total number of documents across all pages
+    - **page**: Current page number (1-indexed)
+    - **limit**: Items per page
+    """
+    items: list[DocumentListItem]
+    total: int = Field(..., description="Total number of documents across all pages.")
+    page: int = Field(default=1, description="Current page number (1-indexed).")
+    limit: int = Field(default=20, description="Number of items per page.")
+
+
+# ── Processing Status ─────────────────────────────────────────────────────────
 
 class DocumentStatus(BaseModel):
-    """Schema matching frontend's DocumentStatus."""
-    id: str
-    course_id: str | None = None
-    status: str
-    parse_error_message: str | None = None
-    total_pages_or_slides: int = 0
-    total_chunks: int = 0
-    updated_at: datetime | None = None
+    """
+    Document processing status returned by GET /documents/{id}/status.
+
+    - **processing_status**: Current state: 'pending', 'processing', 'completed', 'failed'
+    """
+    id: str = Field(..., description="Document UUID.")
+    processing_status: str = Field(
+        ...,
+        description="Processing status: 'pending', 'processing', 'completed', or 'failed'.",
+    )
+    parse_error_message: str | None = Field(None, description="Error message if failed.")
+    total_pages_or_slides: int = Field(default=0, description="Total pages or slides.")
+    total_chunks: int = Field(default=0, description="Number of Pinecone chunks.")
+    uploaded_at: datetime | None = Field(None, description="Upload timestamp (UTC).")
 
 
-class DocumentStatusResponse(BaseModel):
-    """Schema for document status response."""
-    id: str
-    course_id: str | None = None
-    status: str
-    parse_error_message: str | None = None
-    total_pages_or_slides: int = 0
-    total_chunks: int = 0
-    updated_at: datetime | None = None
+# ── Scope / Flattened Tree ────────────────────────────────────────────────────
+
+class ScopeUnit(BaseModel):
+    """Flattened scope unit for scope selection."""
+    id: str = Field(..., description="Unique identifier for this scope unit.")
+    title: str = Field(..., description="Display title.")
+    level: int = Field(..., description="Scope level: 1=chapter, 2=section, 3=subsection.")
+    chapter_id: str = Field(..., description="Parent chapter ID.")
+    path: str = Field(..., description="Human-readable path: 'Chapter > Section > Subsection'.")
 
 
-# ── Scope ──────────────────────────────────────────────────────────────────────
+# ── Refresh URL Response ───────────────────────────────────────────────────────
 
-class ScopeUnitPayload(BaseModel):
-    """Schema matching frontend's ScopeUnitPayload."""
-    scope_id: str | None = None
-    section_id: str | None = None
-    scope_type: str = "topic"
-    title: str | None = None
-    chapter_number: int = 0
-    page_from: int | None = None
-    page_to: int | None = None
-    tags: list[str] = []
-
-
-class DocumentUpdateTreeRequest(BaseModel):
-    """Schema for updating curriculum tree."""
-    curriculum_tree: list[CurriculumNode]
+class RefreshUrlResponse(BaseModel):
+    """Response from GET /documents/{id}/refresh-url (G20)."""
+    presigned_url: str = Field(
+        ...,
+        description="Fresh presigned S3 URL. Valid for 3600 seconds (1 hour).",
+    )
+    expires_in: int = Field(default=3600, description="URL validity in seconds.")

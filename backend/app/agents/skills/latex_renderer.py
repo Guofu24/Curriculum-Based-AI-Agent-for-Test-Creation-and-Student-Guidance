@@ -1,14 +1,16 @@
 """LaTeX renderer skill for formula display."""
 
 import re
-import html
+from app.observability.tracer import get_tracer
 
 
 class LatexRendererSkill:
     """
     Renders formulas to LaTeX with display and unicode fallbacks.
+    Uses regex rules — no LLM needed.
     """
 
+    @get_tracer().skill_span("latex_renderer")
     def render(self, raw_formula: str, context: str = "") -> dict:
         """
         Convert raw formula to LaTeX, display LaTeX, and unicode fallback.
@@ -20,13 +22,8 @@ class LatexRendererSkill:
                 "unicode_fallback": "F = m·a",
             }
         """
-        # Clean the formula
         latex = self._clean_latex(raw_formula)
-
-        # Create display version
         display_latex = f"\\[ {latex} \\]"
-
-        # Create unicode fallback
         unicode_fallback = self._to_unicode(latex)
 
         return {
@@ -39,11 +36,9 @@ class LatexRendererSkill:
         """Clean and normalize LaTeX formula."""
         formula = formula.strip()
 
-        # Remove display delimiters if present
         formula = re.sub(r"^\$\$|\$$", "", formula)
         formula = re.sub(r"^\$|\$$", "", formula)
 
-        # Common LaTeX replacements
         replacements = [
             ("\\cdot", "·"),
             ("\\times", "×"),
@@ -74,7 +69,6 @@ class LatexRendererSkill:
         for latex_sym, unicode_sym in replacements:
             cleaned = cleaned.replace(latex_sym, unicode_sym)
 
-        # Clean extra braces
         cleaned = re.sub(r"\{([^{}]*)\}", r"\1", cleaned)
 
         return cleaned.strip()
@@ -84,13 +78,14 @@ class LatexRendererSkill:
         return latex
 
     def to_html(self, formula: str, display: bool = True) -> str:
-        """
-        Convert LaTeX to HTML with KaTeX-style rendering.
-        For use in web rendering.
-        """
+        """Convert LaTeX to HTML with KaTeX-style rendering."""
         latex = self._clean_latex(formula)
 
         if display:
             return f'<div class="math-display">{latex}</div>'
         else:
             return f'<span class="math-inline">{latex}</span>'
+
+    def run(self, raw_formula: str, context: str = "") -> dict:
+        """Alias for render() to match skill interface."""
+        return self.render(raw_formula, context)

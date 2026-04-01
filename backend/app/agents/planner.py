@@ -6,9 +6,11 @@ from typing import Any
 
 from app.agents.base import AgentBaseOutput, AgentStatus, AgentMetrics, TokenUsage, PlannerOutput
 from app.agents.llm import get_llm_client
+from app.observability.tracer import get_tracer
 from app.core.config import get_settings
 
 settings = get_settings()
+tracer = get_tracer()
 
 
 class PlanStep:
@@ -100,6 +102,7 @@ Output format:
     def __init__(self):
         self.llm = get_llm_client()
 
+    @tracer.agent_span("planner_agent")
     async def create_plan(
         self,
         user_request: str,
@@ -148,16 +151,12 @@ Tạo execution plan:"""
                     {"role": "system", "content": self.PLANNER_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                model=settings.OPENAI_MODEL_PLANNER,
-                response_format={"type": "json_object"},
+                role="planner",
                 max_tokens=2000,
                 temperature=0.2,
             )
 
-            metrics.prompt_tokens = response["usage"]["prompt_tokens"]
-            metrics.completion_tokens = response["usage"]["completion_tokens"]
-
-            result = json.loads(response["content"])
+            result = json.loads(response)
 
             plan_data = result.get("plan", [])
             plan = [
@@ -210,26 +209,16 @@ Tạo execution plan:"""
 
     def is_complex_request(self, user_prompt: str, exam_config: dict) -> bool:
         """
-        Determine if request is complex enough to need Planner Agent.
-        Simple requests use the default plan directly.
+        G6: Determine if request is complex enough to need Planner Agent.
+        Returns True when sum(signals) >= 2.
         """
-        complexity_indicators = [
-            "thực tế", "ứng dụng", "nâng cao", "phức tạp",
-            "nhiều", "ít", "tập trung", "giảm bớt",
-            "làm lại", "thay đổi", "điều chỉnh",
-            "bài toán", "vấn đề", "tình huống",
+        signals = [
+            len(user_prompt) > 200,
+            any(kw in user_prompt for kw in ["tập trung", "thực tế", "ưu tiên", "hạn chế", "tránh"]),
+            exam_config.get("extra_instructions") not in (None, ""),
+            exam_config.get("bloom_distribution") is not None and len(user_prompt) > 100,
         ]
-
-        prompt_lower = user_prompt.lower()
-        count = sum(1 for indicator in complexity_indicators if indicator in prompt_lower)
-
-        # Complex if has many indicators or specific config overrides
-        has_many_indicators = count >= 3
-        has_special_bloom = any(
-            v > 40 for v in exam_config.get("bloom_distribution", {}).values()
-        )
-
-        return has_many_indicators or has_special_bloom
+        return sum(signals) >= 2
 
     def get_default_plan(self) -> list[dict]:
         """Get the default execution plan."""

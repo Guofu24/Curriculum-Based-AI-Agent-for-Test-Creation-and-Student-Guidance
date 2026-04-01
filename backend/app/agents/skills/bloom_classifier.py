@@ -1,9 +1,9 @@
 """Bloom's Taxonomy classifier skill."""
 
 import json
-from pydantic import BaseModel
 from typing import Literal
 from app.agents.llm import get_llm_client
+from app.observability.tracer import get_tracer
 
 
 class BloomClassifierSkill:
@@ -48,6 +48,7 @@ Trả về JSON:
   "reasoning": "Giải thích ngắn tại sao chọn mức này"
 }"""
 
+    @get_tracer().skill_span("bloom_classifier")
     async def classify(
         self,
         question_stem: str,
@@ -65,14 +66,14 @@ Trả về JSON:
         ]
 
         try:
-            response = await client.client.chat.completions.create(
-                model="gpt-4o-mini",
+            response = await client.chat(
                 messages=messages,
-                response_format={"type": "json_object"},
+                role="skills",
                 max_tokens=300,
+                temperature=0.1,
             )
 
-            result = json.loads(response.choices[0].message.content)
+            result = json.loads(response)
 
             return {
                 "bloom_level": result.get("bloom_level", "thong_hieu"),
@@ -81,28 +82,33 @@ Trả về JSON:
             }
 
         except Exception as e:
-            # Fallback: simple keyword matching
             return self._fallback_classify(question_stem)
 
     def _fallback_classify(self, question_stem: str) -> dict:
         """Fallback keyword-based classification."""
         stem_lower = question_stem.lower()
 
-        # van_dung_cao keywords
         high_keywords = ["phân tích", "đánh giá", "so sánh và nhận xét", "thiết kế",
                          "nhiều công thức", "hệ vật", "tổng hợp"]
         if any(kw in stem_lower for kw in high_keywords):
             return {"bloom_level": "van_dung_cao", "confidence": 0.6, "reasoning": "Keyword match"}
 
-        # van_dung keywords
         app_keywords = ["tính toán", "giải", "xác định", "vận dụng", "bài toán",
                        "chuyển động", "tìm", "cho biết"]
         if any(kw in stem_lower for kw in app_keywords):
             return {"bloom_level": "van_dung", "confidence": 0.5, "reasoning": "Keyword match"}
 
-        # thong_hieu keywords
         comp_keywords = ["giải thích", "so sánh", "phân biệt", "mô tả", "áp dụng công thức"]
         if any(kw in stem_lower for kw in comp_keywords):
             return {"bloom_level": "thong_hieu", "confidence": 0.5, "reasoning": "Keyword match"}
 
         return {"bloom_level": "nhan_biet", "confidence": 0.4, "reasoning": "Default fallback"}
+
+    async def run(
+        self,
+        question_stem: str,
+        question_type: Literal["mcq", "essay"] = "mcq",
+        subject: str = "general",
+    ) -> dict:
+        """Alias for classify() to match skill interface."""
+        return await self.classify(question_stem, question_type, subject)

@@ -30,8 +30,8 @@ def _run_document_task(document_id: str) -> dict:
 
                 result = await service.process_document(uuid.UUID(document_id))
 
-                # Handle both "processed" and "completed" status values
-                if result.get("status") in ("completed", "processed"):
+                # Handle "completed" vs "failed" status
+                if result.get("processing_status") == "completed":
                     await manager.emit(
                         f"doc:{document_id}",
                         SSEvent.progress(100, "Hoàn thành xử lý!")

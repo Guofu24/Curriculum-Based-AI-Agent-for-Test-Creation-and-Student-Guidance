@@ -2,12 +2,16 @@
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, JSON, Text
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from typing import Optional, TYPE_CHECKING
+
+from sqlalchemy import String, Text, DateTime, ForeignKey, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.user import User
 
 
 class TeacherPreference(Base):
@@ -15,12 +19,15 @@ class TeacherPreference(Base):
 
     __tablename__ = "teacher_preferences"
 
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
-    preferred_bloom_distribution = Column(JSON, nullable=True)  # Default bloom distribution
-    preferred_exam_types = Column(JSON, nullable=True)  # mcq/essay/mixed ratios
-    subject_focus = Column(String(100), nullable=True)  # physics, math, etc.
-    style_notes = Column(Text, nullable=True)  # Agent-written style preference notes
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    preferred_bloom_distribution: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    preferred_exam_types: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    subject_focus: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    style_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
-    # Relationships
-    user = relationship("User", back_populates="preferences")
+    user: Mapped["User"] = relationship("User", back_populates="preferences")

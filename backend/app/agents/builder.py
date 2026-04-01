@@ -10,10 +10,14 @@ from app.agents.llm import get_llm_client
 from app.agents.guardrails import GuardrailsPipeline, ScopeGuard
 from app.agents.skills.bloom_classifier import BloomClassifierSkill
 from app.agents.skills.dedup_checker import DedupCheckerSkill
+from app.agents.skills.difficulty_estimator import DifficultyEstimatorSkill
 from app.agents.skills.latex_renderer import LatexRendererSkill
+from app.observability.tracer import get_tracer
+from app.utils.search import search_similar_problems
 from app.core.config import get_settings
 
 settings = get_settings()
+tracer = get_tracer()
 
 
 class BuilderAgent:
@@ -89,9 +93,11 @@ Trả về JSON:
         self.guardrails = GuardrailsPipeline()
         self.bloom_skill = BloomClassifierSkill()
         self.dedup_skill = DedupCheckerSkill()
+        self.difficulty_skill = DifficultyEstimatorSkill()
         self.latex_skill = LatexRendererSkill()
         self.redis = redis_client
 
+    @tracer.agent_span("builder_agent")
     async def build(
         self,
         blueprint: list[dict],
@@ -219,12 +225,34 @@ Trả về JSON:
         # Build prompt for this chunk
         blueprint_json = json.dumps(chunk, ensure_ascii=False, indent=2)
 
+        # G4: For van_dung_cao slots, fetch web search context
+        van_dung_cao_slots = [s for s in chunk if s.get("bloom_level") == "van_dung_cao"]
+        search_context = ""
+        if van_dung_cao_slots:
+            for slot in van_dung_cao_slots:
+                topic = slot.get("topic_hint", "")
+                if topic:
+                    try:
+                        search_results = await search_similar_problems(
+                            query=f"{topic} bài toán vận dụng cao vật lý",
+                            subject="physics",
+                            num_results=3,
+                        )
+                        if search_results:
+                            refs = "\n".join(
+                                f"- {r['title']}: {r['snippet']}" for r in search_results
+                            )
+                            search_context += f"\n## Bối cảnh mở rộng cho '{topic}':\n{refs}\n"
+                    except Exception:
+                        pass  # Non-blocking search failure
+
         user_prompt = f"""Sinh câu hỏi cho các blueprint slots sau:
 
 {blueprint_json}
 
 ## Kiến thức nền (chỉ dùng kiến thức từ đây):
 {context[:8000]}
+{search_context}
 
 ## Ràng buộc:
 {scope_restriction}
@@ -240,14 +268,54 @@ Sinh câu hỏi:"""
                     {"role": "system", "content": self.BUILDER_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                model=settings.OPENAI_MODEL_BUILDER,
-                response_format={"type": "json_object"},
+                role="builder",
                 max_tokens=8000,
                 temperature=0.7,
             )
 
-            result = json.loads(response["content"])
+            result = json.loads(response)
             questions = result.get("questions", [])
+
+            # G4: Apply skill pipeline to each generated question
+            for q in questions:
+                # bloom_classifier.run()
+                try:
+                    bloom_result = await self.bloom_skill.run(
+                        question_stem=q.get("stem", ""),
+                        question_type=q.get("type", "mcq"),
+                    )
+                    q["bloom_classified"] = bloom_result.get("bloom_level")
+                except Exception:
+                    pass
+
+                # difficulty_estimator.run()
+                try:
+                    diff_result = await self.difficulty_skill.run(
+                        question_stem=q.get("stem", ""),
+                        bloom_level=q.get("bloom_level", "thong_hieu"),
+                    )
+                    q["difficulty_score"] = diff_result.get("difficulty_score", 0.5)
+                except Exception:
+                    pass
+
+                # dedup_checker.run()
+                try:
+                    dedup_result = await self.dedup_skill.run(
+                        new_question_topic=q.get("stem", ""),
+                        existing_topics=topics_used,
+                    )
+                    if dedup_result.get("is_duplicate"):
+                        q["dedup_warning"] = dedup_result.get("suggestion")
+                except Exception:
+                    pass
+
+                # latex_renderer.run() for formula content
+                if q.get("latex_content"):
+                    try:
+                        latex_result = self.latex_skill.run(raw_formula=q["latex_content"])
+                        q["latex_rendered"] = latex_result
+                    except Exception:
+                        pass
 
             return questions, warnings
 

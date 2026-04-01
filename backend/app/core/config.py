@@ -1,11 +1,20 @@
 """Configuration management using Pydantic Settings."""
 
-from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings
+from pydantic_settings import SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra="ignore",
+    )
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/curriculum_ai"
@@ -14,14 +23,36 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
 
-    # OpenAI
+    # LLM Provider
+    LLM_PROVIDER: str = "groq"
+    LLM_FALLBACK_CHAIN: str = "groq,g4f"
+
+    @property
+    def fallback_providers(self) -> list[str]:
+        """Parse fallback chain from comma-separated string."""
+        if not self.LLM_FALLBACK_CHAIN:
+            return []
+        return [p.strip() for p in self.LLM_FALLBACK_CHAIN.split(",") if p.strip()]
+
+    # Model routing
+    LLM_MODEL_STRONG: str = "llama-3.3-70b-versatile"
+    LLM_MODEL_LIGHT: str = "llama-3.1-8b-instant"
+    LLM_MODEL_VISION: str = "llama-3.2-11b-vision-preview"
+
+    # Provider API keys
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
-    OPENAI_MODEL_ORCHESTRATOR: str = "gpt-4o"
-    OPENAI_MODEL_BUILDER: str = "gpt-4o"
-    OPENAI_MODEL_VALIDATOR: str = "gpt-4o"
-    OPENAI_MODEL_PLANNER: str = "gpt-4o-mini"
-    OPENAI_MODEL_RERANKER: str = "gpt-4o-mini"
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_APP_NAME: str = "curriculum-ai-agent"
+    GROQ_API_KEY: str = ""
+    ANTHROPIC_API_KEY: str = ""
+
+    # Ollama
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL_STRONG: str = "llama3.2"
+    OLLAMA_MODEL_LIGHT: str = "llama3.2"
+
+    # OpenAI embedding (kept separate, still needed for RAG)
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-large"
     OPENAI_EMBEDDING_DIM: int = 3072
 
@@ -58,6 +89,7 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     DEBUG: bool = False
+    DEMO_MODE: bool = False
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
@@ -80,9 +112,18 @@ class Settings(BaseSettings):
     RAG_CHUNK_OVERLAP: int = 200
     EMBEDDING_CACHE_TTL_SECONDS: int = 604800  # 7 days
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def _coerce_debug(cls, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "debug", "development"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "release", "prod", "production"}:
+                return False
+        return value
 
 
 @lru_cache

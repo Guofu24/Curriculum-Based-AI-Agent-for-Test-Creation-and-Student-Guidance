@@ -14,11 +14,9 @@ from app.core.database import Base
 from app.models import (
     User,
     RefreshToken,
-    Course,
     Document,
     Exam,
-    ExamVersion,
-    FeedbackEvent,
+    ExamHistory,
     TeacherPreference,
 )
 

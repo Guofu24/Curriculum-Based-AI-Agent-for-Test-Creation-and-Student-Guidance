@@ -6,6 +6,10 @@
 .env.*.local
 backend/.env
 backend/.env.local
+UI/.env.local
+UI/.env.development.local
+UI/.env.test.local
+UI/.env.production.local
 
 # Python
 __pycache__/
@@ -22,10 +26,17 @@ dist/
 venv/
 env/
 .conda/
+.python-version
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
 .coverage
+.coverage.*
 htmlcov/
+.ipynb_checkpoints/
 
 # Node and Next.js
 node_modules/
@@ -33,27 +44,40 @@ UI/node_modules/
 UI/.next/
 UI/out/
 UI/.turbo/
+UI/coverage/
+UI/.eslintcache
 UI/tsconfig.tsbuildinfo
+UI/.pnpm-store/
 .pnp
 .pnp.js
 .pnp.cjs
 
-# Data and uploads
+# Backend runtime data
 backend/data/uploads/
-*.pdf
-*.docx
-*.pptx
+backend/uploads/
+backend/temp/
+backend/evals/output/
+celerybeat-schedule
+celerybeat.pid
+
+# Large local source assets
+Data sách/*.pdf
+Data sách/*.doc
+Data sách/*.docx
+Data sách/*.ppt
+Data sách/*.pptx
 
 # Databases
 *.db
 *.sqlite3
 
-# Eval outputs
-backend/evals/output/
-
 # Logs
 *.log
 logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # IDE and editors
 .vscode/
