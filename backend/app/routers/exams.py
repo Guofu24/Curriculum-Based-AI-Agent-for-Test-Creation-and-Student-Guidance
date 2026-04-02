@@ -9,6 +9,7 @@ from datetime import date
 
 from app.core.database import get_db
 from app.core.redis_client import get_redis_client, RedisClient
+from app.core.config import get_settings
 from app.services.exam_service import ExamService, ExamServiceError
 from app.schemas.exam import (
     ExamConfigRequest,
@@ -62,6 +63,11 @@ def _exam_to_list_item(exam) -> dict:
     mcq_count = sum(1 for q in questions if q.get("type") == "mcq" or q.get("question_type") == "mcq")
     essay_count = sum(1 for q in questions if q.get("type") == "essay" or q.get("question_type") == "essay")
 
+    # chapters: FE expects number[] but backend stores string[].
+    # Return both for compatibility.
+    chapters_str: list[str] = exam.chapters or []
+    chapters_num: list[int] = [i + 1 for i in range(len(chapters_str))]
+
     return {
         "id": str(exam.id),
         "title": exam.title,
@@ -70,7 +76,8 @@ def _exam_to_list_item(exam) -> dict:
         "exam_type": exam.exam_type or "mixed",
         "difficulty": exam.difficulty or "medium",
         "status": exam.status or "draft",
-        "chapters": exam.chapters or [],
+        "chapters": chapters_str,  # backend format (string titles)
+        "chapters_num": chapters_num,  # FE compatibility (number indices)
         "total_questions": exam.total_questions or mcq_count + essay_count,
         "strict_scope_flag": exam.strict_scope_flag if exam.strict_scope_flag is not None else True,
         "quality_score": float(exam.quality_score) if exam.quality_score else None,
@@ -90,6 +97,9 @@ def _exam_to_list_item(exam) -> dict:
 def _exam_to_detail(exam, versions=None, feedback_events=None) -> dict:
     """Convert Exam model to dict matching frontend's Exam interface."""
     questions = exam.questions or []
+    chapters_str: list[str] = exam.chapters or []
+    chapters_num: list[int] = [i + 1 for i in range(len(chapters_str))]
+
     return {
         "id": str(exam.id),
         "title": exam.title,
@@ -98,7 +108,8 @@ def _exam_to_detail(exam, versions=None, feedback_events=None) -> dict:
         "exam_type": exam.exam_type or "mixed",
         "difficulty": exam.difficulty or "medium",
         "status": exam.status or "draft",
-        "chapters": exam.chapters or [],
+        "chapters": chapters_str,  # backend format (string titles)
+        "chapters_num": chapters_num,  # FE compatibility (number indices)
         "variant_number": exam.variant_number or 1,
         "total_questions": exam.total_questions or len(questions),
         "instructions": exam.instructions,
@@ -256,7 +267,7 @@ async def generate_exam(
         exam_id=exam.id,
         job_id=job_id,
         message="Exam generation started.",
-        websocket_url=f"ws://localhost:8000/ws/exam/{exam.id}",
+        websocket_url=f"{get_settings().ws_base_url}/ws/exam/{exam.id}",
     )
 
 
@@ -555,9 +566,12 @@ async def edit_question(
     """Edit a single question (inline edit)."""
     service = ExamService(db, redis)
     try:
-        await service.update_question(exam_id, question_id, request.updates)
+        await service.update_question(exam_id, question_id, request.updates, current_user.id)
     except ExamServiceError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        error_msg = str(e)
+        if "Access denied" in error_msg:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error_msg)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_msg)
     return {"message": "Question updated"}
 
 
@@ -626,7 +640,7 @@ async def regenerate_exam(
     if not exam:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
 
-    await service.regenerate_questions(exam_id, question_ids)
+    await service.regenerate_questions(exam_id, question_ids, current_user.id)
     # Pass question_ids so the orchestrator knows which questions to regenerate
     generate_exam_task.delay(
         exam_id=str(exam_id),

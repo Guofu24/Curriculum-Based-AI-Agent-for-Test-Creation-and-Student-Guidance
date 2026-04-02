@@ -41,7 +41,7 @@ async function authorizedFetch(
   }
 
   const response = await fetch(`${API_URL}${path}`, { ...options, headers });
-  if (response.status !== 401 || !allowRefresh || path === "/auth/refresh-token") {
+  if (response.status !== 401 || !allowRefresh || path === "/auth/refresh") {
     return response;
   }
 
@@ -71,7 +71,7 @@ async function refreshAccessToken(): Promise<string | null> {
   if (!refreshPromise) {
     refreshPromise = (async () => {
       try {
-        const response = await fetch(`${API_URL}/auth/refresh-token`, {
+        const response = await fetch(`${API_URL}/auth/refresh`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -425,7 +425,7 @@ export interface Exam {
   exam_type: string;
   difficulty: string;
   status: string;
-  chapters: number[];
+  chapters: string[];
   variant_number: number;
   total_questions: number;
   instructions?: string | null;
@@ -458,7 +458,7 @@ export interface ExamListItem {
   exam_type: string;
   difficulty: string;
   status: string;
-  chapters: number[];
+  chapters: string[];
   total_questions: number;
   strict_scope_flag: boolean;
   quality_score?: number | null;
@@ -615,7 +615,7 @@ export interface ScopeUnitPayload {
 export interface ExamGenerationRequest {
   document_id?: string;
   course_id?: string;
-  chapters: number[];
+  chapters: string[];
   scope: ScopeUnitPayload[];
   prompt: string;
   instructions?: string;
@@ -692,7 +692,7 @@ export const auth = {
   },
 
   refreshToken(refreshToken: string) {
-    return request<{ access_token: string; token_type: string; expires_in: number }>("/auth/refresh-token", {
+    return request<{ access_token: string; token_type: string; expires_in: number }>("/auth/refresh", {
       method: "POST",
       body: JSON.stringify({ refresh_token: refreshToken }),
     });
@@ -864,84 +864,44 @@ export const exams = {
 };
 
 export const generation = {
-  generate(data: ExamGenerationRequest) {
-    return request<Exam>("/generate/exam", {
+  generate(data: ExamGenerationRequest): Promise<Exam & { job_id: string; websocket_url: string; message: string }> {
+    return request<Exam & { job_id: string; websocket_url: string; message: string }>("/generate/exam", {
       method: "POST",
       body: JSON.stringify(data),
     });
   },
 
-  generateStream(
-    data: ExamGenerationRequest,
-    onStep: (step: GenerationStep) => void,
-    onComplete: (exam: Exam) => void,
-    onError: (error: string) => void,
-  ): () => void {
-    const controller = new AbortController();
-
-    void (async () => {
-      try {
-        const res = await authorizedFetch("/generate/exam/stream", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(data),
-          signal: controller.signal,
-        });
-
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          onError(body.detail || res.statusText);
-          return;
-        }
-
-        const reader = res.body?.getReader();
-        if (!reader) {
-          onError("No response body");
-          return;
-        }
-
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const payload = line.slice(6).trim();
-            if (!payload) continue;
-
-            try {
-              const parsed = JSON.parse(payload) as GenerationStep & { type?: string; exam_id?: string; questions?: Question[] };
-              if (parsed?.type === "complete" && parsed?.exam_id) {
-                onComplete({ id: parsed.exam_id } as Exam);
-              } else if (parsed?.type === "error") {
-                onError(parsed.message || "Generation failed");
-              } else if (parsed.questions) {
-                onComplete(parsed as unknown as Exam);
-              } else {
-                onStep(parsed as GenerationStep);
-              }
-            } catch {
-              // Ignore malformed lines from the stream.
-            }
-          }
-        }
-      } catch (error: unknown) {
-        if (error instanceof Error && error.name !== "AbortError") {
-          onError(error.message);
-        }
-      }
-    })();
-
-    return () => controller.abort();
+  /**
+   * Connect to the exam generation WebSocket for real-time progress.
+   *
+   * Usage:
+   *   const gen = generation.connect(websocketUrl);
+   *   gen.on("plan_step", (data) => { ... });
+   *   gen.on("question_generated", (data) => { ... });
+   *   gen.on("hitl_checkpoint", (data) => { ... });
+   *   gen.on("validation_result", (data) => { ... });
+   *   gen.on("completed", (data) => { ... });
+   *   gen.on("error", (data) => { ... });
+   *   gen.connect();
+   *
+   * Returns a GenerationClient with event handlers and lifecycle methods.
+   * The client automatically replays stored events from Redis on connect (G19).
+   */
+  connect(
+    websocketUrl: string,
+    handlers: {
+      onPlanStep?: (data: { step: number; total_steps: number; message: string }) => void;
+      onQuestionGenerated?: (data: { question_id: string; question: Question }) => void;
+      onHitlCheckpoint?: (data: { checkpoint_id: number; data: Record<string, unknown> }) => void;
+      onValidationResult?: (data: { passed: boolean; issues_count: number; issues: unknown[] }) => void;
+      onCompleted?: (data: { exam_id: string; status: string }) => void;
+      onError?: (data: { message: string }) => void;
+      onClarificationNeeded?: (data: { clarification_questions: unknown[] }) => void;
+      onPipelinePaused?: (data: { checkpoint_id: number; message: string }) => void;
+      onClose?: () => void;
+    },
+  ): GenerationClient {
+    return new GenerationClient(websocketUrl, handlers);
   },
 
   partialRegenerate(data: { exam_id: string; edits: PartialEditRequest[] }) {
@@ -951,6 +911,93 @@ export const generation = {
     });
   },
 };
+
+/**
+ * WebSocket client for real-time exam generation.
+ * Connects to /ws/exam/{exam_id} and dispatches typed events.
+ */
+export class GenerationClient {
+  private ws: WebSocket | null = null;
+  private url: string;
+  private handlers: Parameters<typeof generation.connect>[1];
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 3;
+  private shouldReconnect = true;
+
+  constructor(url: string, handlers: Parameters<typeof generation.connect>[1]) {
+    this.url = url;
+    this.handlers = handlers;
+  }
+
+  connect(): void {
+    if (this.ws?.readyState === WebSocket.OPEN) return;
+
+    try {
+      this.ws = new WebSocket(this.url);
+
+      this.ws.onopen = () => {
+        this.reconnectAttempts = 0;
+      };
+
+      this.ws.onmessage = (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data as string) as {
+            type?: string;
+            [key: string]: unknown;
+          };
+          switch (data.type) {
+            case "plan_step":
+              this.handlers.onPlanStep?.(data as { step: number; total_steps: number; message: string });
+              break;
+            case "question_generated":
+              this.handlers.onQuestionGenerated?.(data as { question_id: string; question: Question });
+              break;
+            case "hitl_checkpoint":
+              this.handlers.onHitlCheckpoint?.(data as { checkpoint_id: number; data: Record<string, unknown> });
+              break;
+            case "validation_result":
+              this.handlers.onValidationResult?.(data as { passed: boolean; issues_count: number; issues: unknown[] });
+              break;
+            case "completed":
+              this.handlers.onCompleted?.(data as { exam_id: string; status: string });
+              break;
+            case "error":
+              this.handlers.onError?.(data as { message: string });
+              break;
+            case "clarification_needed":
+              this.handlers.onClarificationNeeded?.(data as { clarification_questions: unknown[] });
+              break;
+            case "pipeline_paused":
+              this.handlers.onPipelinePaused?.(data as { checkpoint_id: number; message: string });
+              break;
+          }
+        } catch {
+          // Ignore malformed messages
+        }
+      };
+
+      this.ws.onerror = () => {
+        this.handlers.onError?.({ message: "WebSocket connection error" });
+      };
+
+      this.ws.onclose = () => {
+        this.handlers.onClose?.();
+        if (this.shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
+          this.reconnectAttempts++;
+          setTimeout(() => this.connect(), 1000 * this.reconnectAttempts);
+        }
+      };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Failed to connect";
+      this.handlers.onError?.({ message });
+    }
+  }
+
+  disconnect(): void {
+    this.shouldReconnect = false;
+    this.ws?.close();
+  }
+}
 
 export const playbook = {
   getOverview() {

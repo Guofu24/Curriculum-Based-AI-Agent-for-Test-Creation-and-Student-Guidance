@@ -95,19 +95,23 @@ class DocumentService:
         user_id: UUID,
         page: int = 1,
         limit: int = 20,
+        course_id: str | None = None,
     ) -> tuple[list[Document], int]:
-        """List documents for a user with pagination."""
+        """List documents for a user with pagination. Optionally filter by course_id."""
         offset = (page - 1) * limit
 
-        count_result = await self.db.execute(
-            select(func.count(Document.id)).where(Document.user_id == user_id)
-        )
+        stmt = select(Document).where(Document.user_id == user_id)
+        count_stmt = select(func.count(Document.id)).where(Document.user_id == user_id)
+
+        if course_id:
+            stmt = stmt.where(Document.course_id == UUID(course_id))
+            count_stmt = count_stmt.where(Document.course_id == UUID(course_id))
+
+        count_result = await self.db.execute(count_stmt)
         total = count_result.scalar() or 0
 
         result = await self.db.execute(
-            select(Document)
-            .where(Document.user_id == user_id)
-            .order_by(Document.uploaded_at.desc())
+            stmt.order_by(Document.uploaded_at.desc())
             .offset(offset)
             .limit(limit)
         )

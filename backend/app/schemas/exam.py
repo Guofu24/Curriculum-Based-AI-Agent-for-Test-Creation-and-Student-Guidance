@@ -665,7 +665,7 @@ class ExamGenerateResponse(BaseModel):
 
     - **exam_id**: UUID of the newly created exam record
     - **job_id**: Unique job identifier for tracking
-    - **websocket_url**: WebSocket URL for real-time streaming (ws://localhost:8000/ws/exam/{exam_id})
+    - **websocket_url**: WebSocket URL for real-time streaming, e.g. ws://localhost:8000/ws/exam/{exam_id}
     """
     exam_id: str = Field(..., description="UUID of the newly created exam record.")
     job_id: str = Field(..., description="Unique job identifier for this generation job.")
@@ -675,7 +675,7 @@ class ExamGenerateResponse(BaseModel):
     )
     websocket_url: str | None = Field(
         None,
-        description="WebSocket URL for real-time event streaming: ws://localhost:8000/ws/exam/{exam_id}",
+        description="WebSocket URL for real-time event streaming, e.g. ws://localhost:8000/ws/exam/{exam_id}",
     )
 
 

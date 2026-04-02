@@ -137,11 +137,14 @@ class ExamService:
         exam_id: UUID,
         question_id: str,
         updates: dict,
+        user_id: UUID | None = None,
     ) -> None:
         """Update a single question in-place and append history."""
         exam = await self.get_exam(exam_id, user_id=None)
         if not exam:
             raise ExamServiceError("Exam not found")
+        if user_id is not None and exam.user_id != user_id:
+            raise ExamServiceError("Access denied")
 
         questions = list(exam.questions or [])
         updated = False
@@ -175,10 +178,11 @@ class ExamService:
         user_id: UUID,
     ) -> dict:
         """Apply lightweight partial edits for demo/runtime compatibility."""
-        _ = user_id
         exam = await self.get_exam(exam_id, user_id=None)
         if not exam:
             raise ExamServiceError("Exam not found")
+        if exam.user_id != user_id:
+            raise ExamServiceError("Access denied")
 
         questions = list(exam.questions or [])
         id_to_index = {
@@ -229,11 +233,14 @@ class ExamService:
         self,
         exam_id: UUID,
         question_ids: list[str] | None = None,
+        user_id: UUID | None = None,
     ) -> None:
         """Mark an exam as queued for regeneration."""
         exam = await self.get_exam(exam_id, user_id=None)
         if not exam:
             raise ExamServiceError("Exam not found")
+        if user_id is not None and exam.user_id != user_id:
+            raise ExamServiceError("Access denied")
 
         exam.status = "regenerating"
         exam.updated_at = datetime.now(timezone.utc)

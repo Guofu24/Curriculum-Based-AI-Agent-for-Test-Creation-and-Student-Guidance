@@ -198,8 +198,14 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             exam_id=trace_id,
             user_id=user_id,
             exam_config=full_config,
+            exam_config_original=exam_config,  # Preserve original config for edit-via-prompt and retry loops
             topics_used=[],
         )
+
+        # Verify exam_config_original was stored correctly
+        session = await self.short_term.load_session(trace_id, user_id)
+        assert session is not None, "Session not found after save!"
+        assert session.get("exam_config_original") is not None, "exam_config_original not set in session!"
 
         # Step 2: Load long-term memory (teacher preferences)
         teacher_prefs = {}

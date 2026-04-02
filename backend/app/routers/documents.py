@@ -34,6 +34,16 @@ from app.tasks.document_task import process_document_task
 
 router = APIRouter(prefix="/api/v1/documents", tags=["Documents"])
 
+# ── Course-scoped document routes (FE-compatible) ─────────────────────────────
+
+# NOTE: documents_by_course is in the documents router so it can reuse the
+# existing document_service.list_documents() method.
+# It is mounted here so the FE can call:
+#   GET /api/v1/courses/{course_id}/documents  →  /api/v1/documents?course_id={course_id}
+# The FE also expects:
+#   POST /api/v1/courses/{course_id}/documents/upload  →  same as POST /api/v1/documents/upload
+# Both are handled by documents_router directly (course_id is optional in the service).
+
 
 def _doc_to_list_item(doc) -> DocumentListItem:
     """Convert Document model to DocumentListItem schema."""
@@ -41,13 +51,19 @@ def _doc_to_list_item(doc) -> DocumentListItem:
         id=str(doc.id),
         title=doc.original_filename.rsplit(".", 1)[0] if doc.original_filename else "",
         original_filename=doc.original_filename,
+        file_name=doc.original_filename,  # FE compatibility alias
         file_type=doc.file_type,
         file_size=getattr(doc, "file_size", 0) or 0,
         processing_status=doc.processing_status,
+        status=doc.processing_status,  # FE compatibility alias
+        course_id=None,  # FE expects this field; set by course association if needed
+        version=getattr(doc, "version", 1) or 1,  # FE compatibility
         total_chapters=doc.total_chapters,
         total_pages_or_slides=doc.total_pages_or_slides or 0,
         total_chunks=doc.total_chunks or 0,
         uploaded_at=doc.uploaded_at,
+        updated_at=doc.uploaded_at,  # FE expects updated_at
+        curriculum_tree=[],  # FE expects CurriculumNode[]; populated from heading_tree if available
     )
 
 
@@ -81,6 +97,27 @@ def _heading_tree_from_dict(data: dict | None) -> HeadingTree | None:
 
 def _doc_to_detail(doc) -> DocumentDetail:
     """Convert Document model to DocumentDetail schema."""
+    heading = _heading_tree_from_dict(doc.heading_tree)
+    # Build curriculum_tree as plain list of chapter dicts for FE compatibility
+    curriculum = []
+    if heading:
+        curriculum = [
+            {
+                "id": ch.chapter_id,
+                "title": ch.title,
+                "section_type": "chapter",
+                "section_order": i,
+                "chapter_number": i + 1,
+                "page_from": None,
+                "page_to": None,
+                "scope_label": None,
+                "summary": None,
+                "metadata": None,
+                "children": [],
+            }
+            for i, ch in enumerate(heading.chapters or [])
+        ]
+
     return DocumentDetail(
         id=str(doc.id),
         title=doc.original_filename.rsplit(".", 1)[0] if doc.original_filename else "",
@@ -90,11 +127,13 @@ def _doc_to_detail(doc) -> DocumentDetail:
         s3_key=doc.s3_key,
         processing_status=doc.processing_status,
         parse_error_message=doc.parse_error_message,
-        heading_tree=_heading_tree_from_dict(doc.heading_tree),
+        heading_tree=heading,
         total_chapters=doc.total_chapters,
         total_pages_or_slides=doc.total_pages_or_slides or 0,
         total_chunks=doc.total_chunks or 0,
         uploaded_at=doc.uploaded_at,
+        language=None,  # FE expects language; set via metadata or default 'vi'
+        curriculum_tree=curriculum,  # FE compatibility: CurriculumNode[]
     )
 
 
@@ -117,10 +156,20 @@ def _doc_to_detail(doc) -> DocumentDetail:
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    title: str | None = None,
+    language: str | None = None,
+    course_id: str | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Upload a document for processing. Triggers the RAG pipeline in background."""
+    """
+    Upload a document for processing. Triggers the RAG pipeline in background.
+
+    Optional query params (FE compatibility — align with frontend FormData fields):
+    - title: display name for the document
+    - language: source language code (default "vi")
+    - course_id: optional course association
+    """
     allowed_types = {
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
