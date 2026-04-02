@@ -80,9 +80,15 @@ class Settings(BaseSettings):
     S3_BUCKET_NAME: str = "curriculum-ai-uploads"
     S3_PRESIGNED_URL_TTL: int = 3600
 
-    # MathPix (formula OCR)
+    # MathPix (formula OCR — optional fallback)
     MATHPIX_APP_ID: str = ""
     MATHPIX_APP_KEY: str = ""
+
+    # Qwen Vision (primary OCR + image description — self-hosted on Kaggle/ngrok)
+    # Set to the ngrok public URL, e.g. https://xxxx.ngrok-free.app
+    QWEN_VISION_BASE_URL: str = ""
+    # Timeout in seconds — keep high, model runs partially on CPU via ngrok
+    QWEN_VISION_TIMEOUT: float = 120.0
 
     # LangFuse (Observability)
     LANGFUSE_PUBLIC_KEY: str = ""

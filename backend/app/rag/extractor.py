@@ -1,4 +1,14 @@
-"""Formula and image extraction from document content."""
+"""Formula and image extraction from document content.
+
+Vision OCR priority:
+1. Qwen/Qwen3.5-9B (self-hosted, configured via QWEN_VISION_BASE_URL)
+2. MathPix API (optional fallback, configured via MATHPIX_APP_ID + MATHPIX_APP_KEY)
+3. Nougat (local, placeholder)
+
+Image description priority:
+1. Qwen/Qwen3.5-9B vision endpoint
+2. LLMClient.chat_vision() (existing GPT-4o / Groq vision fallback)
+"""
 
 import re
 import base64
@@ -70,8 +80,47 @@ def _normalize_latex(raw: str) -> str:
 def extract_formulas_from_image(image_bytes: bytes, context: str = "") -> Optional[FormulaInfo]:
     """
     Extract formula from image using OCR.
-    Tries Nougat first (offline/free), then MathPix API as fallback.
+
+    Priority:
+    1. Qwen/Qwen3.5-9B vision endpoint (primary — self-hosted)
+    2. Nougat (local, offline — currently placeholder)
+    3. MathPix API (optional fallback — requires MATHPIX_APP_ID + MATHPIX_APP_KEY)
     """
+    import asyncio
+
+    def _run(coro):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        except RuntimeError:
+            # Already running loop — use new thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(asyncio.run, coro)
+                return future.result()
+
+    # ── 1. Qwen vision (primary) ──────────────────────────────────────────────
+    try:
+        from app.utils.qwen_vision import get_qwen_vision_client
+        qwen = get_qwen_vision_client()
+        if qwen._enabled:
+            latex = _run(qwen.extract_formula_from_image(image_bytes))
+            if latex:
+                return FormulaInfo(
+                    text_repr=latex,
+                    latex_repr=latex,
+                    formula_type="image",
+                    source_location=context[:100] if context else None,
+                )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Qwen formula OCR failed: %s", e)
+
+    # ── 2. Nougat (local, placeholder) ───────────────────────────────────────
     try:
         latex = _extract_with_nougat(image_bytes)
         if latex:
@@ -84,15 +133,9 @@ def extract_formulas_from_image(image_bytes: bytes, context: str = "") -> Option
     except Exception:
         pass
 
+    # ── 3. MathPix fallback ───────────────────────────────────────────────────
     try:
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        latex = loop.run_until_complete(_extract_with_mathpix(image_bytes))
+        latex = _run(_extract_with_mathpix(image_bytes))
         if latex:
             return FormulaInfo(
                 text_repr=latex,
@@ -107,12 +150,12 @@ def extract_formulas_from_image(image_bytes: bytes, context: str = "") -> Option
 
 
 def _extract_with_nougat(image_bytes: bytes) -> str | None:
-    """Extract LaTeX from image using Nougat (Meta)."""
+    """Extract LaTeX from image using Nougat (Meta). Currently placeholder."""
     return None
 
 
 async def _extract_with_mathpix(image_bytes: bytes) -> str | None:
-    """Extract LaTeX from image using MathPix API."""
+    """Extract LaTeX from image using MathPix API (optional fallback)."""
     from app.core.config import get_settings
     import httpx
 
@@ -148,16 +191,29 @@ async def _extract_with_mathpix(image_bytes: bytes) -> str | None:
 
 async def extract_image_description(image_bytes: bytes, context: str = "") -> str:
     """
-    Use GPT-4o Vision to generate a text description of an image.
-    System prompt: mô tả hình ảnh sách vật lý tiếng Việt.
+    Generate a text description of an image.
 
-    Returns: text description string.
+    Priority:
+    1. Qwen/Qwen3.5-9B vision endpoint (primary — self-hosted)
+    2. LLMClient.chat_vision() (existing GPT-4o / Groq vision fallback)
     """
-    from app.agents.llm import get_llm_client
-
+    # ── 1. Qwen vision (primary) ──────────────────────────────────────────────
     try:
-        client = get_llm_client()
+        from app.utils.qwen_vision import get_qwen_vision_client
+        qwen = get_qwen_vision_client()
+        if qwen._enabled:
+            result = await qwen.describe_image(image_bytes, context=context)
+            if result:
+                return result
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Qwen describe_image failed: %s — falling back", e)
 
+    # ── 2. LLMClient vision fallback ─────────────────────────────────────────
+    try:
+        from app.agents.llm import get_llm_client
+
+        client = get_llm_client()
         base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
         response = await client.chat_vision(
