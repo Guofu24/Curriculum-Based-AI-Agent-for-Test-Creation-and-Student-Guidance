@@ -62,6 +62,17 @@ class Settings(BaseSettings):
     PINECONE_CLOUD: str = "aws"
     PINECONE_REGION: str = "us-east-1"
 
+    # Storage backend: "minio" (default, local) | "s3" (AWS)
+    STORAGE_BACKEND: str = "minio"
+
+    # MinIO — local S3-compatible storage (priority default)
+    MINIO_ENDPOINT_URL: str = "http://127.0.0.1:9000"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_BUCKET_NAME: str = "curriculum-ai"
+    # Public URL returned inside presigned links (same as endpoint for local dev)
+    MINIO_PUBLIC_URL: str = "http://127.0.0.1:9000"
+
     # AWS S3
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""
@@ -90,6 +101,14 @@ class Settings(BaseSettings):
     PORT: int = 8000
     DEBUG: bool = False
     DEMO_MODE: bool = False
+
+    # App base URL — used for constructing WebSocket URLs returned to frontend clients
+    APP_BASE_URL: str = "http://localhost:8000"
+
+    @property
+    def ws_base_url(self) -> str:
+        """WebSocket base URL derived from APP_BASE_URL (http→ws, https→wss)."""
+        return self.APP_BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"

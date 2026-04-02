@@ -61,6 +61,8 @@ class DocumentListItem(BaseModel):
 
     - **id**: Document UUID
     - **title**: Document title (derived from filename without extension)
+    - **file_name**: Alias for original_filename (FE compatibility)
+    - **status**: Alias for processing_status (FE compatibility)
     - **processing_status**: One of 'pending', 'processing', 'completed', 'failed'
     - **total_chapters**: Number of chapters detected in the document
     - **total_pages_or_slides**: Total pages (PDF/DOCX) or slides (PPTX)
@@ -69,11 +71,24 @@ class DocumentListItem(BaseModel):
     id: str = Field(..., description="Document UUID.")
     title: str = Field(..., description="Document title derived from filename.")
     original_filename: str = Field(..., description="Original uploaded filename.")
+    file_name: str = Field(..., description="Alias for original_filename (FE compatibility).")
     file_type: str = Field(..., description="File type: 'pdf', 'docx', or 'pptx'.")
     file_size: int = Field(default=0, description="File size in bytes.")
     processing_status: str = Field(
         ...,
         description="Processing status: 'pending', 'processing', 'completed', or 'failed'.",
+    )
+    status: str = Field(
+        ...,
+        description="Alias for processing_status (FE compatibility).",
+    )
+    course_id: str | None = Field(None, description="Associated course ID (FE compatibility).")
+    version: int = Field(default=1, description="Document version number (FE compatibility).")
+    chapter_count: int | None = Field(None, description="Number of chapters (FE compatibility).")
+    updated_at: datetime | None = Field(None, description="Last update timestamp (FE compatibility).")
+    curriculum_tree: list = Field(
+        default_factory=list,
+        description="CurriculumNode[] list (FE compatibility). Populated from heading_tree.",
     )
     total_chapters: int | None = Field(
         None,
@@ -129,6 +144,15 @@ class DocumentDetail(BaseModel):
         description="Number of text chunks indexed in Pinecone.",
     )
     uploaded_at: datetime
+    updated_at: datetime | None = Field(None, description="Last update timestamp.")
+    language: str | None = Field(
+        None,
+        description="Source document language (FE compatibility). Defaults to 'vi'.",
+    )
+    curriculum_tree: list = Field(
+        default_factory=list,
+        description="Alias for heading_tree chapters (FE compatibility).",
+    )
 
 
 class DocumentResponse(BaseModel):

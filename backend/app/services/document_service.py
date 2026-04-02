@@ -9,12 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Document
 from app.core.redis_client import RedisClient
-from app.utils.s3 import (
-    upload_file,
-    delete_file,
-    generate_fresh_url,
-    S3Error,
-)
+from app.utils.storage import get_storage, StorageError
 from app.rag.parser import parse_document
 from app.rag.structure import detect_heading_tree, flatten_heading_tree
 from app.rag.chunker import semantic_chunk
@@ -54,13 +49,14 @@ class DocumentService:
         title = filename.rsplit(".", 1)[0] if "." in filename else filename
 
         try:
-            s3_key = await upload_file(
+            storage = get_storage()
+            s3_key = await storage.upload_file(
                 file_bytes=file_content,
                 filename=filename,
                 user_id=str(user_id),
                 file_type=ext,
             )
-        except S3Error as e:
+        except StorageError as e:
             raise DocumentServiceError(f"Failed to upload file: {str(e)}")
 
         document = Document(
@@ -165,9 +161,9 @@ class DocumentService:
         if not document:
             return False
 
-        # Delete from S3
+        # Delete from storage backend (MinIO or S3)
         try:
-            await delete_file(document.s3_key)
+            await get_storage().delete_file(document.s3_key)
         except Exception:
             pass
 
@@ -209,8 +205,8 @@ class DocumentService:
             if not document:
                 raise DocumentServiceError("Document not found")
 
-            from app.utils.s3 import download_file
-            file_bytes = await download_file(document.s3_key)
+            from app.utils.storage import get_storage
+            file_bytes = await get_storage().download_file(document.s3_key)
 
             # Step 1: Parse
             parse_result = await parse_document(file_bytes, document.file_type)
@@ -277,7 +273,7 @@ class DocumentService:
 
     def get_presigned_url(self, document: Document) -> str:
         """Get a presigned URL for downloading the document (G20)."""
-        return generate_fresh_url(document.s3_key)
+        return get_storage().generate_presigned_url(document.s3_key)
 
     def get_flattened_scope(self, document: Document) -> list[dict]:
         """Get flattened scope list from heading tree."""

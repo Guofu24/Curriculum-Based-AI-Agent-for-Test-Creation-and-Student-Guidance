@@ -235,10 +235,10 @@ Trả về JSON:
         except Exception:
             return []
 
-        # Query Pinecone
-        results = await self.vector_store.query(
-            document_id=document_id,
-            chapter_ids=[chapter_id],
+        # Query Pinecone — use query_namespace (doc_id + chapter_id, not document_id + chapter_ids)
+        results = await self.vector_store.query_namespace(
+            doc_id=document_id,
+            chapter_id=chapter_id,
             query_embedding=embedding,
             top_k=top_k,
         )

@@ -10,7 +10,7 @@ import logging
 from app.core.config import get_settings
 from app.core.database import init_db, close_db
 from app.core.redis_client import close_redis
-from app.routers import auth, documents, exams
+from app.routers import auth, courses, documents, exams, generate, playbook
 
 settings = get_settings()
 
@@ -157,8 +157,11 @@ async def readiness_check():
 # ── API Routers ──────────────────────────────────────────────────────────────
 
 app.include_router(auth.router)
+app.include_router(courses.router)
 app.include_router(documents.router)
 app.include_router(exams.router)
+app.include_router(generate.router)
+app.include_router(playbook.router)
 
 
 # ── WebSocket Endpoint ─────────────────────────────────────────────────────────
