@@ -99,10 +99,11 @@ Trả về JSON:
         4. Has bloom_distribution AND prompt > 100 chars
         """
         signals = [
-            len(user_prompt) > 200,
-            any(kw in user_prompt for kw in ["tập trung", "thực tế", "ưu tiên", "hạn chế", "tránh"]),
+            (user_prompt or "") > "",
+            len(user_prompt or "") > 200,
+            any(kw in (user_prompt or "") for kw in ["tập trung", "thực tế", "ưu tiên", "hạn chế", "tránh"]),
             exam_config.get("extra_instructions") not in (None, ""),
-            exam_config.get("bloom_distribution") is not None and len(user_prompt) > 100,
+            exam_config.get("bloom_distribution") is not None and len(user_prompt or "") > 100,
         ]
         return sum(signals) >= 2
 

@@ -433,6 +433,24 @@ _PROVIDER_MAP: dict[str, type[BaseLLMProvider]] = {
 }
 
 
+def _is_provider_available(name: str) -> bool:
+    """Return True if a provider has a valid (non-empty) API key configured."""
+    s = settings
+    if name == "openai":
+        return bool(s.OPENAI_API_KEY)
+    if name == "openrouter":
+        return bool(s.OPENROUTER_API_KEY)
+    if name == "groq":
+        return bool(s.GROQ_API_KEY)
+    if name == "anthropic":
+        return bool(s.ANTHROPIC_API_KEY)
+    if name == "ollama":
+        return True  # local server, no key needed
+    if name == "g4f":
+        return True  # free aggregator, no key needed
+    return False
+
+
 def _build_provider(name: str) -> BaseLLMProvider:
     cls = _PROVIDER_MAP.get(name.lower())
     if not cls:
@@ -463,17 +481,43 @@ class LLMClient:
     LIGHT_ROLES: set[str] = {"planner", "reranker", "outline", "dedup", "skills", "classifier"}
 
     def __init__(self) -> None:
-        self._primary: BaseLLMProvider = _build_provider(settings.LLM_PROVIDER)
+        primary_name = settings.LLM_PROVIDER
+        if not _is_provider_available(primary_name):
+            logger.warning(
+                f"Primary provider '{primary_name}' has no API key — "
+                f"falling back to available providers."
+            )
+
+        self._primary: BaseLLMProvider | None = None
         self._fallbacks: list[BaseLLMProvider] = []
+
+        # Try primary first if available
+        if _is_provider_available(primary_name):
+            try:
+                self._primary = _build_provider(primary_name)
+            except Exception as e:
+                logger.warning(f"Primary provider '{primary_name}' init failed: {e}")
+
+        # Build fallback chain, skipping unavailable ones
         for name in settings.fallback_providers:
-            if name != settings.LLM_PROVIDER:
-                try:
-                    self._fallbacks.append(_build_provider(name))
-                except Exception as e:
-                    logger.warning(f"Fallback provider '{name}' init failed: {e}")
+            if name == primary_name:
+                continue
+            if not _is_provider_available(name):
+                continue
+            try:
+                self._fallbacks.append(_build_provider(name))
+            except Exception as e:
+                logger.warning(f"Fallback provider '{name}' init failed: {e}")
+
+        if not self._primary and not self._fallbacks:
+            raise RuntimeError(
+                "No LLM provider available. Set at least one of: "
+                "GROQ_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, "
+                "ANTHROPIC_API_KEY (or ensure Ollama/G4F is reachable)."
+            )
 
         logger.info(
-            f"LLMClient ready | primary={settings.LLM_PROVIDER} "
+            f"LLMClient ready | primary={self._primary.name() if self._primary else 'NONE'} "
             f"| fallbacks={[p.name() for p in self._fallbacks]}"
         )
 
@@ -501,7 +545,8 @@ class LLMClient:
         trace_name: tên span cho LangFuse tracing
         """
         resolved_model = model or self._get_model(role)
-        providers = [self._primary] + self._fallbacks
+        primary_provider = self._primary
+        providers = ([primary_provider] if primary_provider else []) + self._fallbacks
 
         tracer = _get_tracer()
         last_error: Exception | None = None
@@ -574,7 +619,8 @@ class LLMClient:
         Auto-retry nếu parse fail. Fallback qua providers nếu cần.
         """
         resolved_model = model or self._get_model(role)
-        providers = [self._primary] + self._fallbacks
+        primary_provider = self._primary
+        providers = ([primary_provider] if primary_provider else []) + self._fallbacks
 
         tracer = _get_tracer()
         last_error: Exception | None = None

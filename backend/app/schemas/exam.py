@@ -107,9 +107,8 @@ class ExamConfigRequest(BaseModel):
         description="Distribution of Bloom taxonomy levels across all questions. "
                     "Must sum to 100%. Defaults to 20/30/30/20.",
     )
-    user_prompt: str = Field(
-        ...,
-        min_length=1,
+    user_prompt: str | None = Field(
+        default=None,
         max_length=5000,
         description="Free-text prompt describing the exam requirements in Vietnamese. "
                     "Used by the Planner Agent to clarify ambiguous requests.",

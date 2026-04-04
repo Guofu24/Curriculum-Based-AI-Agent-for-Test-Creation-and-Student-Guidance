@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+logger = __import__("logging").getLogger("rag.structure")
+
 
 @dataclass
 class SubsectionNode:
@@ -28,9 +30,155 @@ class ChapterNode:
     sections: list[SectionNode] = field(default_factory=list)
 
 
+def _is_likely_heading(line: str, line_index: int, total_lines: int) -> int:
+    """
+    Heuristic: does `line` look like a heading even without # markers?
+    Returns heading level (1-3) if it looks like a heading, 0 otherwise.
+
+    Patterns checked:
+    - Short line (under 80 chars) followed by paragraph text
+    - Numbered chapter/section patterns: "Chương 1", "1.1", "Bài 1", "Section", "Chapter"
+    - Line is ALL CAPS or Title Case with few words
+    - Short standalone line at start of page
+    """
+    stripped = line.strip()
+    if not stripped or len(stripped) > 100:
+        return 0
+
+    # Numbered chapter/section patterns (very common in textbooks)
+    chapter_patterns = [
+        r"^chương\s+\d+",           # Chương 1, Chương 10
+        r"^bài\s+\d+",              # Bài 1, Bài 10
+        r"^\d+\.\d+",               # 1.1, 2.3.4
+        r"^\d+\s+\.",                # 1 . Title, 2 . Title
+        r"^chapter\s+\d+",           # Chapter 1
+        r"^section\s+\d+",           # Section 1
+        r"^part\s+\d+",             # Part 1
+        r"^module\s+\d+",           # Module 1
+        r"^unit\s+\d+",             # Unit 1
+        r"^phần\s+\d+",             # Phần 1
+        r"^bai\s+\d+",              # bai 1 (lowercase)
+    ]
+    for pat in chapter_patterns:
+        if re.search(pat, stripped, re.IGNORECASE):
+            return 1  # Chapter level
+
+    # Section patterns (second level)
+    section_patterns = [
+        r"^\d+\.\d+\s",             # 1.1 Title
+        r"^\d+\.\d+\.",             # 1.1.
+        r"^mục\s+\d+",             # Mục 1
+        r"^tiểu mục\s+\d+",        # Tiểu mục 1
+        r"^\(\d+\)",               # (1), (2)
+        r"^\d+\)",                  # 1) Title
+    ]
+    for pat in section_patterns:
+        if re.search(pat, stripped, re.IGNORECASE):
+            return 2  # Section level
+
+    # All-caps short line (likely a heading)
+    if stripped.isupper() and len(stripped) >= 3 and len(stripped.split()) <= 8:
+        return 1
+
+    # Title Case: mostly capitalized words, short line, not a sentence
+    words = stripped.split()
+    if 1 <= len(words) <= 10:
+        # Count Title/ALL words
+        title_words = sum(1 for w in words if w[0].isupper() if w)
+        if title_words / len(words) >= 0.7:
+            # Check it's not a sentence (doesn't end with typical sentence endings)
+            if stripped[-1] not in ".!?:;":
+                return 2
+
+    return 0
+
+
+def _build_tree_from_nodes(
+    headings: list[tuple[int, str]],
+) -> dict:
+    """
+    Convert a flat list of (level, title) headings into the nested tree format.
+    """
+    chapters: list[ChapterNode] = []
+    current_chapter: ChapterNode | None = None
+    current_section: SectionNode | None = None
+
+    for level, title in headings:
+        if level == 1:
+            current_chapter = ChapterNode(
+                chapter_id=f"ch{len(chapters) + 1}",
+                title=title,
+                sections=[],
+            )
+            chapters.append(current_chapter)
+            current_section = None
+
+        elif level == 2:
+            if current_chapter is None:
+                current_chapter = ChapterNode(
+                    chapter_id=f"ch{len(chapters) + 1}",
+                    title="",
+                    sections=[],
+                )
+                chapters.append(current_chapter)
+
+            current_section = SectionNode(
+                section_id=f"{current_chapter.chapter_id}_sec{len(current_chapter.sections) + 1}",
+                title=title,
+                subsections=[],
+            )
+            current_chapter.sections.append(current_section)
+
+        elif level == 3:
+            if current_chapter is None:
+                current_chapter = ChapterNode(
+                    chapter_id=f"ch{len(chapters) + 1}",
+                    title="",
+                    sections=[],
+                )
+                chapters.append(current_chapter)
+
+            if current_section is None:
+                current_section = SectionNode(
+                    section_id=f"{current_chapter.chapter_id}_sec{len(current_chapter.sections) + 1}",
+                    title="",
+                    subsections=[],
+                )
+                current_chapter.sections.append(current_section)
+
+            current_section.subsections.append(
+                SubsectionNode(
+                    section_id=f"{current_section.section_id}_sub{len(current_section.subsections) + 1}",
+                    title=title,
+                )
+            )
+
+    return {
+        "chapters": [
+            {
+                "chapter_id": ch.chapter_id,
+                "title": ch.title,
+                "sections": [
+                    {
+                        "section_id": s.section_id,
+                        "title": s.title,
+                        "subsections": [
+                            {"section_id": sub.section_id, "title": sub.title}
+                            for sub in s.subsections
+                        ],
+                    }
+                    for s in ch.sections
+                ],
+            }
+            for ch in chapters
+        ]
+    }
+
+
 def detect_heading_tree(markdown: str) -> dict:
     """
     Parse markdown heading tags (#, ##, ###) into a nested heading tree.
+    Falls back to heuristic pattern detection if no # headings are found.
 
     Returns a dict with chapters/sections/subsections hierarchy per spec:
     {
@@ -51,6 +199,7 @@ def detect_heading_tree(markdown: str) -> dict:
     current_section: SectionNode | None = None
 
     chapter_counter = 0
+    found_any_heading = False
 
     for line in lines:
         line = line.strip()
@@ -61,6 +210,7 @@ def detect_heading_tree(markdown: str) -> dict:
         if not heading_match:
             continue
 
+        found_any_heading = True
         level = len(heading_match.group(1))
         title = heading_match.group(2).strip()
 
@@ -116,6 +266,23 @@ def detect_heading_tree(markdown: str) -> dict:
                 title=title,
             )
             current_section.subsections.append(sub)
+
+    # If no # headings were found, use heuristic fallback to detect
+    # structure from numbered patterns, all-caps lines, etc.
+    if not found_any_heading:
+        logger.info("No # headings found, using heuristic pattern detection")
+        heuristic_headings: list[tuple[int, str]] = []
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            level = _is_likely_heading(stripped, idx, len(lines))
+            if level > 0:
+                heuristic_headings.append((level, stripped))
+
+        if heuristic_headings:
+            logger.info("Heuristic detected %d potential headings", len(heuristic_headings))
+            return _build_tree_from_nodes(heuristic_headings)
 
     return {
         "chapters": [

@@ -1,11 +1,28 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { DashboardHeader } from "@/components/dashboard-header"
-import { GenerationStepper } from "@/components/generation-stepper"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  AlertCircle,
+  BookOpen,
+  ChevronRight,
+  FileText,
+  Layers,
+  Loader2,
+  Sparkles,
+  Wand2,
+  CheckCircle2,
+  RefreshCw,
+} from "lucide-react"
+import {
+  documents as documentsApi,
+  generation as generationApi,
+  isReadyStatus,
+  type DocumentListItem,
+  type CurriculumNode,
+  type ExamGenerationRequest,
+} from "@/lib/api"
+import { GenerationLoadingScreen } from "@/components/generation-loading-screen"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -19,38 +36,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import {
-  AlertCircle,
-  BookOpen,
-  ChevronRight,
-  FileText,
-  GraduationCap,
-  Layers,
-  Loader2,
-  ShieldCheck,
-  Wand2,
-} from "lucide-react"
-import {
-  courses as coursesApi,
-  documents as documentsApi,
-  exams as examsApi,
-  generation as generationApi,
-  isReadyStatus,
-  type Course,
-  type CurriculumNode,
-  type DocumentListItem,
-  type ExamGenerationRequest,
-  type GenerationStep,
-  type QualitySummary,
-  type ScopeUnitPayload,
-} from "@/lib/api"
-import { formatPercent } from "@/lib/quality"
 
 function flattenNodes(nodes: CurriculumNode[]): CurriculumNode[] {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children || [])])
 }
 
-function buildScopePayload(node: CurriculumNode): ScopeUnitPayload {
+function buildScopePayload(node: CurriculumNode) {
   const scopeId = node.id || `${node.section_type}:${node.chapter_number}:${node.section_order}:${node.title}`
   return {
     scope_id: scopeId,
@@ -68,83 +59,52 @@ function buildScopePayload(node: CurriculumNode): ScopeUnitPayload {
   }
 }
 
-const emptySummary: QualitySummary = {
-  documents_active: 0,
-  exams_generated: 0,
-  question_count: 0,
-  verifier_pass_rate: 0,
-  verifier_warning_rate: 0,
-  evidence_coverage_rate: 0,
-  scope_violation_rate: 0,
-  avg_regenerate_count: 0,
-  avg_human_edit_count: 0,
-  version_churn: 0,
-  top_error_categories: [],
-  recent_warnings: [],
-}
-
 export default function GenerateExamPage() {
   const router = useRouter()
-  const [courses, setCourses] = useState<Course[]>([])
   const [documents, setDocuments] = useState<DocumentListItem[]>([])
-  const [qualitySummary, setQualitySummary] = useState<QualitySummary>(emptySummary)
   const [loadingSources, setLoadingSources] = useState(true)
-  const [selectedCourse, setSelectedCourse] = useState<string>("all")
-  const [selectedDocument, setSelectedDocument] = useState<string>("")
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string>("")
   const [curriculumTree, setCurriculumTree] = useState<CurriculumNode[]>([])
   const [loadingTree, setLoadingTree] = useState(false)
   const [selectedScopeIds, setSelectedScopeIds] = useState<string[]>([])
   const [totalQuestions, setTotalQuestions] = useState("10")
   const [timeLimit, setTimeLimit] = useState("45")
   const [prompt, setPrompt] = useState("")
-  const [instructions, setInstructions] = useState("")
   const [isGenerating, setIsGenerating] = useState(false)
-  const [generationSteps, setGenerationSteps] = useState<GenerationStep[]>([])
   const [generationError, setGenerationError] = useState("")
   const [generatedExamId, setGeneratedExamId] = useState<string | null>(null)
+  const [rescanning, setRescanning] = useState(false)
 
   const loadSources = useCallback(async () => {
     try {
-      const [courseList, documentList, summary] = await Promise.all([
-        coursesApi.list(),
-        documentsApi.listAll(),
-        examsApi.getQualitySummary(),
-      ])
-      setCourses(courseList)
-      setDocuments(documentList)
-      setQualitySummary(summary)
+      const allDocs = await documentsApi.listAll()
+      setDocuments(allDocs)
+      if (allDocs.length > 0 && !selectedDocumentId) {
+        setSelectedDocumentId(allDocs[0].id)
+      }
     } finally {
       setLoadingSources(false)
     }
-  }, [])
+  }, [selectedDocumentId])
 
   useEffect(() => {
     void loadSources()
-  }, [loadSources])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const readyDocuments = useMemo(
-    () => documents.filter((document) => isReadyStatus(document.status)),
+    () => documents.filter((d) => isReadyStatus(d.status)),
     [documents],
   )
 
-  const filteredDocuments = useMemo(() => {
-    if (selectedCourse === "all") return readyDocuments
-    if (selectedCourse === "unassigned") return readyDocuments.filter((document) => !document.course_id)
-    return readyDocuments.filter((document) => document.course_id === selectedCourse)
-  }, [readyDocuments, selectedCourse])
+  const selectedDocument = useMemo(
+    () => documents.find((d) => d.id === selectedDocumentId) || null,
+    [documents, selectedDocumentId],
+  )
 
+  // Load curriculum tree when document changes
   useEffect(() => {
-    if (!selectedDocument && filteredDocuments.length > 0) {
-      setSelectedDocument(filteredDocuments[0].id)
-      return
-    }
-    if (selectedDocument && !filteredDocuments.some((document) => document.id === selectedDocument)) {
-      setSelectedDocument(filteredDocuments[0]?.id || "")
-    }
-  }, [filteredDocuments, selectedDocument])
-
-  useEffect(() => {
-    if (!selectedDocument) {
+    if (!selectedDocumentId) {
       setCurriculumTree([])
       setSelectedScopeIds([])
       return
@@ -153,9 +113,17 @@ export default function GenerateExamPage() {
     setLoadingTree(true)
     setSelectedScopeIds([])
     void documentsApi
-      .getCurriculumTree(selectedDocument)
+      .getCurriculumTree(selectedDocumentId)
       .then((tree) => {
-        if (!cancelled) setCurriculumTree(tree)
+        if (!cancelled) {
+          setCurriculumTree(tree)
+          // Pre-select all scope nodes
+          const flat = flattenNodes(tree)
+          const ids = flat
+            .map((n) => buildScopePayload(n).scope_id)
+            .filter(Boolean)
+          setSelectedScopeIds(ids as string[])
+        }
       })
       .catch(() => {
         if (!cancelled) setCurriculumTree([])
@@ -166,60 +134,78 @@ export default function GenerateExamPage() {
     return () => {
       cancelled = true
     }
-  }, [selectedDocument])
+  }, [selectedDocumentId])
 
   const scopeNodes = useMemo(() => flattenNodes(curriculumTree), [curriculumTree])
   const scopeNodeMap = useMemo(
-    () => new Map(scopeNodes.map((node) => [buildScopePayload(node).scope_id || "", node])),
+    () => new Map(scopeNodes.map((n) => [buildScopePayload(n).scope_id || "", n])),
     [scopeNodes],
   )
   const selectedScope = useMemo(
     () =>
       selectedScopeIds
-        .map((scopeId) => {
-          const node = scopeNodeMap.get(scopeId)
+        .map((id) => {
+          const node = scopeNodeMap.get(id)
           return node ? buildScopePayload(node) : null
         })
-        .filter((value): value is ScopeUnitPayload => value !== null),
+        .filter((v): v is NonNullable<typeof v> => v !== null),
     [scopeNodeMap, selectedScopeIds],
   )
 
-  const selectedDocumentItem = readyDocuments.find((document) => document.id === selectedDocument) || null
-  const parsedQuestionCount = Number(totalQuestions) || 0
-
   const toggleScope = useCallback((scopeId: string, checked: boolean) => {
-    setSelectedScopeIds((current) => {
-      if (checked) return Array.from(new Set([...current, scopeId]))
-      return current.filter((id) => id !== scopeId)
+    setSelectedScopeIds((prev) => {
+      if (checked) return Array.from(new Set([...prev, scopeId]))
+      return prev.filter((id) => id !== scopeId)
     })
   }, [])
 
   const selectAllScope = useCallback(() => {
-    setSelectedScopeIds(scopeNodes.map((node) => buildScopePayload(node).scope_id || "").filter(Boolean))
+    setSelectedScopeIds(
+      scopeNodes.map((n) => buildScopePayload(n).scope_id || "").filter(Boolean) as string[],
+    )
   }, [scopeNodes])
 
   const clearScope = useCallback(() => setSelectedScopeIds([]), [])
 
-  const handleGenerate = useCallback(() => {
-    if (!selectedDocumentItem || parsedQuestionCount <= 0 || selectedScope.length === 0) return
+  const handleRescanStructure = useCallback(async () => {
+    if (!selectedDocumentId) return
+    setRescanning(true)
+    try {
+      await documentsApi.rescanStructure(selectedDocumentId)
+      // Reload curriculum tree
+      const tree = await documentsApi.getCurriculumTree(selectedDocumentId)
+      setCurriculumTree(tree)
+      const flat = flattenNodes(tree)
+      const ids = flat.map((n) => buildScopePayload(n).scope_id).filter(Boolean)
+      setSelectedScopeIds(ids as string[])
+    } catch {
+      // ignore — tree stays empty or as-is
+    } finally {
+      setRescanning(false)
+    }
+  }, [selectedDocumentId])
+
+  // Redirect once generation completes (exam_id is set after the sync API returns)
+  useEffect(() => {
+    if (!generatedExamId) return
+    router.push(`/dashboard/exams/${generatedExamId}`)
+  }, [generatedExamId, router])
+
+  const handleGenerate = useCallback(async () => {
+    if (!selectedDocument || selectedScope.length === 0) return
+    const qCount = Number(totalQuestions)
+    if (qCount <= 0) return
 
     setIsGenerating(true)
     setGenerationError("")
-    setGeneratedExamId(null)
-    setGenerationSteps([])
-
-    const chapters = Array.from(
-      new Set(selectedScope.filter((item) => item.chapter_number > 0).map((item) => item.chapter_number)),
-    )
 
     const requestPayload: ExamGenerationRequest = {
-      course_id: selectedDocumentItem.course_id || undefined,
-      document_id: selectedDocumentItem.id,
-      chapters,
+      document_id: selectedDocument.id,
+      chapters: [],
       scope: selectedScope,
       prompt: prompt.trim(),
-      instructions: instructions.trim() || undefined,
-      total_questions: parsedQuestionCount,
+      instructions: "",
+      total_questions: qCount,
       question_type: "mcq_single_answer",
       exam_type: "mcq",
       num_variants: 1,
@@ -239,324 +225,300 @@ export default function GenerateExamPage() {
       },
     }
 
-    generationApi.generateStream(
-      requestPayload,
-      (step) =>
-        setGenerationSteps((current) => {
-          const existingIndex = current.findIndex((item) => item.step === step.step)
-          if (existingIndex >= 0) {
-            const next = [...current]
-            next[existingIndex] = step
-            return next
-          }
-          return [...current, step]
-        }),
-      (exam) => setGeneratedExamId(exam.id),
-      (error) => {
-        setGenerationError(error)
-        setIsGenerating(false)
-      },
-    )
-  }, [instructions, parsedQuestionCount, prompt, selectedDocumentItem, selectedScope, timeLimit])
+    try {
+      const result = await generationApi.generate(requestPayload)
+      // setGeneratedExamId triggers redirect via useEffect above
+      setGeneratedExamId(result.exam_id)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Sinh đề thất bại"
+      setGenerationError(message)
+      setIsGenerating(false)
+    }
+  }, [selectedDocument, selectedScope, totalQuestions, timeLimit, prompt])
 
-  useEffect(() => {
-    if (!generatedExamId) return
-    router.push(`/dashboard/exams/${generatedExamId}`)
-  }, [generatedExamId, router])
-
+  // Generation loading screen — animated stepper while request is in-flight
   if (isGenerating) {
     return (
-      <>
-        <DashboardHeader title="Generate" />
-        {generationError ? (
-          <div className="flex flex-1 items-center justify-center p-6">
-            <div className="max-w-md text-center">
-              <p className="mb-2 font-medium text-destructive">Generation failed</p>
-              <p className="mb-4 text-sm text-muted-foreground">{generationError}</p>
-              <Button onClick={() => { setIsGenerating(false); setGenerationError("") }}>
-                Try again
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <GenerationStepper
-            steps={generationSteps}
-            onComplete={() => {
-              if (!generatedExamId) setIsGenerating(false)
-            }}
-          />
-        )}
-      </>
+      <GenerationLoadingScreen isGenerating={true} />
     )
   }
 
+  // Initial loading
   if (loadingSources) {
     return (
-      <>
-        <DashboardHeader title="Generate" />
-        <div className="flex flex-1 items-center justify-center">
-          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      <div className="flex flex-col h-full items-center justify-center">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
+  // No ready documents
+  if (readyDocuments.length === 0) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex items-center gap-3 px-6 py-4 border-b">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <Sparkles className="h-4.5 w-4.5" />
+          </div>
+          <div>
+            <h1 className="text-lg font-semibold text-foreground">Sinh đề thi</h1>
+            <p className="text-xs text-muted-foreground">Tạo đề thi từ tài liệu</p>
+          </div>
         </div>
-      </>
+        <div className="flex flex-1 items-center justify-center p-6">
+          <div className="max-w-sm text-center space-y-3">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted">
+              <AlertCircle className="h-6 w-6 text-muted-foreground" />
+            </div>
+            <p className="text-sm font-semibold">Chưa có tài liệu sẵn sàng</p>
+            <p className="text-xs text-muted-foreground">
+              Hãy tải lên và chờ xử lý ít nhất một tài liệu PDF trước khi sinh đề.
+            </p>
+            <Button asChild>
+              <a href="/dashboard/documents">
+                <ChevronRight className="mr-1 h-4 w-4" />
+                Tải tài liệu
+              </a>
+            </Button>
+          </div>
+        </div>
+      </div>
     )
   }
 
   return (
-    <>
-      <DashboardHeader title="Generate" />
-      <div className="flex flex-1 flex-col gap-6 p-6 max-w-6xl">
-        <div className="flex flex-col gap-2 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <h2 className="text-2xl font-semibold tracking-tight text-foreground">Generate under Phase 4 guardrails</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              The goal is no longer just to generate an exam. Each run should produce evidence-grounded questions that are easy to evaluate, edit, trace through feedback, and eventually learn from through curated playbook bullets.
-            </p>
-          </div>
-          <Badge variant="secondary" className="w-fit gap-1.5">
-            <ShieldCheck className="h-3.5 w-3.5" />
-            Quality logging enabled
-          </Badge>
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-3 px-6 py-4 border-b bg-background/60 backdrop-blur-sm">
+        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+          <Sparkles className="h-4.5 w-4.5" />
         </div>
+        <div>
+          <h1 className="text-lg font-semibold text-foreground">Sinh đề thi</h1>
+          <p className="text-xs text-muted-foreground">Tạo đề thi từ tài liệu đã xử lý</p>
+        </div>
+      </div>
 
-        {readyDocuments.length === 0 ? (
-          <Card className="rounded-2xl border-dashed shadow-sm">
-            <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
-              <AlertCircle className="h-8 w-8 text-muted-foreground" />
-              <div>
-                <p className="text-base font-semibold text-foreground">No ready PDF documents found</p>
-                <p className="mt-1 text-sm text-muted-foreground">Upload and process at least one PDF before generating an exam.</p>
+      <div className="flex-1 overflow-auto p-6">
+        <div className="max-w-3xl mx-auto space-y-6">
+          {/* Step 1: Pick document */}
+          <div className="rounded-xl border bg-card shadow-sm p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">1</div>
+              <h2 className="text-base font-semibold text-foreground">Chọn tài liệu nguồn</h2>
+            </div>
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label>Tài liệu</Label>
+                <Select value={selectedDocumentId} onValueChange={setSelectedDocumentId}>
+                  <SelectTrigger className="h-11">
+                    <SelectValue placeholder="Chọn tài liệu..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {readyDocuments.map((doc) => (
+                      <SelectItem key={doc.id} value={doc.id}>
+                        <div className="flex items-center gap-2">
+                          <BookOpen className="h-4 w-4 text-muted-foreground" />
+                          {doc.title}
+                          <span className="text-xs text-muted-foreground ml-1">
+                            · {doc.total_pages_or_slides || "?"} trang
+                          </span>
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
-              <Button asChild>
-                <Link href="/dashboard/documents">
-                  <ChevronRight className="mr-2 h-4 w-4" />
-                  Go to documents
-                </Link>
-              </Button>
-            </CardContent>
-          </Card>
-        ) : (
-          <>
-            <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
-              <Card className="rounded-2xl shadow-sm">
-                <CardHeader className="pb-4">
-                  <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                    <BookOpen className="h-4 w-4 text-primary" />
-                    Scope selection
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="flex flex-col gap-5">
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label>Select course</Label>
-                      <Select value={selectedCourse} onValueChange={setSelectedCourse}>
-                        <SelectTrigger className="h-11"><SelectValue placeholder="Filter by course" /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="all">All ready documents</SelectItem>
-                          {documents.some((document) => isReadyStatus(document.status) && !document.course_id) && (
-                            <SelectItem value="unassigned">Personal library</SelectItem>
-                          )}
-                          {courses.map((course) => (
-                            <SelectItem key={course.id} value={course.id}>{course.course_name}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+
+              {selectedDocument && (
+                <div className="grid grid-cols-3 gap-3 p-3 rounded-lg bg-muted/40 border">
+                  <div className="text-center">
+                    <div className="flex items-center justify-center gap-1 text-xs text-muted-foreground">
+                      <FileText className="h-3 w-3" />
+                      Trang
                     </div>
-                    <div className="space-y-2">
-                      <Label>Select document</Label>
-                      <Select value={selectedDocument} onValueChange={setSelectedDocument}>
-                        <SelectTrigger className="h-11"><SelectValue placeholder="Choose a processed PDF" /></SelectTrigger>
-                        <SelectContent>
-                          {filteredDocuments.map((document) => (
-                            <SelectItem key={document.id} value={document.id}>{document.title}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                    <div className="mt-1 text-lg font-semibold">{selectedDocument.total_pages_or_slides || "—"}</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="flex items-center justify-center gap-1 text-xs text-muted-foreground">
+                      <Layers className="h-3 w-3" />
+                      Chunks
+                    </div>
+                    <div className="mt-1 text-lg font-semibold">{selectedDocument.total_chunks || "—"}</div>
+                  </div>
+                  <div className="text-center">
+                    <div className="flex items-center justify-center gap-1 text-xs text-muted-foreground">
+                      <CheckCircle2 className="h-3 w-3" />
+                      Trạng thái
+                    </div>
+                    <div className="mt-1 text-sm font-medium text-emerald-600">
+                      {selectedDocument.status}
                     </div>
                   </div>
+                </div>
+              )}
+            </div>
+          </div>
 
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <MiniStat label="Course" value={selectedDocumentItem?.course_id ? courses.find((course) => course.id === selectedDocumentItem.course_id)?.course_name || "Assigned" : "Personal"} icon={GraduationCap} />
-                    <MiniStat label="Pages" value={String(selectedDocumentItem?.total_pages_or_slides || 0)} icon={FileText} />
-                    <MiniStat label="Chunks" value={String(selectedDocumentItem?.total_chunks || 0)} icon={Layers} />
-                  </div>
-
-                  <div className="rounded-xl border p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-medium text-foreground">Curriculum scope</p>
-                        <p className="mt-1 text-xs text-muted-foreground">Select the exact sections that retrieval is allowed to use. Phase 4 feedback and playbook layers still treat scope drift as a first-class failure.</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Button variant="outline" size="sm" onClick={selectAllScope} disabled={scopeNodes.length === 0}>Select all</Button>
-                        <Button variant="ghost" size="sm" onClick={clearScope}>Clear</Button>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 rounded-xl bg-muted/25 p-4">
-                      {loadingTree ? (
-                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                          Loading curriculum tree...
-                        </div>
-                      ) : curriculumTree.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">No structured tree is available for this document yet. Wait for parsing to finish or re-upload through the active documents flow.</p>
-                      ) : (
-                        <div className="space-y-2">
-                          {curriculumTree.map((node) => (
-                            <ScopeTreeNode key={buildScopePayload(node).scope_id} node={node} selectedScopeIds={selectedScopeIds} onToggle={toggleScope} />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <div className="space-y-6">
-                <Card className="rounded-2xl shadow-sm">
-                  <CardHeader className="pb-4">
-                    <CardTitle className="flex items-center gap-2 text-base font-semibold">
-                      <ShieldCheck className="h-4 w-4 text-primary" />
-                      Runtime and instrumentation
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="flex flex-col gap-5">
-                    <div className="flex flex-wrap gap-2">
-                      <Badge variant="secondary">Physics</Badge>
-                      <Badge variant="outline">Vietnamese</Badge>
-                      <Badge variant="outline">PDF only</Badge>
-                      <Badge variant="outline">MCQ single-answer</Badge>
-                      <Badge variant="outline">Strict scope</Badge>
-                      <Badge variant="outline">Feedback events</Badge>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Total questions</Label>
-                      <Input type="number" min={1} max={100} value={totalQuestions} onChange={(event) => setTotalQuestions(event.target.value)} />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Time limit (minutes)</Label>
-                      <Input value={timeLimit} onChange={(event) => setTimeLimit(event.target.value)} />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Teacher request</Label>
-                      <Textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Example: focus more on conservation laws and keep the questions concise." className="min-h-24" />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Instructions shown in the exam</Label>
-                      <Textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="Example: choose one correct answer for each question." className="min-h-20" />
-                    </div>
-                  </CardContent>
-                </Card>
-
-                <Card className="rounded-2xl shadow-sm">
-                  <CardHeader className="pb-4">
-                    <CardTitle className="text-base font-semibold text-foreground">Current quality pulse</CardTitle>
-                  </CardHeader>
-                  <CardContent className="grid gap-3 sm:grid-cols-2">
-                    <PulseStat label="Verifier pass" value={formatPercent(qualitySummary.verifier_pass_rate)} />
-                    <PulseStat label="Evidence coverage" value={formatPercent(qualitySummary.evidence_coverage_rate)} />
-                    <PulseStat label="Warning rate" value={formatPercent(qualitySummary.verifier_warning_rate)} />
-                    <PulseStat label="Avg regenerate" value={qualitySummary.avg_regenerate_count.toFixed(2)} />
-                  </CardContent>
-                </Card>
+          {/* Step 2: Scope selection */}
+          <div className="rounded-xl border bg-card shadow-sm p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">2</div>
+                <h2 className="text-base font-semibold text-foreground">Chọn phạm vi câu hỏi</h2>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="ghost" size="sm" onClick={selectAllScope} disabled={scopeNodes.length === 0}>
+                  Chọn tất cả
+                </Button>
+                <Button variant="ghost" size="sm" onClick={clearScope} disabled={selectedScopeIds.length === 0}>
+                  Bỏ chọn
+                </Button>
               </div>
             </div>
 
-            <Card className="rounded-2xl shadow-sm">
-              <CardContent className="flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between">
-                <div className="space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="secondary">{parsedQuestionCount} questions</Badge>
-                    <Badge variant="outline">{selectedScope.length > 0 ? `${selectedScope.length} scope units selected` : "Select at least one scope unit"}</Badge>
-                    <Badge variant="outline">{selectedDocumentItem?.title || "No document selected"}</Badge>
-                  </div>
-                  <p className="text-sm text-muted-foreground">This run will emit verifier signals, evidence traces, edit history, and feedback events so the review page can show where quality is breaking down.</p>
+            {loadingTree ? (
+              <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Đang tải cấu trúc tài liệu...
+              </div>
+            ) : curriculumTree.length === 0 ? (
+              <div className="py-6 text-center space-y-3">
+                <div className="flex flex-col items-center gap-2 text-sm text-muted-foreground">
+                  <AlertCircle className="h-8 w-8 text-amber-500" />
+                  <p>Tài liệu chưa có cấu trúc.</p>
+                  <p className="text-xs text-muted-foreground">
+                    Đang xử lý hoặc không tìm thấy heading tree. Thử quét lại cấu trúc.
+                  </p>
                 </div>
-                <Button size="lg" className="h-11 md:min-w-56" disabled={!selectedDocumentItem || parsedQuestionCount <= 0 || selectedScope.length === 0} onClick={handleGenerate}>
-                  <Wand2 className="mr-2 h-4 w-4" />
-                  Generate exam
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRescanStructure}
+                  disabled={rescanning}
+                >
+                  {rescanning ? (
+                    <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Đang quét...</>
+                  ) : (
+                    <><RefreshCw className="mr-2 h-4 w-4" /> Quét lại cấu trúc</>
+                  )}
                 </Button>
-              </CardContent>
-            </Card>
-          </>
-        )}
-      </div>
-    </>
-  )
-}
+              </div>
+            ) : (
+              <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                {scopeNodes.map((node) => {
+                  const scopeId = buildScopePayload(node).scope_id || ""
+                  const checked = selectedScopeIds.includes(scopeId)
+                  const isChapter = node.section_type === "chapter"
 
-function MiniStat({
-  label,
-  value,
-  icon: Icon,
-}: {
-  label: string
-  value: string
-  icon: typeof BookOpen
-}) {
-  return (
-    <div className="rounded-xl border bg-muted/20 p-4">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <Icon className="h-3.5 w-3.5" />
-        {label}
-      </div>
-      <p className="mt-2 text-lg font-semibold text-foreground">{value}</p>
-    </div>
-  )
-}
+                  return (
+                    <div
+                      key={scopeId}
+                      className={`flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors cursor-pointer ${
+                        isChapter
+                          ? "bg-muted/60 font-medium"
+                          : "hover:bg-muted/30"
+                      }`}
+                      style={{ marginLeft: isChapter ? 0 : `${Math.min((node.chapter_number - 1) * 16, 48)}px` }}
+                      onClick={() => toggleScope(scopeId, !checked)}
+                    >
+                      <Checkbox
+                        checked={checked}
+                        onCheckedChange={(val) => toggleScope(scopeId, val === true)}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-foreground truncate">{node.title}</div>
+                        {node.page_from || node.page_to ? (
+                          <div className="text-xs text-muted-foreground">
+                            Trang {node.page_from || "?"}–{node.page_to || "?"}
+                          </div>
+                        ) : null}
+                      </div>
+                      <Badge variant="outline" className="text-xs shrink-0 capitalize">
+                        {node.section_type}
+                      </Badge>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
 
-function PulseStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border bg-muted/20 p-4">
-      <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
-      <p className="mt-2 text-xl font-semibold text-foreground">{value}</p>
-    </div>
-  )
-}
-
-function ScopeTreeNode({
-  node,
-  selectedScopeIds,
-  onToggle,
-  depth = 0,
-}: {
-  node: CurriculumNode
-  selectedScopeIds: string[]
-  onToggle: (scopeId: string, checked: boolean) => void
-  depth?: number
-}) {
-  const scopeId = buildScopePayload(node).scope_id || ""
-  const checked = selectedScopeIds.includes(scopeId)
-
-  return (
-    <div>
-      <div className="flex items-start gap-3 rounded-xl border bg-background px-3 py-3" style={{ marginLeft: `${depth * 14}px` }}>
-        <Checkbox checked={checked} onCheckedChange={(value) => onToggle(scopeId, value === true)} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-medium text-foreground">{node.title}</p>
-            <Badge variant="outline" className="capitalize">{node.section_type || "topic"}</Badge>
-            {node.chapter_number > 0 ? <Badge variant="secondary">Chapter {node.chapter_number}</Badge> : null}
-          </div>
-          {(node.summary || node.page_from || node.page_to) ? (
-            <p className="mt-1 text-xs text-muted-foreground">
-              {node.summary || "Scoped curriculum unit"}
-              {node.page_from || node.page_to ? ` - pages ${node.page_from || "?"}-${node.page_to || "?"}` : ""}
+            <p className="mt-3 text-xs text-muted-foreground">
+              {selectedScopeIds.length} / {scopeNodes.length} phần đã chọn
             </p>
-          ) : null}
+          </div>
+
+          {/* Step 3: Exam settings */}
+          <div className="rounded-xl border bg-card shadow-sm p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold">3</div>
+              <h2 className="text-base font-semibold text-foreground">Cài đặt đề thi</h2>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label>Số câu hỏi</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={totalQuestions}
+                  onChange={(e) => setTotalQuestions(e.target.value)}
+                  className="h-11"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Thời gian (phút)</Label>
+                <Input
+                  type="number"
+                  min={5}
+                  max={180}
+                  value={timeLimit}
+                  onChange={(e) => setTimeLimit(e.target.value)}
+                  className="h-11"
+                />
+              </div>
+            </div>
+            <div className="mt-4 space-y-1.5">
+              <Label>Yêu cầu của giáo viên <span className="text-xs text-muted-foreground font-normal">(tuỳ chọn)</span></Label>
+              <Textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="Ví dụ: tập trung vào các định luật bảo toàn, câu hỏi ngắn gọn..."
+                className="min-h-20 resize-none"
+              />
+            </div>
+          </div>
+
+          {/* Summary + Generate */}
+          <div className="rounded-xl border bg-primary/5 shadow-sm p-6 flex items-center justify-between gap-4">
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-foreground">
+                {selectedDocument?.title || "—"}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="secondary">{Number(totalQuestions) || 0} câu</Badge>
+                <Badge variant="outline">{selectedScopeIds.length} phạm vi</Badge>
+                <Badge variant="outline">{timeLimit || "?"} phút</Badge>
+                <Badge variant="outline">PDF · MCQ · Tiếng Việt</Badge>
+              </div>
+            </div>
+            <Button
+              size="lg"
+              className="shrink-0 h-11 px-6"
+              disabled={
+                !selectedDocument ||
+                selectedScopeIds.length === 0 ||
+                !Number(totalQuestions)
+              }
+              onClick={handleGenerate}
+            >
+              <Wand2 className="mr-2 h-4 w-4" />
+              Sinh đề thi
+            </Button>
+          </div>
         </div>
       </div>
-      {(node.children || []).length > 0 ? (
-        <div className="mt-2 space-y-2">
-          {node.children.map((child) => (
-            <ScopeTreeNode key={buildScopePayload(child).scope_id} node={child} selectedScopeIds={selectedScopeIds} onToggle={onToggle} depth={depth + 1} />
-          ))}
-        </div>
-      ) : null}
     </div>
   )
 }

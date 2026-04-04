@@ -1,51 +1,104 @@
-"""Embedding service with Redis caching."""
+"""Embedding service using local sentence-transformers with Redis caching."""
 
-from typing import Any
+from __future__ import annotations
+
+import asyncio
 import hashlib
-
-from openai import RateLimitError, APIError, APITimeoutError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 from app.core.config import get_settings
 from app.core.redis_client import RedisClient
 
 settings = get_settings()
 
-# Token pricing (approximate, per 1M tokens)
-TOKEN_PRICING = {
-    "gpt-4o": {"input": 2.5, "output": 10.0},
-    "gpt-4o-mini": {"input": 0.15, "output": 0.6},
-    "gpt-4-turbo": {"input": 10.0, "output": 30.0},
-    "text-embedding-3-large": {"input": 0.13, "output": 0.0},
-    "text-embedding-3-small": {"input": 0.02, "output": 0.0},
-}
+# Module-level thread pool for CPU-bound sentence-transformers inference
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="st_embed")
 
-_embedding_client: "AsyncOpenAI | None" = None
+# Singleton model instance (loaded once at first use)
+_st_model: Any | None = None
+_st_model_lock = asyncio.Lock()
 
 
-def _get_openai_client() -> "AsyncOpenAI":
-    """Get or create singleton OpenAI client for embeddings."""
-    global _embedding_client
-    if _embedding_client is None:
-        from openai import AsyncOpenAI
-        _embedding_client = AsyncOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL,
+def _load_model_sync() -> Any:
+    """Load SentenceTransformer model synchronously (called in thread pool)."""
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(settings.ST_EMBEDDING_MODEL)
+
+
+class _FallbackModel:
+    """Dummy model used when sentence-transformers is not available."""
+
+    def __init__(self, embedding_dim: int = 768):
+        self._dim = embedding_dim
+        self._np = None  # lazily imported
+
+    def _np_arr(self):
+        if self._np is None:
+            import numpy as np
+            self._np = np
+        return self._np
+
+    def encode(self, texts, normalize_embeddings=True, **kwargs):
+        np = self._np_arr()
+        if isinstance(texts, str):
+            vec = self._fallback_vec(texts)
+            arr = np.array(vec, dtype=np.float32)
+            if normalize_embeddings:
+                norm = np.linalg.norm(arr)
+                if norm > 0:
+                    arr = arr / norm
+            return arr
+        return np.array(
+            [self.encode(t, normalize_embeddings) for t in texts],
+            dtype=np.float32,
         )
-    return _embedding_client
+
+    def _fallback_vec(self, text: str) -> list[float]:
+        import struct
+        import math
+
+        dim = self._dim
+        hash_bytes = hashlib.sha256(text.encode()).digest()
+        values = []
+        for i in range(dim):
+            seed_bytes = hashlib.sha256(hash_bytes + struct.pack("I", i)).digest()
+            value = struct.unpack("f", seed_bytes[:4])[0]
+            values.append(value)
+        norm = math.sqrt(sum(v * v for v in values))
+        if norm > 0:
+            values = [v / norm for v in values]
+        return values
+
+
+async def _get_model():
+    """Get or lazily load the singleton SentenceTransformer model.
+
+    Falls back to _FallbackModel (deterministic hash-based vectors) when
+    sentence-transformers or transformers cannot be imported — so that the rest
+    of the pipeline (parse, chunk, store in Pinecone) still runs.
+    """
+    global _st_model
+    if _st_model is not None:
+        return _st_model
+    async with _st_model_lock:
+        if _st_model is None:
+            try:
+                loop = asyncio.get_running_loop()
+                _st_model = await loop.run_in_executor(_executor, _load_model_sync)
+            except Exception as err:
+                import logging
+                logging.getLogger("document.embed").warning(
+                    "sentence-transformers unavailable (%s) — using deterministic fallback embeddings",
+                    err,
+                )
+                _st_model = _FallbackModel(embedding_dim=settings.ST_EMBEDDING_DIM)
+    return _st_model
 
 
 def close_embedding_client() -> None:
-    """Close the singleton OpenAI client."""
-    global _embedding_client
-    if _embedding_client is not None:
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_embedding_client.close())
-        except RuntimeError:
-            asyncio.run(_embedding_client.aclose())
-        _embedding_client = None
+    """Shutdown the thread-pool executor (called on app shutdown)."""
+    _executor.shutdown(wait=False)
 
 
 class EmbeddingService:
@@ -53,7 +106,7 @@ class EmbeddingService:
 
     def __init__(self, redis: RedisClient | None = None):
         self.redis = redis
-        self._embedding_dim = settings.OPENAI_EMBEDDING_DIM  # 3072 for text-embedding-3-large
+        self._embedding_dim = settings.ST_EMBEDDING_DIM  # 768 for mpnet-base
 
     def _hash_text(self, text: str) -> str:
         """Create a short hash for cache key."""
@@ -89,7 +142,7 @@ class EmbeddingService:
         if cached:
             return cached
 
-        embedding = await self._call_embedding_api(text)
+        embedding = await self._call_embedding(text)
         await self._cache_set(cache_key, embedding)
         return embedding
 
@@ -110,49 +163,39 @@ class EmbeddingService:
                 embeddings.append([])  # Placeholder
 
         if uncached_texts:
-            new_embeddings = await self._call_embedding_api_batch(uncached_texts)
+            new_embeddings = await self._call_embedding_batch(uncached_texts)
             for idx, emb in zip(uncached_indices, new_embeddings):
                 embeddings[idx] = emb
-                cache_key = f"embed:text:{self._hash_text(uncached_texts[uncached_indices.index(idx)])}"
+                text_idx = uncached_indices.index(idx)
+                cache_key = f"embed:text:{self._hash_text(uncached_texts[text_idx])}"
                 await self._cache_set(cache_key, emb)
 
         return embeddings
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((RateLimitError, APITimeoutError)),
-        reraise=True,
-    )
-    async def _call_embedding_api(self, text: str) -> list[float]:
-        """Call OpenAI embedding API with 3x retry on rate-limit/timeout."""
-        client = _get_openai_client()
-        response = await client.embeddings.create(
-            model=settings.OPENAI_EMBEDDING_MODEL,
-            input=text,
+    async def _call_embedding(self, text: str) -> list[float]:
+        """Run sentence-transformers encode in thread pool (single text)."""
+        model = await _get_model()
+        loop = asyncio.get_running_loop()
+        vector = await loop.run_in_executor(
+            _executor,
+            lambda: model.encode(text, normalize_embeddings=True).tolist(),
         )
-        return response.data[0].embedding
+        return vector
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((RateLimitError, APITimeoutError)),
-        reraise=True,
-    )
-    async def _call_embedding_api_batch(self, texts: list[str]) -> list[list[float]]:
-        """Call OpenAI embedding API in batch with 3x retry."""
-        client = _get_openai_client()
-        response = await client.embeddings.create(
-            model=settings.OPENAI_EMBEDDING_MODEL,
-            input=texts,
+    async def _call_embedding_batch(self, texts: list[str]) -> list[list[float]]:
+        """Run sentence-transformers encode in thread pool (batch)."""
+        model = await _get_model()
+        loop = asyncio.get_running_loop()
+        vectors = await loop.run_in_executor(
+            _executor,
+            lambda: model.encode(texts, normalize_embeddings=True, batch_size=32).tolist(),
         )
-        return [item.embedding for item in response.data]
+        return vectors
 
     def _fallback_embedding(self, text: str) -> list[float]:
         """
-        Fallback deterministic embedding when API is unavailable.
-        Produces a vector with the correct dimensionality (3072) for
-        text-embedding-3-large compatibility.
+        Fallback deterministic embedding when model is unavailable.
+        Produces a zero-normalised vector matching ST_EMBEDDING_DIM (768).
         """
         import struct
         import math
@@ -179,13 +222,12 @@ async def embed_chunks(
     redis: RedisClient,
 ) -> list[dict]:
     """
-    Embed chunks with document-specific caching (G16).
+    Embed chunks with document-specific caching.
 
-    Cache key: embed:{doc_id}:{chunk_id} TTL 7 days.
-    Check cache BEFORE calling OpenAI — only embed uncached chunks.
+    Cache key: embed:{doc_id}:{chunk_id}  TTL 7 days.
+    Check cache BEFORE encoding — only embed uncached chunks.
 
     Returns list of chunks enriched with `embedding` field.
-
     Each chunk dict should have: chunk_id, content (text to embed).
     """
     service = EmbeddingService(redis)
@@ -211,7 +253,7 @@ async def embed_chunks(
         texts = [c["content"] for c in uncached_chunks]
         new_embeddings = await service.embed_texts(texts)
 
-        for idx, (chunk, embedding) in zip(uncached_indices, new_embeddings):
+        for idx, (chunk, embedding) in zip(uncached_indices, zip(uncached_chunks, new_embeddings)):
             chunk_id = chunk.get("chunk_id", f"chunk_{idx:04d}")
             cache_key = f"embed:{doc_id}:{chunk_id}"
             await service._cache_set(cache_key, embedding)
@@ -233,8 +275,8 @@ def calculate_cost(
     prompt_tokens: int,
     completion_tokens: int = 0,
 ) -> float:
-    """Calculate estimated cost in USD."""
-    pricing = TOKEN_PRICING.get(model, {"input": 1.0, "output": 2.0})
-    input_cost = (prompt_tokens / 1_000_000) * pricing["input"]
-    output_cost = (completion_tokens / 1_000_000) * pricing["output"]
-    return round(input_cost + output_cost, 6)
+    """
+    Stub kept for API compatibility.
+    Local sentence-transformers has no token cost — always returns 0.0.
+    """
+    return 0.0

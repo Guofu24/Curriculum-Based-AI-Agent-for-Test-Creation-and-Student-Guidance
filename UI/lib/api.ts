@@ -40,7 +40,17 @@ async function authorizedFetch(
     headers["Content-Type"] = "application/json";
   }
 
-  const response = await fetch(`${API_URL}${path}`, { ...options, headers });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { ...options, headers });
+  } catch (err) {
+    const message =
+      err instanceof TypeError && err.message === "Failed to fetch"
+        ? "Cannot connect to server. Please check that the backend is running."
+        : "Network error. Please check your connection.";
+    throw new ApiError(0, message);
+  }
+
   if (response.status !== 401 || !allowRefresh || path === "/auth/refresh") {
     return response;
   }
@@ -58,7 +68,17 @@ async function authorizedFetch(
     retryHeaders["Content-Type"] = "application/json";
   }
 
-  return fetch(`${API_URL}${path}`, { ...options, headers: retryHeaders });
+  let retryResponse: Response;
+  try {
+    retryResponse = await fetch(`${API_URL}${path}`, { ...options, headers: retryHeaders });
+  } catch (err) {
+    const message =
+      err instanceof TypeError && err.message === "Failed to fetch"
+        ? "Cannot connect to server. Please check that the backend is running."
+        : "Network error. Please check your connection.";
+    throw new ApiError(0, message);
+  }
+  return retryResponse;
 }
 
 async function refreshAccessToken(): Promise<string | null> {
@@ -141,7 +161,7 @@ export class ApiError extends Error {
 }
 
 export function isReadyStatus(status: string): boolean {
-  return ["processed", "structured", "indexed"].includes(status.toLowerCase());
+  return ["pending", "processing", "processed", "structured", "indexed"].includes(status.toLowerCase());
 }
 
 export interface User {
@@ -213,6 +233,15 @@ export interface CurriculumNode {
   children: CurriculumNode[];
 }
 
+export interface DocumentUploadResponse {
+  document_id: string;
+  message: string;
+  s3_key: string;
+  processing_status?: string;
+  uploaded_at?: string | null;
+  created_at?: string | null;
+}
+
 export interface DocumentStatus {
   id: string;
   course_id?: string | null;
@@ -220,6 +249,7 @@ export interface DocumentStatus {
   parse_error_message?: string | null;
   total_pages_or_slides: number;
   total_chunks: number;
+  created_at?: string | null;
   updated_at?: string | null;
 }
 
@@ -228,16 +258,19 @@ export interface Document {
   course_id?: string | null;
   title: string;
   file_name: string;
+  original_filename: string;
   file_type: string;
   file_size: number;
   file_hash?: string | null;
   file_storage_url?: string | null;
   language?: string | null;
   status: string;
+  processing_status: string;
   version: number;
   total_pages_or_slides: number;
   total_chunks: number;
-  created_at: string;
+  created_at?: string | null;
+  uploaded_at?: string | null;
   updated_at?: string | null;
   curriculum_tree: CurriculumNode[];
 }
@@ -246,16 +279,19 @@ export interface DocumentListItem {
   id: string;
   course_id?: string | null;
   title: string;
+  original_filename: string;
   file_name: string;
   file_type: string;
   file_size: number;
   status: string;
+  processing_status: string;
   version: number;
+  chapter_count?: number;
+  created_at?: string | null;
+  uploaded_at?: string | null;
+  updated_at?: string | null;
   total_pages_or_slides: number;
   total_chunks: number;
-  chapter_count?: number;
-  created_at: string;
-  updated_at?: string | null;
 }
 
 interface DocumentUploadOptions {
@@ -721,8 +757,9 @@ export const courses = {
 };
 
 export const documents = {
-  listAll() {
-    return request<DocumentListItem[]>("/documents");
+  async listAll() {
+    const res = await request<DocumentListItem[] | { items: DocumentListItem[] }>("/documents");
+    return Array.isArray(res) ? res : (res.items ?? []);
   },
 
   list(courseId?: string) {
@@ -744,7 +781,7 @@ export const documents = {
     const path = options?.course_id
       ? `/courses/${encodeURIComponent(options.course_id)}/documents/upload`
       : "/documents/upload";
-    return request<Document>(path, {
+    return request<DocumentUploadResponse>(path, {
       method: "POST",
       body: form,
     });
@@ -759,14 +796,19 @@ export const documents = {
   },
 
   getCurriculumTree(documentId: string) {
-    return request<CurriculumNode[]>(`/documents/${encodeURIComponent(documentId)}/curriculum-tree`);
+    return request<{ document_id: string; curriculum_tree: CurriculumNode[] }>(
+      `/documents/${encodeURIComponent(documentId)}/curriculum-tree`
+    ).then((r) => r.curriculum_tree);
   },
 
   updateCurriculumTree(documentId: string, curriculumTree: CurriculumNode[]) {
-    return request<CurriculumNode[]>(`/documents/${encodeURIComponent(documentId)}/curriculum-tree`, {
-      method: "PATCH",
-      body: JSON.stringify({ curriculum_tree: curriculumTree }),
-    });
+    return request<{ document_id: string; curriculum_tree: CurriculumNode[] }>(
+      `/documents/${encodeURIComponent(documentId)}/curriculum-tree`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ curriculum_tree: curriculumTree }),
+      }
+    ).then((r) => r.curriculum_tree);
   },
 
   delete(documentId: string) {
@@ -774,11 +816,22 @@ export const documents = {
       method: "DELETE",
     });
   },
+
+  rescanStructure(documentId: string) {
+    return request<DocumentListItem>(
+      `/documents/${encodeURIComponent(documentId)}/rescan-structure`,
+      { method: "POST" }
+    );
+  },
 };
 
 export const exams = {
   list() {
     return request<ExamListItem[]>("/exams/");
+  },
+
+  get(examId: string) {
+    return request<Exam>(`/exams/${encodeURIComponent(examId)}`);
   },
 
   getQualitySummary() {

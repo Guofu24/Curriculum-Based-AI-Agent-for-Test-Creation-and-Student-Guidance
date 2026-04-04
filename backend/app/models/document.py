@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional, List, TYPE_CHECKING
 
-from sqlalchemy import String, Integer, ForeignKey, func, DateTime
+from sqlalchemy import String, Integer, ForeignKey, func, DateTime, UUID as SQLUUID
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -35,6 +35,10 @@ class Document(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    course_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        SQLUUID(as_uuid=True), nullable=True, index=True
+    )
+    file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     original_filename: Mapped[str] = mapped_column(String(500), nullable=False)
     file_type: Mapped[str] = mapped_column(String(10), nullable=False)  # pdf, docx, pptx
     s3_key: Mapped[str] = mapped_column(String(1000), nullable=False)

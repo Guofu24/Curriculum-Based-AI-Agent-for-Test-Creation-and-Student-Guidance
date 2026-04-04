@@ -1,99 +1,81 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import Link from "next/link"
-import { DashboardHeader } from "@/components/dashboard-header"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
+import { useCallback, useEffect, useState, useRef } from "react"
 import {
   BookOpen,
-  Calendar,
   CloudUpload,
-  Eye,
   FileText,
-  FolderOpen,
-  GraduationCap,
   Layers,
   Loader2,
   MoreVertical,
-  Plus,
-  Shield,
-  Sparkles,
   Trash2,
   Upload,
   X,
+  CheckCircle,
+  Clock,
+  AlertCircle,
+  Plus,
 } from "lucide-react"
 import {
-  courses as coursesApi,
   documents as documentsApi,
+  courses as coursesApi,
   isReadyStatus,
-  type Course,
-  type CurriculumNode,
   type DocumentListItem,
+  type Course,
 } from "@/lib/api"
 
 function formatFileSize(bytes: number) {
+  if (!bytes) return "—"
   if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`
   if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`
   if (bytes >= 1e3) return `${(bytes / 1e3).toFixed(1)} KB`
   return `${bytes} B`
 }
 
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
+function formatDate(iso: string | null | undefined) {
+  if (!iso) return "—"
+  return new Date(iso).toLocaleDateString("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
     year: "numeric",
   })
 }
 
-function countTreeNodes(nodes: CurriculumNode[]): number {
-  return nodes.reduce((total, node) => total + 1 + countTreeNodes(node.children || []), 0)
+function StatusBadge({ status }: { status: string }) {
+  const s = status.toLowerCase()
+  if (s === "completed" || s === "indexed" || s === "processed" || s === "structured") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 text-xs px-2.5 py-1 font-medium border border-emerald-200 dark:border-emerald-800">
+        <CheckCircle className="h-3 w-3" />
+        Sẵn sàng
+      </span>
+    )
+  }
+  if (s === "processing" || s === "pending") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 text-xs px-2.5 py-1 font-medium border border-amber-200 dark:border-amber-800">
+        <Clock className="h-3 w-3" />
+        Đang xử lý
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300 text-xs px-2.5 py-1 font-medium border border-red-200 dark:border-red-800">
+      <AlertCircle className="h-3 w-3" />
+      Lỗi
+    </span>
+  )
 }
-
-function flattenTitles(nodes: CurriculumNode[], depth = 0): string[] {
-  return nodes.flatMap((node) => [
-    `${"  ".repeat(depth)}${node.title}`,
-    ...flattenTitles(node.children || [], depth + 1),
-  ])
-}
-
-type CollectionFilter = "all" | "unassigned" | `course:${string}`
 
 export default function DocumentsPage() {
-  const [courses, setCourses] = useState<Course[]>([])
   const [documents, setDocuments] = useState<DocumentListItem[]>([])
-  const [selectedCollection, setSelectedCollection] = useState<CollectionFilter>("all")
+  const [courses, setCourses] = useState<Course[]>([])
   const [loading, setLoading] = useState(true)
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [isDragging, setIsDragging] = useState(false)
-  const [detailDocument, setDetailDocument] = useState<DocumentListItem | null>(null)
-  const [detailCurriculum, setDetailCurriculum] = useState<CurriculumNode[]>([])
-  const [loadingCurriculum, setLoadingCurriculum] = useState(false)
   const [error, setError] = useState("")
-  const [creatingCourse, setCreatingCourse] = useState(false)
-  const [courseName, setCourseName] = useState("")
-  const [courseSubject, setCourseSubject] = useState("Physics")
-  const [courseLevel, setCourseLevel] = useState("")
-  const [courseDescription, setCourseDescription] = useState("")
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const loadData = useCallback(async () => {
@@ -104,8 +86,8 @@ export default function DocumentsPage() {
       ])
       setCourses(courseList)
       setDocuments(documentList)
-    } catch (loadError: unknown) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load courses and documents")
+    } catch {
+      setError("Không thể tải dữ liệu")
     } finally {
       setLoading(false)
     }
@@ -115,464 +97,193 @@ export default function DocumentsPage() {
     void loadData()
   }, [loadData])
 
-  useEffect(() => {
-    if (selectedCollection !== "all") return
-    if (courses.length > 0) {
-      setSelectedCollection(`course:${courses[0].id}`)
-      return
-    }
-    if (documents.some((document) => !document.course_id)) {
-      setSelectedCollection("unassigned")
-    }
-  }, [courses, documents, selectedCollection])
-
-  const selectedCourseId = selectedCollection.startsWith("course:")
-    ? selectedCollection.slice("course:".length)
-    : null
-
-  const selectedCourse = courses.find((course) => course.id === selectedCourseId) || null
-
-  const filteredDocuments = useMemo(() => {
-    if (selectedCollection === "all") return documents
-    if (selectedCollection === "unassigned") return documents.filter((document) => !document.course_id)
-    return documents.filter((document) => document.course_id === selectedCourseId)
-  }, [documents, selectedCollection, selectedCourseId])
-
-  const processedCount = filteredDocuments.filter((document) => isReadyStatus(document.status)).length
-
-  const handleCreateCourse = useCallback(async () => {
-    if (!courseName.trim() || !courseSubject.trim()) {
-      setError("Course name and subject are required")
-      return
-    }
-    setCreatingCourse(true)
-    setError("")
-    try {
-      const created = await coursesApi.create({
-        course_name: courseName.trim(),
-        subject: courseSubject.trim(),
-        academic_level: courseLevel.trim() || undefined,
-        description: courseDescription.trim() || undefined,
-      })
-      setCourses((previous) => [created, ...previous])
-      setSelectedCollection(`course:${created.id}`)
-      setCourseName("")
-      setCourseSubject("Physics")
-      setCourseLevel("")
-      setCourseDescription("")
-    } catch (createError: unknown) {
-      setError(createError instanceof Error ? createError.message : "Failed to create course")
-    } finally {
-      setCreatingCourse(false)
-    }
-  }, [courseDescription, courseLevel, courseName, courseSubject])
-
   const handleUpload = useCallback(async (file: File) => {
     setIsUploading(true)
     setUploadProgress(10)
     setError("")
 
     const interval = setInterval(() => {
-      setUploadProgress((current) => Math.min(current + 6, 90))
-    }, 250)
+      setUploadProgress((p) => Math.min(p + 8, 90))
+    }, 300)
 
     try {
       const title = file.name.replace(/\.[^.]+$/, "")
-      await documentsApi.upload(title, file, {
-        course_id: selectedCourseId || undefined,
-        language: "vi",
-      })
+      await documentsApi.upload(title, file, { language: "vi" })
       setUploadProgress(100)
       await loadData()
-    } catch (uploadError: unknown) {
-      setError(uploadError instanceof Error ? uploadError.message : "Upload failed")
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Upload thất bại")
     } finally {
       clearInterval(interval)
       setIsUploading(false)
       setUploadProgress(0)
     }
-  }, [loadData, selectedCourseId])
-
-  const handleFileSelect = useCallback((files: FileList | null) => {
-    if (!files || files.length === 0) return
-    void handleUpload(files[0])
-  }, [handleUpload])
+  }, [loadData])
 
   const handleDelete = useCallback(async (id: string) => {
+    setDeletingId(id)
     try {
       await documentsApi.delete(id)
-      setDocuments((previous) => previous.filter((document) => document.id !== id))
-      if (detailDocument?.id === id) {
-        setDetailDocument(null)
-        setDetailCurriculum([])
-      }
-    } catch (deleteError: unknown) {
-      setError(deleteError instanceof Error ? deleteError.message : "Delete failed")
-    }
-  }, [detailDocument])
-
-  const openDetails = useCallback(async (document: DocumentListItem) => {
-    setDetailDocument(document)
-    setDetailCurriculum([])
-    setLoadingCurriculum(true)
-    try {
-      const tree = await documentsApi.getCurriculumTree(document.id)
-      setDetailCurriculum(tree)
-    } catch {
-      setDetailCurriculum([])
+      setDocuments((prev) => prev.filter((d) => d.id !== id))
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Xóa thất bại")
     } finally {
-      setLoadingCurriculum(false)
+      setDeletingId(null)
     }
   }, [])
 
+  const readyCount = documents.filter((d) => isReadyStatus(d.status)).length
+
   return (
-    <>
-      <DashboardHeader title="Courses & Documents" />
-      <div className="flex flex-1 flex-col gap-6 p-6">
-        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center justify-between px-6 py-4 border-b bg-background/60 backdrop-blur-sm">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <BookOpen className="h-4.5 w-4.5" />
+          </div>
           <div>
-            <h2 className="text-2xl font-semibold tracking-tight text-foreground">
-              Document intake and scope readiness
-            </h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Organize Physics PDFs, confirm curriculum extraction, and make sure each source is ready for Phase 4 feedback, playbook, and warmup tracking.
-            </p>
+            <h1 className="text-lg font-semibold text-foreground">Tài liệu</h1>
+            <p className="text-xs text-muted-foreground">{documents.length} tài liệu · {readyCount} sẵn sàng sinh đề</p>
           </div>
-          <Badge variant="secondary" className="w-fit gap-1.5">
-            <Shield className="h-3 w-3" />
-            Phase 4 document gate
-          </Badge>
+        </div>
+        <button
+          className="flex items-center gap-2 rounded-lg bg-primary text-primary-foreground px-4 py-2 text-sm font-medium hover:bg-primary/90 transition-colors"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <Plus className="h-4 w-4" />
+          Tải lên PDF
+        </button>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="flex items-center justify-between mx-6 mt-4 rounded-lg bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300 px-4 py-2.5 text-sm border border-red-200 dark:border-red-800">
+          <span>{error}</span>
+          <button onClick={() => setError("")}><X className="h-4 w-4" /></button>
+        </div>
+      )}
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".pdf"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) void handleUpload(file)
+          e.target.value = ""
+        }}
+      />
+
+      <div className="flex-1 overflow-auto p-6">
+        {/* Upload zone */}
+        <div
+          className={`relative rounded-2xl border-2 border-dashed p-8 mb-6 text-center transition-all ${isDragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/50"}`}
+          onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault()
+            setIsDragging(false)
+            const file = e.dataTransfer.files[0]
+            if (file) void handleUpload(file)
+          }}
+        >
+          {isUploading ? (
+            <div className="space-y-3">
+              <Loader2 className="h-8 w-8 mx-auto text-primary animate-spin" />
+              <p className="text-sm font-medium">Đang tải lên và xử lý...</p>
+              <div className="h-1.5 bg-muted rounded-full overflow-hidden mx-auto max-w-xs">
+                <div className="h-full bg-primary transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+              </div>
+              <p className="text-xs text-muted-foreground">{uploadProgress}%</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+                <CloudUpload className="h-6 w-6 text-muted-foreground" />
+              </div>
+              <p className="text-sm font-medium">Kéo thả file PDF vào đây</p>
+              <p className="text-xs text-muted-foreground">hoặc <button className="text-primary underline" onClick={() => fileInputRef.current?.click()}>chọn file</button> từ máy</p>
+            </div>
+          )}
         </div>
 
-        {error && (
-          <div className="flex items-center justify-between rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            <span>{error}</span>
-            <button onClick={() => setError("")} aria-label="Dismiss error">
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        )}
-
-        <input ref={fileInputRef} type="file" accept=".pdf" className="hidden" onChange={(event) => handleFileSelect(event.target.files)} />
-
-        <div className="grid gap-6 xl:grid-cols-[1.15fr_1.85fr]">
-          <Card className="rounded-2xl shadow-sm">
-            <CardHeader className="pb-4">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <GraduationCap className="h-4 w-4 text-primary" />
-                Create Course
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-4">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="course-name">Course name</Label>
-                  <Input id="course-name" placeholder="Physics 101" value={courseName} onChange={(event) => setCourseName(event.target.value)} />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="course-subject">Subject</Label>
-                  <Input id="course-subject" placeholder="Physics" value={courseSubject} onChange={(event) => setCourseSubject(event.target.value)} readOnly />
-                </div>
-              </div>
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="course-level">Academic level</Label>
-                  <Input id="course-level" placeholder="Undergraduate" value={courseLevel} onChange={(event) => setCourseLevel(event.target.value)} />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="course-description">Description</Label>
-                  <Input id="course-description" placeholder="Semester 1 mechanics course" value={courseDescription} onChange={(event) => setCourseDescription(event.target.value)} />
-                </div>
-              </div>
-              <Button onClick={() => void handleCreateCourse()} disabled={creatingCourse}>
-                {creatingCourse ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
-                {creatingCourse ? "Creating..." : "Create course"}
-              </Button>
-            </CardContent>
-          </Card>
-
-          <Card className="rounded-2xl shadow-sm">
-            <CardHeader className="pb-4">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <FolderOpen className="h-4 w-4 text-primary" />
-                Collections
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-4">
-              <div className="flex flex-wrap gap-2">
-                <FilterChip active={selectedCollection === "all"} label={`All documents (${documents.length})`} onClick={() => setSelectedCollection("all")} />
-                {documents.some((document) => !document.course_id) ? (
-                  <FilterChip active={selectedCollection === "unassigned"} label={`Personal library (${documents.filter((document) => !document.course_id).length})`} onClick={() => setSelectedCollection("unassigned")} />
-                ) : null}
-                {courses.map((course) => (
-                  <FilterChip key={course.id} active={selectedCollection === `course:${course.id}`} label={`${course.course_name} (${course.document_count})`} onClick={() => setSelectedCollection(`course:${course.id}`)} />
-                ))}
-              </div>
-
-              <div
-                className={`rounded-2xl border-2 border-dashed p-8 text-center transition-colors ${isDragging ? "border-primary bg-primary/5" : "border-border hover:border-primary/40 hover:bg-muted/30"}`}
-                onDragOver={(event) => { event.preventDefault(); setIsDragging(true) }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={(event) => {
-                  event.preventDefault()
-                  setIsDragging(false)
-                  handleFileSelect(event.dataTransfer.files)
-                }}
-              >
-                {isUploading ? (
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10">
-                      <CloudUpload className="h-6 w-6 animate-pulse text-primary" />
-                    </div>
-                    <div className="w-full max-w-xs">
-                      <p className="mb-2 text-sm font-medium text-foreground">Uploading and structuring document...</p>
-                      <div className="h-2 overflow-hidden rounded-full bg-muted">
-                        <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${uploadProgress}%` }} />
-                      </div>
-                      <p className="mt-2 text-xs text-muted-foreground">{uploadProgress}% complete</p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-muted">
-                      <Upload className="h-6 w-6 text-muted-foreground" />
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-foreground">{selectedCourse ? `Upload into ${selectedCourse.course_name}` : "Upload into your personal library"}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">Supports PDF only. Structured curriculum and retrieval evidence will be built from this source.</p>
-                    </div>
-                    <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>
-                      <Upload className="mr-2 h-3.5 w-3.5" />
-                      Browse files
-                    </Button>
-                  </div>
-                )}
-              </div>
-
-              <div className="grid gap-4 sm:grid-cols-3">
-                <SummaryCard label="Courses" value={courses.length.toString()} icon={GraduationCap} />
-                <SummaryCard label="Documents in view" value={filteredDocuments.length.toString()} icon={BookOpen} />
-                <SummaryCard label="Quality-ready docs" value={processedCount.toString()} icon={Sparkles} />
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
+        {/* Document grid */}
         {loading ? (
-          <div className="flex items-center justify-center py-16"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
-        ) : filteredDocuments.length === 0 ? (
-          <Card className="rounded-2xl border-dashed shadow-sm">
-            <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted"><BookOpen className="h-7 w-7 text-muted-foreground" /></div>
-              <div>
-                <p className="text-base font-semibold text-foreground">No documents in this collection</p>
-                <p className="mt-1 text-sm text-muted-foreground">Create a course or upload your first document to start building curriculum-aware, quality-traceable exams.</p>
-              </div>
-            </CardContent>
-          </Card>
+          <div className="flex items-center justify-center py-16">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : documents.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-muted mb-3">
+              <FileText className="h-7 w-7 text-muted-foreground" />
+            </div>
+            <p className="text-sm font-medium">Chưa có tài liệu nào</p>
+            <p className="text-xs text-muted-foreground mt-1">Tải lên PDF đầu tiên để bắt đầu sinh đề</p>
+          </div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {filteredDocuments.map((document) => (
-              <DocumentCard key={document.id} document={document} course={courses.find((course) => course.id === document.course_id) || null} onDelete={handleDelete} onViewDetails={openDetails} />
+            {documents.map((doc) => (
+              <div
+                key={doc.id}
+                className="group relative rounded-xl border bg-card p-5 shadow-sm hover:shadow-md transition-all"
+              >
+                <div className="flex items-start justify-between">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
+                    <FileText className="h-5 w-5 text-primary" />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <StatusBadge status={doc.status} />
+                    <button
+                      className="flex h-7 w-7 items-center justify-center rounded-md opacity-0 group-hover:opacity-100 hover:bg-destructive/10 transition-all"
+                      onClick={() => void handleDelete(doc.id)}
+                      disabled={deletingId === doc.id}
+                    >
+                      {deletingId === doc.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                      ) : (
+                        <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <h3 className="text-sm font-semibold text-foreground line-clamp-2 leading-snug">{doc.title}</h3>
+                  <p className="text-xs text-muted-foreground mt-1">{formatFileSize(doc.file_size)} · {doc.file_type.toUpperCase()}</p>
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-2">
+                  <div className="rounded-lg bg-muted/50 p-2.5 text-center">
+                    <div className="flex items-center justify-center gap-1 text-xs text-muted-foreground">
+                      <FileText className="h-3 w-3" />
+                      Trang
+                    </div>
+                    <div className="mt-0.5 text-sm font-semibold text-foreground">{doc.total_pages_or_slides || "—"}</div>
+                  </div>
+                  <div className="rounded-lg bg-muted/50 p-2.5 text-center">
+                    <div className="flex items-center justify-center gap-1 text-xs text-muted-foreground">
+                      <Layers className="h-3 w-3" />
+                      Chunks
+                    </div>
+                    <div className="mt-0.5 text-sm font-semibold text-foreground">{doc.total_chunks || "—"}</div>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{formatDate(doc.created_at)}</span>
+                  {doc.course_id && courses.find((c) => c.id === doc.course_id) && (
+                    <span className="text-primary text-xs font-medium">
+                      {courses.find((c) => c.id === doc.course_id)?.course_name}
+                    </span>
+                  )}
+                </div>
+              </div>
             ))}
           </div>
         )}
-
-        <Dialog open={!!detailDocument} onOpenChange={() => setDetailDocument(null)}>
-          <DialogContent className="max-w-2xl">
-            <DialogHeader>
-              <DialogTitle>{detailDocument?.title}</DialogTitle>
-              <DialogDescription>Review processing status, curriculum structure, and generation readiness for this document.</DialogDescription>
-            </DialogHeader>
-            {detailDocument ? (
-              <div className="flex flex-col gap-5 pt-2">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <DetailItem label="Upload date" value={formatDate(detailDocument.created_at)} icon={<Calendar className="h-4 w-4" />} />
-                  <DetailItem label="Status" value={detailDocument.status} icon={<Shield className="h-4 w-4" />} />
-                  <DetailItem label="File type" value={detailDocument.file_type.toUpperCase()} icon={<FileText className="h-4 w-4" />} />
-                  <DetailItem label="File size" value={formatFileSize(detailDocument.file_size)} icon={<CloudUpload className="h-4 w-4" />} />
-                </div>
-
-                <div className="rounded-xl border bg-muted/30 p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium text-foreground">Curriculum tree</p>
-                      <p className="mt-1 text-xs text-muted-foreground">The extracted tree is what generation, retrieval, feedback signals, and playbook scope rules all rely on.</p>
-                    </div>
-                    {isReadyStatus(detailDocument.status) ? (
-                      <Button asChild size="sm">
-                        <Link href="/dashboard/generate">
-                          <Sparkles className="mr-2 h-4 w-4" />
-                          Generate exam
-                        </Link>
-                      </Button>
-                    ) : null}
-                  </div>
-
-                  <div className="mt-4 rounded-lg border bg-background p-3">
-                    {loadingCurriculum ? (
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        Loading curriculum tree...
-                      </div>
-                    ) : detailCurriculum.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">No curriculum tree is available yet. The document may still be processing or it came from an older flow without persisted section scope.</p>
-                    ) : (
-                      <div className="space-y-3">
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                          <Layers className="h-3.5 w-3.5" />
-                          {countTreeNodes(detailCurriculum)} scope nodes extracted
-                        </div>
-                        <div className="max-h-64 overflow-y-auto rounded-lg bg-muted/30 p-3">
-                          {flattenTitles(detailCurriculum).map((title) => (
-                            <p key={title} className="py-0.5 text-sm text-foreground">{title}</p>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-          </DialogContent>
-        </Dialog>
       </div>
-    </>
-  )
-}
-
-function FilterChip({
-  active,
-  label,
-  onClick,
-}: {
-  active: boolean
-  label: string
-  onClick: () => void
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`rounded-full border px-3 py-1.5 text-sm transition-colors ${active ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-foreground hover:border-primary/40 hover:bg-muted"}`}
-    >
-      {label}
-    </button>
-  )
-}
-
-function SummaryCard({
-  label,
-  value,
-  icon: Icon,
-}: {
-  label: string
-  value: string
-  icon: typeof BookOpen
-}) {
-  return (
-    <div className="rounded-xl border bg-muted/20 p-4">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <Icon className="h-3.5 w-3.5" />
-        {label}
-      </div>
-      <p className="mt-2 text-2xl font-semibold text-foreground">{value}</p>
-    </div>
-  )
-}
-
-function DocumentCard({
-  document,
-  course,
-  onDelete,
-  onViewDetails,
-}: {
-  document: DocumentListItem
-  course: Course | null
-  onDelete: (id: string) => void
-  onViewDetails: (document: DocumentListItem) => void
-}) {
-  const ready = isReadyStatus(document.status)
-
-  return (
-    <Card className="group rounded-2xl shadow-sm transition-shadow hover:shadow-md">
-      <CardContent className="p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
-            <BookOpen className="h-5 w-5 text-primary" />
-          </div>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100">
-                <MoreVertical className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-44">
-              <DropdownMenuItem onClick={() => onViewDetails(document)}>
-                <Eye className="mr-2 h-4 w-4" />
-                View details
-              </DropdownMenuItem>
-              {ready ? (
-                <DropdownMenuItem asChild>
-                  <Link href="/dashboard/generate">
-                    <Sparkles className="mr-2 h-4 w-4" />
-                    Generate exam
-                  </Link>
-                </DropdownMenuItem>
-              ) : null}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => onDelete(document.id)}>
-                <Trash2 className="mr-2 h-4 w-4" />
-                Delete
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-
-        <div className="mt-4">
-          <h3 className="line-clamp-2 text-sm font-semibold text-foreground">{document.title}</h3>
-          <p className="mt-1.5 text-xs text-muted-foreground">{document.file_type.toUpperCase()} - {formatFileSize(document.file_size)}</p>
-        </div>
-
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <Badge variant={ready ? "secondary" : "outline"} className="capitalize">{document.status}</Badge>
-          {course ? <Badge variant="outline">{course.course_name}</Badge> : <Badge variant="outline">Personal library</Badge>}
-        </div>
-
-        <div className="mt-4 grid grid-cols-3 gap-3 text-xs text-muted-foreground">
-          <DocumentStat label="Pages" value={String(document.total_pages_or_slides)} />
-          <DocumentStat label="Chunks" value={String(document.total_chunks)} />
-          <DocumentStat label="Created" value={formatDate(document.created_at)} />
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function DocumentStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg border bg-muted/20 p-2 text-center">
-      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
-      <p className="mt-1 text-sm font-medium text-foreground">{value}</p>
-    </div>
-  )
-}
-
-function DetailItem({
-  label,
-  value,
-  icon,
-}: {
-  label: string
-  value: string
-  icon: ReactNode
-}) {
-  return (
-    <div className="rounded-xl border bg-muted/20 p-4">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        {icon}
-        {label}
-      </div>
-      <p className="mt-2 text-sm font-medium text-foreground">{value}</p>
     </div>
   )
 }

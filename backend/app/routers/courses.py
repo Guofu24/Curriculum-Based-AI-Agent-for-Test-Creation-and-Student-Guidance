@@ -63,9 +63,7 @@ async def list_course_documents(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List documents in a course. Delegates to documents router."""
-    from app.routers.documents import router as doc_router
-    # Re-use document service directly to avoid circular imports
+    """List documents in a course."""
     from app.services.document_service import DocumentService
     service = DocumentService(db)
     docs, _ = await service.list_documents(
@@ -98,14 +96,17 @@ def _doc_to_list_item(doc) -> dict:
     return {
         "id": str(doc.id),
         "course_id": str(doc.course_id) if doc.course_id else None,
-        "title": doc.title or doc.filename or "",
-        "file_name": doc.filename or "",
+        "title": doc.original_filename.rsplit(".", 1)[0] if doc.original_filename else "",
+        "original_filename": doc.original_filename,
+        "file_name": doc.original_filename,
         "file_type": doc.file_type or "",
-        "file_size": doc.file_size or 0,
-        "status": doc.status or "pending",
-        "version": doc.version or 1,
+        "file_size": 0,
+        "status": doc.processing_status or "pending",
+        "processing_status": doc.processing_status or "pending",
+        "version": 1,
         "total_pages_or_slides": doc.total_pages_or_slides or 0,
         "total_chunks": doc.total_chunks or 0,
-        "created_at": doc.uploaded_at.isoformat() if hasattr(doc, "uploaded_at") and doc.uploaded_at else None,
-        "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
+        "created_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+        "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+        "updated_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
     }

@@ -37,10 +37,13 @@ def semantic_chunk(
         from llama_index.core.schema import Document as LLDocument
 
         ll_doc = LLDocument(text=markdown)
+        # Only use SemanticSplitterNodeParser when a real embedder is provided.
+        # Passing embed_model=None causes a Pydantic ValidationError in newer
+        # LlamaIndex versions — catch it so we fall through to _simple_chunk.
         parser = SemanticSplitterNodeParser(
             buffer_size=1,
             breakpoint_percentile_threshold=95,
-            embed_model=embed_model,
+            embed_model=embed_model,  # None → falls to except
         )
         nodes = parser.get_nodes_from_documents([ll_doc])
 
@@ -69,7 +72,10 @@ def semantic_chunk(
 
         return chunks
 
-    except ImportError:
+    except Exception:
+        # SemanticSplitterNodeParser raises ValidationError when embed_model=None,
+        # ImportError when llama_index is absent, or other runtime errors.
+        # In all cases fall back to simple paragraph-based chunking.
         return _simple_chunk(markdown, heading_tree, chunk_size, chunk_overlap)
 
 

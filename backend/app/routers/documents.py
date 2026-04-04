@@ -27,9 +27,15 @@ from app.schemas.document import (
     ChapterSchema,
     SectionSchema,
     SubsectionSchema,
+    CurriculumNodeSchema,
+    CurriculumTreeUpdateRequest,
+    CurriculumTreeResponse,
 )
 from app.dependencies import get_current_user
 from app.models.user import User
+from app.models.document import Document
+from app.rag.parser import parse_document
+from app.rag.structure import detect_heading_tree
 from app.tasks.document_task import process_document_task
 
 router = APIRouter(prefix="/api/v1/documents", tags=["Documents"])
@@ -56,12 +62,14 @@ def _doc_to_list_item(doc) -> DocumentListItem:
         file_size=getattr(doc, "file_size", 0) or 0,
         processing_status=doc.processing_status,
         status=doc.processing_status,  # FE compatibility alias
-        course_id=None,  # FE expects this field; set by course association if needed
+        course_id=str(doc.course_id) if doc.course_id else None,
         version=getattr(doc, "version", 1) or 1,  # FE compatibility
+        chapter_count=doc.total_chapters,
         total_chapters=doc.total_chapters,
         total_pages_or_slides=doc.total_pages_or_slides or 0,
         total_chunks=doc.total_chunks or 0,
         uploaded_at=doc.uploaded_at,
+        created_at=doc.uploaded_at,
         updated_at=doc.uploaded_at,  # FE expects updated_at
         curriculum_tree=[],  # FE expects CurriculumNode[]; populated from heading_tree if available
     )
@@ -132,6 +140,7 @@ def _doc_to_detail(doc) -> DocumentDetail:
         total_pages_or_slides=doc.total_pages_or_slides or 0,
         total_chunks=doc.total_chunks or 0,
         uploaded_at=doc.uploaded_at,
+        created_at=doc.uploaded_at,
         language=None,  # FE expects language; set via metadata or default 'vi'
         curriculum_tree=curriculum,  # FE compatibility: CurriculumNode[]
     )
@@ -194,17 +203,36 @@ async def upload_document(
             user_id=current_user.id,
             file_content=content,
             filename=file.filename or "document",
+            course_id=UUID(course_id) if course_id else None,
         )
     except DocumentServiceError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    # Trigger Celery task for background RAG processing
-    process_document_task.delay(str(document.id))
+    # Process document in FastAPI background (no Celery worker required).
+    # Uses a fresh DB session so the upload transaction is committed first.
+    async def _process_in_background(doc_id: str) -> None:
+        import uuid as _uuid
+        import logging as _logging
+        _log = _logging.getLogger("document.background")
+        from app.core.database import async_session_maker
+        try:
+            _log.info("Background processing started for document %s", doc_id)
+            async with async_session_maker() as bg_db:
+                bg_service = DocumentService(bg_db)
+                result = await bg_service.process_document(_uuid.UUID(doc_id))
+                _log.info("Background processing result: %s", result)
+        except Exception as exc:
+            _log.exception("Background processing FAILED for document %s: %s", doc_id, exc)
+
+    background_tasks.add_task(_process_in_background, str(document.id))
 
     return DocumentUploadResponse(
         document_id=document.id,
         message="Document uploaded. Processing started in background.",
         s3_key=document.s3_key,
+        processing_status="pending",
+        uploaded_at=document.uploaded_at,
+        created_at=document.uploaded_at,
     )
 
 
@@ -301,6 +329,7 @@ async def get_document_status(
         total_pages_or_slides=document.total_pages_or_slides or 0,
         total_chunks=document.total_chunks or 0,
         uploaded_at=document.uploaded_at,
+        created_at=document.uploaded_at,
     )
 
 
@@ -373,3 +402,136 @@ async def refresh_document_url(
         presigned_url=presigned_url,
         expires_in=3600,
     )
+
+
+@router.get(
+    "/{document_id}/curriculum-tree",
+    response_model=CurriculumTreeResponse,
+    summary="Get document curriculum tree",
+    description="Returns the flattened curriculum tree (chapters, sections, subsections) "
+                "extracted from the document's heading_tree. Returns an empty tree if "
+                "the document has not been processed yet.",
+    responses={
+        200: {"description": "Curriculum tree as flat CurriculumNode list"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Document not found"},
+    },
+    tags=["Documents"],
+)
+async def get_curriculum_tree(
+    document_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get the flattened curriculum tree for a document."""
+    service = DocumentService(db)
+    document = await service.get_document(document_id, current_user.id)
+
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    tree = service.get_curriculum_tree(document)
+    return CurriculumTreeResponse(
+        document_id=str(document_id),
+        curriculum_tree=tree,
+    )
+
+
+@router.patch(
+    "/{document_id}/curriculum-tree",
+    response_model=CurriculumTreeResponse,
+    summary="Update document curriculum tree",
+    description="Updates the persisted curriculum tree for a document. "
+                "Useful when the FE wants to override the auto-extracted tree.",
+    responses={
+        200: {"description": "Curriculum tree updated"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Document not found"},
+    },
+    tags=["Documents"],
+)
+async def update_curriculum_tree(
+    document_id: UUID,
+    body: CurriculumTreeUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update the curriculum tree for a document."""
+    service = DocumentService(db)
+    updated = await service.update_curriculum_tree(document_id, current_user.id, body.curriculum_tree)
+
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    return CurriculumTreeResponse(
+        document_id=str(document_id),
+        curriculum_tree=body.curriculum_tree,
+    )
+
+
+@router.post(
+    "/{document_id}/rescan-structure",
+    response_model=DocumentDetail,
+    summary="Re-scan document structure",
+    description="Re-parses the document and re-detects the heading tree using improved heuristics. "
+                "Useful when the document had no detectable structure on first pass.",
+    responses={
+        200: {"description": "Document structure re-scanned"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Document not found"},
+        409: {"description": "Document is currently being processed"},
+    },
+    tags=["Documents"],
+)
+async def rescan_document_structure(
+    document_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Re-run structure detection on a document that has no heading tree."""
+    service = DocumentService(db)
+    document = await service.get_document(document_id, current_user.id)
+
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if document.processing_status == "processing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is currently being processed. Please wait for it to finish.",
+        )
+
+    import logging
+    _log = logging.getLogger("document.rescan")
+
+    try:
+        from app.utils.storage import get_storage
+        file_bytes = await get_storage().download_file(document.s3_key)
+
+        parse_result = await parse_document(file_bytes, document.file_type)
+        markdown_content = parse_result["content"]
+        heading_tree = detect_heading_tree(markdown_content)
+        total_chapters = len(heading_tree.get("chapters", []))
+
+        # Update heading_tree and total_chapters in DB
+        from sqlalchemy import update
+        await db.execute(
+            update(Document)
+            .where(Document.id == document_id)
+            .values(
+                heading_tree=heading_tree,
+                total_chapters=total_chapters,
+                processing_status="completed",
+            )
+        )
+        await db.commit()
+        _log.info("Rescan complete for %s: %d chapters detected", document_id, total_chapters)
+
+        # Re-fetch updated document
+        updated = await service.get_document(document_id, current_user.id)
+        return _doc_to_detail(updated)
+
+    except Exception as e:
+        _log.exception("Rescan failed for %s: %s", document_id, e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+

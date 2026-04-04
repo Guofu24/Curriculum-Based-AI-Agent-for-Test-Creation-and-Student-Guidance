@@ -24,7 +24,7 @@ class VectorStore:
                 if settings.PINECONE_INDEX not in existing:
                     pc.create_index(
                         name=settings.PINECONE_INDEX,
-                        dimension=settings.OPENAI_EMBEDDING_DIM,
+                        dimension=settings.ST_EMBEDDING_DIM,
                         metric="cosine",
                         spec=ServerlessSpec(
                             cloud=settings.PINECONE_CLOUD,

@@ -52,9 +52,9 @@ class Settings(BaseSettings):
     OLLAMA_MODEL_STRONG: str = "llama3.2"
     OLLAMA_MODEL_LIGHT: str = "llama3.2"
 
-    # OpenAI embedding (kept separate, still needed for RAG)
-    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-large"
-    OPENAI_EMBEDDING_DIM: int = 3072
+    # Local sentence-transformers embedding (replaces OpenAI)
+    ST_EMBEDDING_MODEL: str = "paraphrase-multilingual-mpnet-base-v2"
+    ST_EMBEDDING_DIM: int = 768
 
     # Pinecone
     PINECONE_API_KEY: str = ""

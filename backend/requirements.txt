@@ -9,7 +9,10 @@ redis>=5.0.0
 celery>=5.3.6
 pinecone>=5.0.0
 llama-index>=0.10.0
-openai>=1.12.0              # OpenAI + OpenRouter + Ollama (openai-compatible API)
+openai>=1.12.0              # LLM provider (OpenAI / OpenRouter / Ollama) — NOT used for embeddings
+sentence-transformers>=3.0.0 # Local multilingual embedding (paraphrase-multilingual-mpnet-base-v2)
+transformers>=4.46.0  # Required by sentence-transformers >=3.0.0 — must be installed together
+torch>=2.0.0           # Required by sentence-transformers — install CPU-only: pip install torch --index-url https://download.pytorch.org/whl/cpu
 groq>=0.9.0                 # Groq
 anthropic>=0.30.0           # Anthropic Claude
 g4f>=0.3.0                  # g4f/FreeGPT (dev/test only)

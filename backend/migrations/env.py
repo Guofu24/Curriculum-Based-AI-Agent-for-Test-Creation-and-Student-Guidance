@@ -2,6 +2,7 @@
 Alembic environment configuration for async SQLAlchemy.
 """
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
 from app.core.database import Base
+from app.core.config import get_settings
 from app.models import (
     User,
     RefreshToken,
@@ -24,6 +26,11 @@ config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# Override sqlalchemy.url from settings so alembic always uses the same DB as the app
+if "OVERRIDE_SQLALCHEMY_URL" not in os.environ:
+    settings = get_settings()
+    config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 target_metadata = Base.metadata
 

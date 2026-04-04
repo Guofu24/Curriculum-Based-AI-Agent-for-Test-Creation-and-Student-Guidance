@@ -7,6 +7,7 @@ Running locally at:
 """
 
 import logging
+from urllib.parse import quote
 
 import boto3
 from botocore.client import Config
@@ -91,7 +92,12 @@ class MinIOStorage(BaseStorage):
                 Key=key,
                 Body=file_bytes,
                 ContentType=self.get_file_content_type(filename),
-                Metadata={"original_filename": filename, "user_id": user_id},
+            Metadata={
+                # S3 metadata only allows ASCII — percent-encode Unicode filenames (RFC 5987).
+                # The original filename is stored in the DB; metadata is for tracing only.
+                "original_filename": quote(filename, safe=" .-_"),
+                "user_id": user_id,
+            },
             )
             logger.info("MinIO upload OK → %s", key)
             return key
@@ -101,7 +107,16 @@ class MinIOStorage(BaseStorage):
     async def download_file(self, object_key: str) -> bytes:
         try:
             resp = self._get_client().get_object(Bucket=self._bucket, Key=object_key)
-            return resp["Body"].read()
+            # Read into a bytes buffer, then close the response immediately.
+            # Returning resp["Body"].read() directly lets the response close
+            # while still alive — which can leave the underlying HTTP stream
+            # in an undefined state for some boto3/botocore versions.
+            body = resp["Body"]
+            data = body.read()
+            body.close()
+            if hasattr(resp, "close"):
+                resp.close()
+            return data
         except ClientError as e:
             raise StorageError(f"MinIO download failed: {e}") from e
 

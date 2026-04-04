@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select, update
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.memory import LongTermMemory
@@ -70,7 +71,7 @@ class ExamService:
 
     async def get_exam(self, exam_id: UUID, user_id: UUID | None) -> Exam | None:
         """Get an exam by id. When user_id is None, skip ownership filter."""
-        stmt = select(Exam).where(Exam.id == exam_id)
+        stmt = select(Exam).options(selectinload(Exam.history)).where(Exam.id == exam_id)
         if user_id is not None:
             stmt = stmt.where(Exam.user_id == user_id)
         result = await self.db.execute(stmt)
@@ -96,7 +97,10 @@ class ExamService:
         total = count_result.scalar() or 0
 
         result = await self.db.execute(
-            stmt.order_by(Exam.created_at.desc()).offset(offset).limit(limit)
+            stmt.options(selectinload(Exam.history))
+            .order_by(Exam.created_at.desc())
+            .offset(offset)
+            .limit(limit)
         )
         return list(result.scalars().all()), total
 
@@ -111,6 +115,7 @@ class ExamService:
         if not exam:
             raise ExamServiceError("Exam not found")
 
+        # Set exam fields FIRST, then create snapshot so history captures the actual data
         exam.questions = list(questions or [])
         exam.cost_report = cost_report
         exam.total_tokens = (cost_report or {}).get("total_tokens")
@@ -122,6 +127,7 @@ class ExamService:
             "blueprint": (cost_report or {}).get("blueprint", (exam.exam_config or {}).get("blueprint", {})),
         }
 
+        # Snapshot AFTER exam fields are set so history captures the real questions
         self.db.add(
             ExamHistory(
                 exam_id=exam.id,
@@ -393,9 +399,9 @@ class ExamService:
             "version_churn": round(
                 sum(exam.version_count for exam in exams) / len(exams), 4
             ) if exams else 0.0,
-            "top_error_categories": [],
-            "recent_warnings": [],
-            "last_updated_at": datetime.now(timezone.utc).isoformat(),
+            "top_error_categories": [],  # list[ErrorCategoryCount]
+            "recent_warnings": [],        # list[FeedbackEvent]
+            "last_updated_at": datetime.now(timezone.utc),
         }
 
     async def get_feedback_store_summary(self, user_id: UUID) -> dict:
@@ -408,10 +414,10 @@ class ExamService:
             "rejected_count": 0,
             "corrected_count": 0,
             "linked_eval_count": 0,
-            "top_signal_types": [],
-            "top_error_categories": [],
-            "recent_events": [],
-            "last_updated_at": datetime.now(timezone.utc).isoformat(),
+            "top_signal_types": [],   # list[NamedCount]
+            "top_error_categories": [],  # list[ErrorCategoryCount]
+            "recent_events": [],        # list[FeedbackEvent]
+            "last_updated_at": datetime.now(timezone.utc),
         }
 
     async def get_feedback_store(

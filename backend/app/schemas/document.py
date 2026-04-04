@@ -1,20 +1,40 @@
 """Document schemas — aligned with spec and updated model."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
+
+
+def _dt_iso(dt: datetime | None) -> str | None:
+    """Convert datetime to ISO 8601 string ensuring UTC timezone is explicit."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        # naive datetime from DB — assume UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
+class _BaseSchema(BaseModel):
+    """Base schema with consistent datetime serialization."""
+    model_config = ConfigDict(
+        json_encoders={datetime: _dt_iso},
+        populate_by_name=True,
+    )
 
 
 # ── Upload Response ────────────────────────────────────────────────────────────
 
-class DocumentUploadResponse(BaseModel):
+class DocumentUploadResponse(_BaseSchema):
     """
     Response from POST /api/v1/documents/upload.
 
     - **document_id**: UUID of the newly created document record
     - **s3_key**: S3 object key where the file is stored
     - **message**: Confirmation message
+    - **processing_status**: Initial status (always 'pending')
+    - **uploaded_at**: Upload timestamp
 
     After upload, poll GET /documents/{id}/status until status='completed'.
     """
@@ -24,38 +44,44 @@ class DocumentUploadResponse(BaseModel):
         description="Confirmation message.",
     )
     s3_key: str = Field(..., description="S3 object key where the file is stored.")
+    processing_status: str = Field(
+        default="pending",
+        description="Initial processing status. Always 'pending' immediately after upload.",
+    )
+    uploaded_at: datetime | None = Field(None, description="Upload timestamp (UTC).")
+    created_at: datetime | None = Field(None, description="Upload timestamp alias for FE compatibility.")
 
 
 # ── Heading Tree (spec format: chapters/sections/subsections) ─────────────────
 
-class SubsectionSchema(BaseModel):
+class SubsectionSchema(_BaseSchema):
     """Subsection within a section."""
     section_id: str
     title: str
 
 
-class SectionSchema(BaseModel):
+class SectionSchema(_BaseSchema):
     """Section within a chapter."""
     section_id: str
     title: str
     subsections: list[SubsectionSchema] = []
 
 
-class ChapterSchema(BaseModel):
+class ChapterSchema(_BaseSchema):
     """Chapter in the heading tree."""
     chapter_id: str
     title: str
     sections: list[SectionSchema] = []
 
 
-class HeadingTree(BaseModel):
+class HeadingTree(_BaseSchema):
     """Document heading tree per spec format."""
     chapters: list[ChapterSchema] = []
 
 
 # ── Document Responses ────────────────────────────────────────────────────────
 
-class DocumentListItem(BaseModel):
+class DocumentListItem(_BaseSchema):
     """
     Document summary in list view.
 
@@ -85,6 +111,14 @@ class DocumentListItem(BaseModel):
     course_id: str | None = Field(None, description="Associated course ID (FE compatibility).")
     version: int = Field(default=1, description="Document version number (FE compatibility).")
     chapter_count: int | None = Field(None, description="Number of chapters (FE compatibility).")
+    uploaded_at: datetime | None = Field(
+        None,
+        description="Upload timestamp (UTC) — exposed as created_at for FE compatibility.",
+    )
+    created_at: datetime | None = Field(
+        None,
+        description="Upload timestamp alias. Same as uploaded_at.",
+    )
     updated_at: datetime | None = Field(None, description="Last update timestamp (FE compatibility).")
     curriculum_tree: list = Field(
         default_factory=list,
@@ -102,10 +136,9 @@ class DocumentListItem(BaseModel):
         default=0,
         description="Number of text chunks indexed in Pinecone.",
     )
-    uploaded_at: datetime
 
 
-class DocumentDetail(BaseModel):
+class DocumentDetail(_BaseSchema):
     """
     Full document detail including heading_tree.
 
@@ -143,7 +176,14 @@ class DocumentDetail(BaseModel):
         default=0,
         description="Number of text chunks indexed in Pinecone.",
     )
-    uploaded_at: datetime
+    uploaded_at: datetime | None = Field(
+        None,
+        description="Upload timestamp (UTC).",
+    )
+    created_at: datetime | None = Field(
+        None,
+        description="Upload timestamp alias for FE compatibility.",
+    )
     updated_at: datetime | None = Field(None, description="Last update timestamp.")
     language: str | None = Field(
         None,
@@ -155,7 +195,7 @@ class DocumentDetail(BaseModel):
     )
 
 
-class DocumentResponse(BaseModel):
+class DocumentResponse(_BaseSchema):
     """
     Document response schema — alias of DocumentDetail matching the frontend Document interface.
     """
@@ -168,14 +208,15 @@ class DocumentResponse(BaseModel):
     total_chapters: int | None = Field(None, description="Number of chapters.")
     total_pages_or_slides: int = Field(default=0, description="Total pages or slides.")
     total_chunks: int = Field(default=0, description="Number of Pinecone chunks.")
-    uploaded_at: datetime = Field(..., description="Upload timestamp (UTC).")
+    uploaded_at: datetime | None = Field(None, description="Upload timestamp (UTC).")
+    created_at: datetime | None = Field(None, description="Upload timestamp alias for FE compatibility.")
     heading_tree: HeadingTree | None = Field(
         None,
         description="Hierarchical heading structure for scope selection.",
     )
 
 
-class DocumentListResponse(BaseModel):
+class DocumentListResponse(_BaseSchema):
     """
     Paginated document list response.
 
@@ -192,7 +233,7 @@ class DocumentListResponse(BaseModel):
 
 # ── Processing Status ─────────────────────────────────────────────────────────
 
-class DocumentStatus(BaseModel):
+class DocumentStatus(_BaseSchema):
     """
     Document processing status returned by GET /documents/{id}/status.
 
@@ -207,11 +248,12 @@ class DocumentStatus(BaseModel):
     total_pages_or_slides: int = Field(default=0, description="Total pages or slides.")
     total_chunks: int = Field(default=0, description="Number of Pinecone chunks.")
     uploaded_at: datetime | None = Field(None, description="Upload timestamp (UTC).")
+    created_at: datetime | None = Field(None, description="Upload timestamp alias for FE compatibility.")
 
 
 # ── Scope / Flattened Tree ────────────────────────────────────────────────────
 
-class ScopeUnit(BaseModel):
+class ScopeUnit(_BaseSchema):
     """Flattened scope unit for scope selection."""
     id: str = Field(..., description="Unique identifier for this scope unit.")
     title: str = Field(..., description="Display title.")
@@ -222,10 +264,45 @@ class ScopeUnit(BaseModel):
 
 # ── Refresh URL Response ───────────────────────────────────────────────────────
 
-class RefreshUrlResponse(BaseModel):
+class RefreshUrlResponse(_BaseSchema):
     """Response from GET /documents/{id}/refresh-url (G20)."""
     presigned_url: str = Field(
         ...,
         description="Fresh presigned S3 URL. Valid for 3600 seconds (1 hour).",
     )
     expires_in: int = Field(default=3600, description="URL validity in seconds.")
+
+
+# ── Curriculum Tree (FE compatibility) ─────────────────────────────────────────
+
+class CurriculumNodeSchema(_BaseSchema):
+    """Flat curriculum node matching the frontend CurriculumNode interface."""
+    id: str | None = Field(None, description="Node identifier (chapter_id or section_id).")
+    title: str = Field(..., description="Node display title.")
+    section_type: str = Field(default="chapter", description="Type: chapter, section, or subsection.")
+    section_order: int = Field(default=0, description="Order index within parent.")
+    chapter_number: int = Field(default=1, description="1-based chapter number.")
+    page_from: int | None = Field(None, description="Starting page number.")
+    page_to: int | None = Field(None, description="Ending page number.")
+    scope_label: str | None = Field(None, description="Scope label.")
+    summary: str | None = Field(None, description="Node summary.")
+    metadata: dict | None = Field(None, description="Extra metadata.")
+    children: list["CurriculumNodeSchema"] = Field(default_factory=list, description="Child nodes.")
+
+
+class CurriculumTreeUpdateRequest(_BaseSchema):
+    """Request body for PATCH /documents/{id}/curriculum-tree."""
+    curriculum_tree: list[CurriculumNodeSchema] = Field(
+        ...,
+        description="Full curriculum tree to persist.",
+    )
+
+
+class CurriculumTreeResponse(_BaseSchema):
+    """Response from GET /documents/{id}/curriculum-tree."""
+    document_id: str = Field(..., description="Document UUID.")
+    curriculum_tree: list[CurriculumNodeSchema] = Field(
+        default_factory=list,
+        description="Curriculum tree as flat list of CurriculumNode.",
+    )
+

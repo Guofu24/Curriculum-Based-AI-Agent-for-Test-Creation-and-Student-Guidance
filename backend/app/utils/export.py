@@ -10,10 +10,13 @@ from uuid import UUID
 import html
 import re
 
-from weasyprint import HTML, CSS
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+# WeasyPrint requires GTK (libgobject) — not available on plain Windows.
+# Import lazily inside export_pdf() so the server can start without GTK installed.
+# On Linux / Docker the import will succeed normally at call-time.
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -77,6 +80,7 @@ class ExamExporter:
         blueprint = exam.blueprint or {}
         html_content = self._render_html(exam, questions, blueprint, include_answers, include_blueprint)
 
+        from weasyprint import HTML  # lazy — requires GTK on Linux/Docker
         pdf_buffer = BytesIO()
         HTML(string=html_content).write_pdf(pdf_buffer)
         pdf_buffer.seek(0)
@@ -717,6 +721,7 @@ def export_exam_to_pdf(exam_data: dict) -> bytes:
             self.exam_config = {}
 
     html = _build_exam_html(exam_data)
+    from weasyprint import HTML  # lazy — requires GTK on Linux/Docker
     pdf_buffer = BytesIO()
     HTML(string=html).write_pdf(pdf_buffer)
     pdf_buffer.seek(0)

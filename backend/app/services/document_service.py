@@ -39,6 +39,7 @@ class DocumentService:
         user_id: UUID,
         file_content: bytes,
         filename: str,
+        course_id: UUID | None = None,
     ) -> Document:
         """Upload a document to S3 and create DB record."""
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -46,7 +47,7 @@ class DocumentService:
             raise DocumentServiceError(f"Unsupported file type: {ext}")
 
         file_hash = self._compute_file_hash(file_content)
-        title = filename.rsplit(".", 1)[0] if "." in filename else filename
+        del file_hash  # unused for now
 
         try:
             storage = get_storage()
@@ -61,14 +62,13 @@ class DocumentService:
 
         document = Document(
             user_id=user_id,
+            course_id=course_id,
             original_filename=filename,
             file_type=ext,
             s3_key=s3_key,
             processing_status="pending",
+            file_size=len(file_content),
         )
-        # Store title in metadata via a default approach
-        # (In a real scenario you'd add a title field to the model or use a separate metadata table)
-        del title  # unused
 
         self.db.add(document)
         await self.db.commit()
@@ -184,23 +184,12 @@ class DocumentService:
         return True
 
     async def process_document(self, document_id: UUID) -> dict:
-        """
-        Run the full RAG pipeline for a document. Called by Celery task.
-
-        Steps per spec:
-        1. Download from S3
-        2. Parse (rag/parser.py) → markdown
-        3. Structure detection (rag/structure.py) → heading_tree
-        4. Chunking (rag/chunker.py) → chunks with metadata
-        5. Embed + upsert Pinecone per chapter (G16 embedding cache)
-        6. Update DB: processing_status = 'completed'
-        """
+        """Run the full RAG pipeline: parse -> chunk -> (embed+Pinecone optional)."""
+        import logging
+        _log = logging.getLogger("document.process")
         try:
             await self.update_status(document_id, "processing")
-
-            result = await self.db.execute(
-                select(Document).where(Document.id == document_id)
-            )
+            result = await self.db.execute(select(Document).where(Document.id == document_id))
             document = result.scalar_one_or_none()
             if not document:
                 raise DocumentServiceError("Document not found")
@@ -208,68 +197,54 @@ class DocumentService:
             from app.utils.storage import get_storage
             file_bytes = await get_storage().download_file(document.s3_key)
 
-            # Step 1: Parse
             parse_result = await parse_document(file_bytes, document.file_type)
             markdown_content = parse_result["content"]
             total_pages = parse_result.get("page_count", 0)
+            _log.info("Parsed %s: %d pages, %d chars", document_id, total_pages, len(markdown_content))
 
-            # Step 2: Structure detection
             heading_tree = detect_heading_tree(markdown_content)
             total_chapters = len(heading_tree.get("chapters", []))
-
-            # Step 3: Chunking
             chunks = semantic_chunk(markdown_content, heading_tree)
-
-            # Assign document_id to each chunk
             doc_id_str = str(document_id)
             for chunk in chunks:
                 chunk["document_id"] = doc_id_str
+            _log.info("Chunked %s: %d chunks, %d chapters", document_id, len(chunks), total_chapters)
 
-            # Step 4: Embed + upsert per chapter (G16 — uses embedding cache)
-            from app.core.redis_client import get_redis_client
-            redis = get_redis_client()
-
-            enriched = await embed_chunks(chunks, doc_id_str, redis)
-
-            # Group by chapter and upsert per namespace
-            chapter_groups: dict[str, list[dict]] = {}
-            for chunk in enriched:
-                ch_id = chunk.get("chapter_id", "unknown")
-                if ch_id not in chapter_groups:
-                    chapter_groups[ch_id] = []
-                chapter_groups[ch_id].append(chunk)
-
-            for chapter_id, chapter_chunks in chapter_groups.items():
-                await self.vector_store.upsert_chunks(
-                    document_id=doc_id_str,
-                    chapter_id=chapter_id,
-                    chunks=chapter_chunks,
-                )
-
-            # Step 5: Update DB
+            # Save parse results immediately — visible even if embed step fails
             await self.update_processing_result(
                 document_id=document_id,
                 heading_tree=heading_tree,
                 total_chapters=total_chapters,
                 total_pages_or_slides=total_pages,
-                total_chunks=len(enriched),
+                total_chunks=len(chunks),
             )
 
-            return {
-                "document_id": doc_id_str,
-                "chunks_created": len(enriched),
-                "total_pages": total_pages,
-                "total_chapters": total_chapters,
-                "processing_status": "completed",
-            }
+            # Embed + Pinecone — graceful degradation if OpenAI key invalid
+            try:
+                from app.core.redis_client import get_redis_client
+                redis = get_redis_client()
+                enriched = await embed_chunks(chunks, doc_id_str, redis)
+                chapter_groups: dict[str, list[dict]] = {}
+                for chunk in enriched:
+                    chapter_groups.setdefault(chunk.get("chapter_id", "unknown"), []).append(chunk)
+                for chapter_id, chapter_chunks in chapter_groups.items():
+                    await self.vector_store.upsert_chunks(
+                        document_id=doc_id_str, chapter_id=chapter_id, chunks=chapter_chunks,
+                    )
+                await self.update_status(document_id, "indexed")
+                _log.info("Indexed %s: %d vectors", document_id, len(enriched))
+                return {"document_id": doc_id_str, "chunks_created": len(enriched),
+                        "total_pages": total_pages, "processing_status": "indexed"}
+            except Exception as embed_err:
+                _log.warning("Embed skipped for %s (parse OK): %s", document_id, embed_err)
+                return {"document_id": doc_id_str, "chunks_created": len(chunks),
+                        "total_pages": total_pages, "processing_status": "processed",
+                        "embed_error": str(embed_err)}
 
         except Exception as e:
+            _log.exception("process_document failed %s: %s", document_id, e)
             await self.update_status(document_id, "failed", error_message=str(e))
-            return {
-                "document_id": str(document_id),
-                "processing_status": "failed",
-                "error": str(e),
-            }
+            return {"document_id": str(document_id), "processing_status": "failed", "error": str(e)}
 
     def get_presigned_url(self, document: Document) -> str:
         """Get a presigned URL for downloading the document (G20)."""
@@ -280,3 +255,123 @@ class DocumentService:
         if not document.heading_tree:
             return []
         return flatten_heading_tree(document.heading_tree)
+
+    def get_curriculum_tree(self, document: Document) -> list[dict]:
+        """
+        Convert heading_tree (nested chapters/sections/subsections) into
+        the flat CurriculumNode[] format the FE expects.
+        """
+        if not document.heading_tree:
+            return []
+        chapters = document.heading_tree.get("chapters", [])
+        nodes: list[dict] = []
+        for ch_idx, chapter in enumerate(chapters):
+            nodes.append({
+                "id": chapter.get("chapter_id"),
+                "title": chapter.get("title", ""),
+                "section_type": "chapter",
+                "section_order": ch_idx,
+                "chapter_number": ch_idx + 1,
+                "page_from": None,
+                "page_to": None,
+                "scope_label": None,
+                "summary": None,
+                "metadata": None,
+                "children": [],
+            })
+            for sec in chapter.get("sections", []):
+                nodes.append({
+                    "id": sec.get("section_id"),
+                    "title": sec.get("title", ""),
+                    "section_type": "section",
+                    "section_order": len(nodes),
+                    "chapter_number": ch_idx + 1,
+                    "page_from": None,
+                    "page_to": None,
+                    "scope_label": None,
+                    "summary": None,
+                    "metadata": None,
+                    "children": [],
+                })
+                for sub in sec.get("subsections", []):
+                    nodes.append({
+                        "id": sub.get("section_id"),
+                        "title": sub.get("title", ""),
+                        "section_type": "subsection",
+                        "section_order": len(nodes),
+                        "chapter_number": ch_idx + 1,
+                        "page_from": None,
+                        "page_to": None,
+                        "scope_label": None,
+                        "summary": None,
+                        "metadata": None,
+                        "children": [],
+                    })
+        return nodes
+
+    async def update_curriculum_tree(
+        self,
+        document_id: UUID,
+        user_id: UUID,
+        curriculum_tree: list[dict],
+    ) -> bool:
+        """
+        Persist a curriculum tree (from FE editing) back to the document.
+        Also re-builds heading_tree from the flat nodes for downstream use.
+        """
+        document = await self.get_document(document_id, user_id)
+        if not document:
+            return False
+
+        heading_tree = self._build_heading_tree_from_flat(curriculum_tree)
+
+        await self.db.execute(
+            update(Document)
+            .where(Document.id == document_id)
+            .values(heading_tree=heading_tree)
+        )
+        await self.db.commit()
+        return True
+
+    def _build_heading_tree_from_flat(self, flat_tree: list[dict]) -> dict:
+        """Rebuild nested heading_tree from flat CurriculumNode[] list."""
+        chapters: list[dict] = []
+        current_chapter: dict | None = None
+        current_section: dict | None = None
+
+        for node in flat_tree:
+            stype = node.get("section_type", "chapter")
+            if stype == "chapter":
+                current_chapter = {
+                    "chapter_id": node.get("id", ""),
+                    "title": node.get("title", ""),
+                    "sections": [],
+                }
+                chapters.append(current_chapter)
+                current_section = None
+
+            elif stype == "section":
+                if current_chapter is None:
+                    current_chapter = {"chapter_id": "ch_auto", "title": "", "sections": []}
+                    chapters.append(current_chapter)
+                current_section = {
+                    "section_id": node.get("id", ""),
+                    "title": node.get("title", ""),
+                    "subsections": [],
+                }
+                current_chapter["sections"].append(current_section)
+
+            elif stype == "subsection":
+                if current_section is None:
+                    if current_chapter is None:
+                        current_chapter = {"chapter_id": "ch_auto", "title": "", "sections": []}
+                        chapters.append(current_chapter)
+                    current_section = {"section_id": "", "title": "", "subsections": []}
+                    current_chapter["sections"].append(current_section)
+                current_section["subsections"].append({
+                    "section_id": node.get("id", ""),
+                    "title": node.get("title", ""),
+                })
+
+        return {"chapters": chapters}
+

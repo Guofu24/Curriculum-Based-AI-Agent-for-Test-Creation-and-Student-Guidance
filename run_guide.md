@@ -70,6 +70,7 @@ docker compose up postgres redis minio -d
 
 > [!NOTE]
 > Nếu đã chạy MinIO ngoài Docker (`minio.exe server E:\MiNIO`) thì bỏ `minio` khỏi lệnh trên.
+minio.exe server E:\MiNIO --console-address :9001
 
 ### Option B: Thủ công
 

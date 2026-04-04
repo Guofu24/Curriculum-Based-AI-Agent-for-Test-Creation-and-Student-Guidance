@@ -9,7 +9,7 @@ from app.observability.tracer import (
 )
 from app.observability.cost import (
     ExamCostReport,
-    ExamCostItem,
+    AgentCostItem,
     MODEL_PRICING,
     calculate_cost,
 )
@@ -18,7 +18,7 @@ __all__ = [
     "CurriculumTracer",
     "ExamCostTracker",
     "ExamCostReport",
-    "ExamCostItem",
+    "AgentCostItem",
     "MODEL_PRICING",
     "calculate_cost",
     "get_tracer",
