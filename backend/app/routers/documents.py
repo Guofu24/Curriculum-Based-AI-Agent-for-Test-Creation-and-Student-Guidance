@@ -535,3 +535,110 @@ async def rescan_document_structure(
         _log.exception("Rescan failed for %s: %s", document_id, e)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
+
+@router.post(
+    "/{document_id}/reprocess",
+    response_model=DocumentDetail,
+    summary="Re-process document: re-chunk and re-upsert vectors to Pinecone",
+)
+async def reprocess_document(
+    document_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Re-chunk a document and re-upsert all vectors to Pinecone.
+    Deletes old vectors first, then re-processes using the current chunker
+    (which now correctly uses canonical chapter_id from heading_tree).
+    Use this after fixing chunk_id / chapter_id mapping bugs.
+    """
+    service = DocumentService(db)
+    document = await service.get_document(document_id, current_user.id)
+
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    if document.processing_status == "processing":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is currently being processed.",
+        )
+
+    import logging
+    _log = logging.getLogger("document.reprocess")
+
+    try:
+        # 1. Delete old vectors from Pinecone
+        if document.heading_tree:
+            chapters = [ch["chapter_id"] for ch in document.heading_tree.get("chapters", [])]
+        else:
+            chapters = []
+        try:
+            from app.rag.vector_store import VectorStore
+            vs = VectorStore()
+            await vs.delete_document_vectors(str(document_id), chapters)
+            _log.info("Deleted %d old namespaces for document %s", len(chapters), document_id)
+        except Exception as e:
+            _log.warning("Failed to delete old vectors (may not exist yet): %s", e)
+
+        # 2. Download file from S3
+        from app.utils.storage import get_storage
+        file_bytes = await get_storage().download_file(document.s3_key)
+
+        # 3. Re-parse
+        parse_result = await parse_document(file_bytes, document.file_type)
+        markdown_content = parse_result["content"]
+
+        # 4. Re-chunk (uses fixed _simple_chunk with canonical chapter_id from heading_tree)
+        from app.rag.chunker import semantic_chunk
+        heading_tree = document.heading_tree or {}
+        chunks = semantic_chunk(
+            markdown=markdown_content,
+            heading_tree=heading_tree,
+        )
+        _log.info("Re-chunked into %d chunks", len(chunks))
+
+        # 5. Embed chunks (required before upserting to Pinecone)
+        if chunks:
+            from app.core.redis_client import get_redis_client
+            from app.rag.embedder import embed_chunks
+            redis = get_redis_client()
+            chunks = await embed_chunks(chunks, str(document_id), redis)
+            _log.info("Embedded %d chunks", len(chunks))
+
+        # 6. Re-upsert to Pinecone
+        if chunks and heading_tree:
+            vs = VectorStore()
+
+            # Group chunks by chapter_id
+            chapter_chunks: dict[str, list[dict]] = {}
+            for chunk in chunks:
+                ch_id = chunk.get("chapter_id", "ch_unknown")
+                chapter_chunks.setdefault(ch_id, []).append(chunk)
+
+            for chapter in heading_tree.get("chapters", []):
+                ch_id = chapter.get("chapter_id", "")
+                chunks_for_ch = chapter_chunks.get(ch_id, [])
+                if chunks_for_ch:
+                    await vs.upsert_chunks(str(document_id), ch_id, chunks_for_ch)
+                    _log.info("Upserted %d chunks to namespace %s_%s", len(chunks_for_ch), document_id, ch_id)
+                else:
+                    _log.info("No chunks for chapter %s (%s)", chapter.get("title", ""), ch_id)
+
+        # 7. Update chunk count in DB
+        from sqlalchemy import update
+        await db.execute(
+            update(Document)
+            .where(Document.id == document_id)
+            .values(total_chunks=len(chunks))
+        )
+        await db.commit()
+
+        updated = await service.get_document(document_id, current_user.id)
+        _log.info("Re-process complete for %s: %d chunks", document_id, len(chunks))
+        return _doc_to_detail(updated)
+
+    except Exception as e:
+        _log.exception("Re-process failed for %s: %s", document_id, e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+

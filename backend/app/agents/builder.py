@@ -1,5 +1,6 @@
 """Builder Agent - generates actual questions from blueprint slots."""
 
+import logging
 import time
 import json
 import asyncio
@@ -18,6 +19,7 @@ from app.core.config import get_settings
 
 settings = get_settings()
 tracer = get_tracer()
+logger = logging.getLogger("app.agents.builder")
 
 
 class BuilderAgent:
@@ -115,10 +117,13 @@ Trả về JSON:
         topics_used = topics_used or []
         all_questions: list[dict] = []
         chunks_referenced: list[str] = []
+        logger.info(f"Builder received {len(blueprint)} slots")
+        logger.info(f"Builder received {len(retrieved_context)} chunks")
 
         try:
             # Build context for generation
             context_for_llm = self._build_context_for_llm(retrieved_context)
+            reduced_context_for_llm = self._build_context_for_llm(retrieved_context[:1])
 
             # Get scope restriction prompt
             scope_guard = ScopeGuard(
@@ -137,19 +142,33 @@ Trả về JSON:
                 for i in range(0, len(blueprint), self.CHUNK_SIZE)
             ]
 
-            for chunk_idx, chunk in enumerate(blueprint_chunks):
+            flush_mode = False
+
+            for i, chunk in enumerate(blueprint_chunks):
+                slot_start_index = i * self.CHUNK_SIZE
+                for offset, slot in enumerate(chunk):
+                    logger.info(
+                        f"Building slot {slot_start_index + offset + 1}/{len(blueprint)}: {slot}"
+                    )
                 # Check token budget
                 budget_status = self.guardrails.check_budget(8000)
                 if budget_status == "stop":
                     warnings.append("Token budget exhausted. Stopping generation.")
                     break
+                if budget_status == "flush_needed":
+                    warnings.append(
+                        f"Token budget flush needed at chunk {i}, continuing with reduced context"
+                    )
+                    flush_mode = True
 
                 # Generate questions for this chunk
                 questions, chunk_warnings = await self._generate_chunk(
                     chunk=chunk,
-                    context=context_for_llm,
+                    context=reduced_context_for_llm if flush_mode else context_for_llm,
                     scope_restriction=scope_restriction,
                     topics_used=topics_used,
+                    slot_start_index=slot_start_index,
+                    total_slots=len(blueprint),
                 )
 
                 warnings.extend(chunk_warnings)
@@ -180,9 +199,14 @@ Trả về JSON:
             # Build output
             elapsed_ms = int((time.time() - start_time) * 1000)
             usage = metrics.prompt_tokens + metrics.completion_tokens
+            status = AgentStatus.SUCCESS
+            if blueprint and not all_questions:
+                warnings.append("Builder produced 0 questions from a non-empty blueprint.")
+                status = AgentStatus.PARTIAL
 
+            logger.info(f"Builder finished: {len(all_questions)} questions")
             return BuilderOutput(
-                status=AgentStatus.SUCCESS,
+                status=status,
                 agent_name="builder",
                 execution_time_ms=elapsed_ms,
                 token_usage=TokenUsage(
@@ -200,6 +224,7 @@ Trả về JSON:
         except Exception as e:
             warnings.append(f"Builder failed: {str(e)}")
 
+            logger.info(f"Builder finished: {len(all_questions)} questions")
             return BuilderOutput(
                 status=AgentStatus.PARTIAL,
                 agent_name="builder",
@@ -218,6 +243,8 @@ Trả về JSON:
         context: str,
         scope_restriction: str,
         topics_used: list[str],
+        slot_start_index: int = 0,
+        total_slots: int = 0,
     ) -> tuple[list[dict], list[str]]:
         """Generate questions for a single blueprint chunk."""
         warnings = []
@@ -273,8 +300,33 @@ Sinh câu hỏi:"""
                 temperature=0.7,
             )
 
-            result = json.loads(response)
+            await asyncio.sleep(2)
+
+            if not response or not response.strip():
+                raise ValueError("LLM returned empty response for slot")
+
+            # Strip markdown code fence nếu có
+            clean = response.strip()
+            if clean.startswith("```"):
+                lines = clean.split("\n")
+                # Bỏ dòng đầu (```json hoặc ```) và dòng cuối (```)
+                lines = [l for l in lines if not l.strip().startswith("```")]
+                clean = "\n".join(lines).strip()
+
+            # Extract JSON object/array nếu có text thừa
+            import re
+            json_match = re.search(r'\{.*\}|\[.*\]', clean, re.DOTALL)
+            if json_match:
+                clean = json_match.group(0)
+
+            result = json.loads(clean)
             questions = result.get("questions", [])
+            for offset, _ in enumerate(chunk):
+                slot_number = slot_start_index + offset + 1
+                if total_slots:
+                    logger.info(f"Slot {slot_number} generated ok")
+                else:
+                    logger.info(f"Slot {slot_number} generated ok")
 
             # G4: Apply skill pipeline to each generated question
             for q in questions:
@@ -320,10 +372,16 @@ Sinh câu hỏi:"""
             return questions, warnings
 
         except json.JSONDecodeError as e:
+            for offset, _ in enumerate(chunk):
+                slot_number = slot_start_index + offset + 1
+                logger.warning(f"Slot {slot_number} failed: {e}")
             warnings.append(f"Failed to parse questions JSON: {e}")
             return [], warnings
 
         except Exception as e:
+            for offset, _ in enumerate(chunk):
+                slot_number = slot_start_index + offset + 1
+                logger.warning(f"Slot {slot_number} failed: {e}")
             warnings.append(f"LLM call failed: {str(e)}")
             return [], warnings
 

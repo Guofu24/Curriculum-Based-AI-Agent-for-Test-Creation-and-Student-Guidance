@@ -160,17 +160,18 @@ Output format:
                 try:
                     scope_result = await self.scope_skill.run(
                         question_stem=q.get("stem", ""),
-                        allowed_scope=exam_config.get("scope", []),
+                        allowed_content=retrieved_context or [],
+                        scope_chapters=exam_config.get("scope", []),
                     )
                     if not scope_result.get("in_scope", True):
                         issues.append({
                             "question_id": q.get("question_id", ""),
                             "issue_type": "scope_violation",
-                            "detail": scope_result.get("reason", "Out of scope"),
-                            "suggestion": scope_result.get("suggestion", "Restrict to allowed scope"),
+                            "detail": scope_result.get("reasoning", "Out of scope"),
+                            "suggestion": "Restrict to allowed scope",
                         })
-                except Exception:
-                    pass
+                except Exception as e:
+                    warnings.append(f"Scope check failed for question {q.get('question_id', '?')}: {e}")
 
             # G9: Save current issues to Redis before returning
             if self.short_term and issues:
@@ -201,8 +202,8 @@ Output format:
             scope_violations = result.get("scope_violations", [])
             approved_for_publish = result.get("approved_for_publish", False)
 
-            # Convert issues to proper format
-            issues = [
+            # Build LLM issues, then MERGE with skill-found issues (don't overwrite)
+            llm_issues = [
                 ValidationIssue(
                     question_id=i.get("question_id", ""),
                     issue_type=i.get("issue_type", "unknown"),
@@ -211,6 +212,8 @@ Output format:
                 ).to_dict()
                 for i in issues_data
             ]
+            # Merge: keep all skill issues + all LLM issues (no deduplication to preserve audit trail)
+            issues = issues + llm_issues
 
             # Check bloom compliance
             bloom_dist = exam_config.get("bloom_distribution", {})
@@ -321,3 +324,38 @@ Output format:
 Thực hiện kiểm tra:"""
 
         return prompt
+
+
+# ─── Unit test (runnable with: python -m pytest backend/app/agents/validator.py -v -k test_scope_violation) ───
+# def test_scope_violation_detected():
+#     """
+#     Scenario: Question references Chapter 5 but allowed scope is only Chapter 1-3.
+#
+#     Setup:
+#       questions = [
+#           {
+#               "question_id": "MCQ_001",
+#               "stem": "Một vật chuyển động tròn đều có gia tốc hướng tâm a = 4 m/s², "
+#                       "bán kính quỹ đạo r = 2 m. Tính tốc độ góc của vật.",
+#               "type": "mcq",
+#           }
+#       ]
+#       exam_config = {"scope": ["Chương 1: Động học chất điểm",
+#                                "Chương 2: Động lực học chất điểm",
+#                                "Chương 3: Tĩnh học"]}
+#       retrieved_context = [
+#           {"chunk_id": "c1", "content": "Chương 1: Động học chất điểm — các khái niệm cơ bản..."},
+#           {"chunk_id": "c2", "content": "Chương 2: Động lực học chất điểm — các định luật Newton..."},
+#           {"chunk_id": "c3", "content": "Chương 3: Tĩnh học — điều kiện cân bằng..."},
+#       ]
+#
+#     Expected behaviour:
+#       - scope_skill.run() → {"in_scope": False, "violation_type": "out_of_scope", ...}
+#       - ValidatorAgent.validate() → issues contains a scope_violation entry for MCQ_001
+#       - validation_passed = False (because scope issue was found)
+#
+#     Notes:
+#       - validate_blueprint() is NOT called here (it's on the outline agent).
+#       - The issue from scope_skill must be MERGED with any LLM-found issues
+#         (not overwritten). See: issues = issues + llm_issues
+# """

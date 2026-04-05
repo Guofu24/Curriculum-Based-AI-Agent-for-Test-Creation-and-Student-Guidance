@@ -676,6 +676,10 @@ class ExamGenerateResponse(BaseModel):
         None,
         description="WebSocket URL for real-time event streaming, e.g. ws://localhost:8000/ws/exam/{exam_id}",
     )
+    scope_warning: str | None = Field(
+        None,
+        description="Warning when scope chunk count > 80 — suggests narrowing to specific sections.",
+    )
 
 
 class EditQuestionRequest(BaseModel):

@@ -23,6 +23,7 @@ import {
   type ExamGenerationRequest,
 } from "@/lib/api"
 import { GenerationLoadingScreen } from "@/components/generation-loading-screen"
+import { GenerationLiveViewer } from "@/components/generation-live-viewer"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -73,6 +74,8 @@ export default function GenerateExamPage() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [generationError, setGenerationError] = useState("")
   const [generatedExamId, setGeneratedExamId] = useState<string | null>(null)
+  const [liveExamId, setLiveExamId] = useState<string | null>(null)
+  const [liveWsUrl, setLiveWsUrl] = useState<string | null>(null)
   const [rescanning, setRescanning] = useState(false)
 
   const loadSources = useCallback(async () => {
@@ -185,11 +188,33 @@ export default function GenerateExamPage() {
     }
   }, [selectedDocumentId])
 
-  // Redirect once generation completes (exam_id is set after the sync API returns)
+  // Redirect after generation completes (set after POST, but before live viewer starts)
+  // The actual completion redirect is handled by handleLiveComplete via the WebSocket
   useEffect(() => {
     if (!generatedExamId) return
+    // If live viewer is already showing, don't redirect — let WS handle it
+    if (liveExamId) return
     router.push(`/dashboard/exams/${generatedExamId}`)
-  }, [generatedExamId, router])
+  }, [generatedExamId, router, liveExamId])
+
+  // Handle WebSocket live viewer completion — redirect to exam page
+  const handleLiveComplete = useCallback(
+    (examId: string) => {
+      router.push(`/dashboard/exams/${examId}`)
+    },
+    [router]
+  )
+
+  // Handle live viewer errors — return to form
+  const handleLiveError = useCallback(
+    (message: string) => {
+      setGenerationError(message)
+      setLiveExamId(null)
+      setLiveWsUrl(null)
+      setIsGenerating(false)
+    },
+    []
+  )
 
   const handleGenerate = useCallback(async () => {
     if (!selectedDocument || selectedScope.length === 0) return
@@ -227,20 +252,32 @@ export default function GenerateExamPage() {
 
     try {
       const result = await generationApi.generate(requestPayload)
-      // setGeneratedExamId triggers redirect via useEffect above
+      setLiveExamId(result.exam_id)
+      setLiveWsUrl(result.websocket_url ?? null)
       setGeneratedExamId(result.exam_id)
     } catch (err: unknown) {
+      console.error("[generate] POST failed:", err)
       const message = err instanceof Error ? err.message : "Sinh đề thất bại"
       setGenerationError(message)
       setIsGenerating(false)
     }
   }, [selectedDocument, selectedScope, totalQuestions, timeLimit, prompt])
 
-  // Generation loading screen — animated stepper while request is in-flight
-  if (isGenerating) {
+  // Live WebSocket viewer — shows real-time agent reasoning while generation runs
+  if (liveExamId && liveWsUrl) {
     return (
-      <GenerationLoadingScreen isGenerating={true} />
+      <GenerationLiveViewer
+        examId={liveExamId}
+        websocketUrl={liveWsUrl}
+        onComplete={handleLiveComplete}
+        onError={handleLiveError}
+      />
     )
+  }
+
+  // Generation loading screen — shown only during the initial POST request (before WS connects)
+  if (isGenerating) {
+    return <GenerationLoadingScreen isGenerating={true} />
   }
 
   // Initial loading

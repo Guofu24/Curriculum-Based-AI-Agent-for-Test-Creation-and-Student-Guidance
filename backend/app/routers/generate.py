@@ -9,6 +9,7 @@ Key alignments:
 - POST /generate/partial-regenerate: maps to /exams/{id}/questions/{id} PATCH
 """
 
+import asyncio
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -20,6 +21,7 @@ from app.core.config import get_settings
 from app.schemas.exam import ExamConfigRequest, ExamGenerateResponse
 from app.dependencies import get_current_user
 from app.models.user import User
+from app.websocket.manager import get_connection_manager
 import uuid
 
 router = APIRouter(prefix="/api/v1/generate", tags=["Generation"])
@@ -55,10 +57,54 @@ async def _run_generation_inline(
         redis_client = get_redis_client()
         manager = get_connection_manager()
 
+        # ── Resolve scope strings → canonical chapter_ids ──────────────────────────
+        # Frontend sends "A.QUANG HÌNH HỌC" but chunks have chapter_id="ch1".
+        # Normalize scope by looking up heading_tree from the document.
+        normalized_scope: list[str] = []
+        if document_id and scope and isinstance(scope, list) and scope and isinstance(scope[0], str):
+            try:
+                from sqlalchemy import select
+                from app.models.document import Document
+                from app.rag.structure import normalize_chapter_id
+                result = await db.execute(
+                    select(Document).where(Document.id == UUID(document_id))
+                )
+                doc = result.scalar_one_or_none()
+                if doc and doc.heading_tree:
+                    # Build title→chapter_id lookup (case-insensitive)
+                    from app.rag.structure import flatten_heading_tree
+                    flat = flatten_heading_tree(doc.heading_tree)
+                    title_to_id = {}
+                    for node in flat:
+                        t = node.get("title", "").strip().lower()
+                        if t and node.get("chapter_id"):
+                            title_to_id[t] = node["chapter_id"]
+                    for s in scope:
+                        if not s:
+                            continue
+                        key = s.strip().lower()
+                        if key in title_to_id:
+                            normalized_scope.append(title_to_id[key])
+                        else:
+                            # Try normalize_chapter_id as fallback
+                            resolved = normalize_chapter_id(s)
+                            normalized_scope.append(resolved)
+                    _logger.info("Scope normalized: %s → %s", scope, normalized_scope)
+                else:
+                    normalized_scope = [normalize_chapter_id(s) for s in scope if s]
+            except Exception as e:
+                _logger.warning("Scope normalization failed, using raw scope: %s", e)
+                normalized_scope = [normalize_chapter_id(s) for s in (scope or []) if s]
+        elif scope and isinstance(scope, list):
+            # Already list of dicts or non-strings — pass through
+            normalized_scope = scope  # type: ignore[assignment]
+        else:
+            normalized_scope = scope or []
+
         trace_meta = {
             "user_id": user_id,
             "document_id": document_id,
-            "scope": scope,
+            "scope": normalized_scope,  # resolved to canonical chapter_ids
             "bloom_distribution": (exam_config or {}).get("bloom_distribution"),
             "demo_mode": settings.DEMO_MODE or not document_id,
         }
@@ -119,29 +165,49 @@ async def _run_generation_inline(
         else:
             from app.agents.orchestrator import OrchestratorAgent
 
+            # Inject resolved scope into exam_config so orchestrator uses canonical chapter_ids
+            resolved_config = dict(exam_config or {})
+            resolved_config["scope"] = normalized_scope
+
             orchestrator = OrchestratorAgent(redis=redis_client, db_session=db)
             orchestrator.set_stream_callback(stream_callback)
             result = await orchestrator.generate_exam(
                 exam_id=exam_id,
                 user_id=user_id,
-                exam_config=exam_config or {},
+                exam_config=resolved_config,
                 user_prompt=user_prompt or "",
                 extra_instructions=extra_instructions or "",
                 document_id=document_id,
             )
 
+        generated_questions = result.get("questions", [])
+        status_val = result.get("status")
+        is_success = (
+            status_val == "success"
+            or (hasattr(status_val, "value") and status_val.value == "success")
+        )
+
+        if not generated_questions:
+            await manager.emit(
+                exam_id or "",
+                SSEvent.error(
+                    f"Khong tao duoc cau hoi nao (status={status_val}). "
+                    "Nguyen nhan: retrieval tra ve 0 chunks — kiem tra scope/chapter_id.",
+                    "orchestrator",
+                ),
+            )
+            return {
+                "exam_id": exam_id,
+                "status": status_val or "partial",
+                "error": "No questions generated — check scope/chapter_id mismatch",
+            }
+
         if exam_id:
             exam_service = ExamService(db, redis_client)
             await exam_service.update_questions(
                 exam_id=uuid.UUID(exam_id),
-                questions=result.get("questions", []),
+                questions=generated_questions,
                 cost_report=result.get("cost_report"),
-            )
-
-            status_val = result.get("status")
-            is_success = (
-                status_val == "success"
-                or (hasattr(status_val, "value") and status_val.value == "success")
             )
             if is_success:
                 await manager.emit(
@@ -280,34 +346,89 @@ async def generate_exam_fe(
         _log.exception("create_exam failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to create exam: {e}")
 
+    # ── Scope guard: count chunks before generation ───────────────────────────
+    scope_warning: str | None = None
+    if config.document_id and config.scope:
+        from app.rag.vector_store import VectorStore
+        vs = VectorStore()
+        try:
+            chunk_count = await vs.count_chunks_in_scope(
+                doc_id=str(config.document_id),
+                scope_chapters=config.scope,
+            )
+            if chunk_count > 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Scope too large: {chunk_count} chunks found. "
+                        f"Please narrow the scope to specific sections (max ≈200 chunks)."
+                    ),
+                )
+            if chunk_count > 80:
+                scope_warning = (
+                    f"Scope has {chunk_count} chunks — consider narrowing to "
+                    f"specific sections for better quality."
+                )
+                _log.warning("Scope chunk count=%d (>80) for exam_id=%s", chunk_count, exam.id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            _log.warning("Could not count chunks in scope: %s", e)
+            chunk_count = 0
+    # ──────────────────────────────────────────────────────────────────────────
+
     job_id = str(uuid.uuid4())
+    exam_uuid = str(exam.id)
     _log.info("Starting generation: exam_id=%s, job_id=%s", exam.id, job_id)
 
-    # Run generation inline — shares the request's async event loop (no loop conflict)
-    try:
-        result = await _run_generation_inline(
-            exam_id=str(exam.id),
-            user_id=str(current_user.id),
-            document_id=str(config.document_id) if config.document_id else None,
-            scope=config.scope,
-            exam_config=exam.exam_config,
-            user_prompt=config.user_prompt,
-            extra_instructions=config.extra_instructions,
-        )
-    except TimeoutError:
-        _log.error("Generation timed out after 120s for exam_id=%s", exam.id)
-        raise HTTPException(status_code=504, detail="Generation timed out.")
-    except Exception as task_err:
-        _log.exception("Generation failed for exam_id=%s: %s", exam.id, task_err)
-        raise HTTPException(status_code=500, detail=f"Generation failed: {task_err}")
-
-    _log.info("Generation completed for exam_id=%s", exam.id)
-    return ExamGenerateResponse(
-        exam_id=str(exam.id),
+    # Return response IMMEDIATELY with websocket_url, so frontend can connect
+    # before generation events are emitted. Run generation as a background task.
+    response = ExamGenerateResponse(
+        exam_id=exam_uuid,
         job_id=job_id,
-        message="Exam generated successfully.",
+        message="Exam generation started.",
         websocket_url=f"{settings.ws_base_url}/ws/exam/{exam.id}",
+        scope_warning=scope_warning,
     )
+
+    async def _background_generation():
+        """Run generation in background — emits events via WebSocket as it progresses."""
+        import asyncio
+        import logging as _bg_log
+        _bg = _bg_log.getLogger("generate.background")
+        try:
+            await _run_generation_inline(
+                exam_id=exam_uuid,
+                user_id=str(current_user.id),
+                document_id=str(config.document_id) if config.document_id else None,
+                scope=config.scope,
+                exam_config=exam.exam_config,
+                user_prompt=config.user_prompt,
+                extra_instructions=config.extra_instructions,
+            )
+            _bg.info("Background generation completed for exam_id=%s", exam_uuid)
+        except TimeoutError:
+            _bg.error("Generation timed out after 120s for exam_id=%s", exam_uuid)
+            _mgr = get_connection_manager()
+            await _mgr.emit(exam_uuid, {
+                "type": "error",
+                "message": "Generation timed out after 120 seconds.",
+                "agent": "orchestrator",
+            })
+        except Exception as task_err:
+            _bg.exception("Background generation failed for exam_id=%s: %s", exam_uuid, task_err)
+            _mgr = get_connection_manager()
+            await _mgr.emit(exam_uuid, {
+                "type": "error",
+                "message": str(task_err),
+                "agent": "orchestrator",
+            })
+
+    # Start background task — shares the request's async event loop (no new loop needed)
+    asyncio.create_task(_background_generation())
+
+    _log.info("Response returned immediately for exam_id=%s, background task started", exam_uuid)
+    return response
 
 
 @router.post(

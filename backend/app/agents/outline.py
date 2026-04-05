@@ -103,6 +103,32 @@ Trả về JSON:
             blueprint = result.get("blueprint", [])
             distribution_summary = result.get("distribution_summary", {})
 
+            valid_llm, reason_llm = self.validate_blueprint(blueprint)
+            if not valid_llm:
+                warnings.append(f"LLM blueprint invalid: {reason_llm}")
+                # Try fallback
+                try:
+                    fallback_out = await self._fallback_outline(
+                        exam_config, start_time, trace_id, warnings
+                    )
+                    fallback_bp = fallback_out.blueprint
+                except ValueError as fe:
+                    # Fallback itself raised — propagate with context
+                    raise ValueError(
+                        f"Both LLM and fallback blueprints are invalid. "
+                        f"LLM: {reason_llm}. Fallback: {fe}"
+                    ) from fe
+
+                valid_fb, reason_fb = self.validate_blueprint(fallback_bp)
+                if not valid_fb:
+                    raise ValueError(
+                        f"Both LLM and fallback blueprints are invalid. "
+                        f"LLM: {reason_llm}. Fallback: {reason_fb}"
+                    )
+
+                # Fallback succeeded — use it
+                return fallback_out
+
             # Validate distribution
             validation_warning = self._validate_distribution(
                 blueprint, exam_config, retrieved_context
@@ -239,6 +265,47 @@ Tao blueprint chi tiet:"""
 
         return None
 
+    def validate_blueprint(self, bp: list[dict]) -> tuple[bool, str]:
+        """
+        Validate blueprint slots conform to the actual slot schema used by both
+        the LLM and the fallback generator.
+
+        Required fields per slot:
+          - question_id:  str (non-empty, format "MCQ_NNN" or "ESSAY_NNN")
+          - bloom_level:  str (non-empty, one of the 4 Bloom levels)
+          - chapter:       str (non-empty)
+
+        Optional-but-warned fields (not enforced here):
+          type, section, topic_hint, content_type, estimated_difficulty
+
+        Returns (True, "") if valid, (False, reason) if invalid.
+        """
+        if not isinstance(bp, list):
+            return False, f"Blueprint must be a list, got {type(bp).__name__}"
+
+        valid_blooms = {"nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"}
+
+        for i, slot in enumerate(bp):
+            if not isinstance(slot, dict):
+                return False, f"Blueprint[{i}] is not a dict: {type(slot).__name__}"
+
+            missing: list[str] = []
+            if not slot.get("question_id"):
+                missing.append("question_id")
+            if not slot.get("bloom_level"):
+                missing.append("bloom_level")
+            elif slot["bloom_level"] not in valid_blooms:
+                return False, (
+                    f"Blueprint[{i}] bloom_level '{slot['bloom_level']}' is not valid "
+                    f"(expected one of {valid_blooms})"
+                )
+            if not slot.get("chapter"):
+                missing.append("chapter")
+            if missing:
+                return False, f"Blueprint[{i}] missing required keys: {missing}"
+
+        return True, ""
+
     async def _fallback_outline(
         self,
         exam_config: dict,
@@ -298,8 +365,15 @@ Tao blueprint chi tiet:"""
 
         distribution_summary = {
             "by_bloom": {level: round(mcq_count * bloom_dist.get(level, 25) / 100) for level in bloom_levels},
-            "by_chapter": {ch: blueprint.count(ch) for ch in chapters},
+            "by_chapter": {
+                ch: sum(1 for slot in blueprint if slot.get("chapter") == ch)
+                for ch in chapters
+            },
         }
+
+        valid, reason = self.validate_blueprint(blueprint)
+        if not valid:
+            raise ValueError(f"Fallback blueprint invalid: {reason}")
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 

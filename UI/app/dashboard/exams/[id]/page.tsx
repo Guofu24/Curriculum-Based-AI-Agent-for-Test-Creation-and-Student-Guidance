@@ -102,7 +102,10 @@ function formatDate(iso: string) {
 
 function getEditableOptions(question: Question): MCQOption[] {
   const indexed = new Map<string, string>()
-  for (const option of question.options || []) {
+  const opts: MCQOption[] = Array.isArray(question.options)
+    ? question.options
+    : Object.entries(question.options || {}).map(([label, text]) => ({ label, text: String(text) }))
+  for (const option of opts) {
     if (!option?.label) continue
     indexed.set(option.label.toUpperCase(), option.text || "")
   }
@@ -178,7 +181,7 @@ export default function ExamReviewPage() {
   }, [examId])
 
   const activeVersion = useActiveVersion(exam, selectedVersionId)
-  const questions = activeVersion?.questions || exam?.questions || []
+  const questions = (activeVersion?.questions?.length ? activeVersion.questions : null) ?? exam?.questions ?? []
   const feedbackEvents = activeVersion?.feedback_events || exam?.feedback_events || []
   const playbookShadowEvents = getPlaybookShadowEvents(feedbackEvents)
   const filteredQuestions = questions.filter((question) => filterBloom === "all" || question.bloom_level === filterBloom)
@@ -618,8 +621,8 @@ function QuestionCard({
             {question.blueprint_cell_key ? <p className="text-xs text-muted-foreground">Blueprint cell: {question.blueprint_cell_key}</p> : null}
             {(question.error_categories || []).length > 0 ? (
               <div className="flex flex-wrap gap-2">
-                {(question.error_categories || []).map((category) => (
-                  <Badge key={`${question.id}-${category}`} variant="outline" className="capitalize">
+                {(question.error_categories || []).map((category, i) => (
+                  <Badge key={`${question.id}-${category}-${i}`} variant="outline" className="capitalize">
                     {humanReadableCategory(category)}
                   </Badge>
                 ))}
@@ -680,13 +683,18 @@ function QuestionCard({
           <div className="mt-4 space-y-4">
             <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{question.content}</p>
             <div className="space-y-2">
-              {(question.options || []).map((option) => (
-                <div key={`${question.id}-${option.label}`} className={`flex items-start gap-3 rounded-lg border px-3 py-2 text-sm ${option.label === question.correct_answer ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-border bg-background text-foreground"}`}>
-                  <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs font-medium">{option.label}</span>
-                  <span className="flex-1">{option.text}</span>
-                  {option.label === question.correct_answer ? <Check className="h-4 w-4 shrink-0" /> : null}
-                </div>
-              ))}
+              {(() => {
+                const opts: MCQOption[] = Array.isArray(question.options)
+                  ? question.options
+                  : Object.entries(question.options || {}).map(([label, text]) => ({ label, text: String(text) }))
+                return opts.map((option) => (
+                  <div key={`${question.id}-${option.label}`} className={`flex items-start gap-3 rounded-lg border px-3 py-2 text-sm ${option.label === question.correct_answer ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-border bg-background text-foreground"}`}>
+                    <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs font-medium">{option.label}</span>
+                    <span className="flex-1">{option.text}</span>
+                    {option.label === question.correct_answer ? <Check className="h-4 w-4 shrink-0" /> : null}
+                  </div>
+                ))
+              })()}
             </div>
             {question.explanation ? (
               <div className="rounded-xl border bg-muted/20 p-4">

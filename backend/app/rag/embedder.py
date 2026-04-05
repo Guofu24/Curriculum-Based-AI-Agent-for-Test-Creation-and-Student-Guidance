@@ -7,6 +7,8 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import numpy as np
+
 from app.core.config import get_settings
 from app.core.redis_client import RedisClient
 
@@ -54,21 +56,19 @@ class _FallbackModel:
             dtype=np.float32,
         )
 
-    def _fallback_vec(self, text: str) -> list[float]:
+    def _fallback_vec(self, text: str) -> np.ndarray:
         import struct
-        import math
 
         dim = self._dim
         hash_bytes = hashlib.sha256(text.encode()).digest()
-        values = []
+        values = np.zeros(dim, dtype=np.float64)
         for i in range(dim):
             seed_bytes = hashlib.sha256(hash_bytes + struct.pack("I", i)).digest()
-            value = struct.unpack("f", seed_bytes[:4])[0]
-            values.append(value)
-        norm = math.sqrt(sum(v * v for v in values))
+            values[i] = struct.unpack("f", seed_bytes[:4])[0]
+        norm = np.linalg.norm(values)
         if norm > 0:
-            values = [v / norm for v in values]
-        return values
+            values = values / norm
+        return np.nan_to_num(values, nan=0.0, posinf=1.0, neginf=-1.0).astype(np.float32)
 
 
 async def _get_model():
@@ -140,7 +140,7 @@ class EmbeddingService:
         cache_key = f"embed:text:{self._hash_text(text)}"
         cached = await self._cache_get(cache_key)
         if cached:
-            return cached
+            return np.nan_to_num(cached, nan=0.0, posinf=1.0, neginf=-1.0)
 
         embedding = await self._call_embedding(text)
         await self._cache_set(cache_key, embedding)
@@ -178,7 +178,10 @@ class EmbeddingService:
         loop = asyncio.get_running_loop()
         vector = await loop.run_in_executor(
             _executor,
-            lambda: model.encode(text, normalize_embeddings=True).tolist(),
+            lambda: np.nan_to_num(
+                np.asarray(model.encode(text, normalize_embeddings=True)),
+                nan=0.0, posinf=1.0, neginf=-1.0,
+            ).tolist(),
         )
         return vector
 
@@ -188,7 +191,10 @@ class EmbeddingService:
         loop = asyncio.get_running_loop()
         vectors = await loop.run_in_executor(
             _executor,
-            lambda: model.encode(texts, normalize_embeddings=True, batch_size=32).tolist(),
+            lambda: np.nan_to_num(
+                np.asarray(model.encode(texts, normalize_embeddings=True, batch_size=32)),
+                nan=0.0, posinf=1.0, neginf=-1.0,
+            ).tolist(),
         )
         return vectors
 
@@ -198,22 +204,18 @@ class EmbeddingService:
         Produces a zero-normalised vector matching ST_EMBEDDING_DIM (768).
         """
         import struct
-        import math
 
         dim = self._embedding_dim
         hash_bytes = hashlib.sha256(text.encode()).digest()
-
-        values = []
+        values = np.zeros(dim, dtype=np.float64)
         for i in range(dim):
             seed_bytes = hashlib.sha256(hash_bytes + struct.pack("I", i)).digest()
-            value = struct.unpack("f", seed_bytes[:4])[0]
-            values.append(value)
-
-        norm = math.sqrt(sum(v * v for v in values))
+            values[i] = struct.unpack("f", seed_bytes[:4])[0]
+        norm = np.linalg.norm(values)
         if norm > 0:
-            values = [v / norm for v in values]
-
-        return values
+            values = values / norm
+        vector = np.nan_to_num(values, nan=0.0, posinf=1.0, neginf=-1.0).astype(np.float32)
+        return vector.tolist()
 
 
 async def embed_chunks(
@@ -242,7 +244,7 @@ async def embed_chunks(
 
         if cached:
             enriched = dict(chunk)
-            enriched["embedding"] = cached
+            enriched["embedding"] = np.nan_to_num(cached, nan=0.0, posinf=1.0, neginf=-1.0)
             result_chunks.append(enriched)
         else:
             uncached_indices.append(i)

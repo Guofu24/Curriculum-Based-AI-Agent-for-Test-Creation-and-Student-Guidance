@@ -1,8 +1,36 @@
 """Pinecone vector store operations."""
 
+import logging
+import unicodedata
+
 from app.core.config import get_settings
 
+logger = logging.getLogger("app.rag.vector_store")
+from app.rag.structure import normalize_chapter_id
+
 settings = get_settings()
+
+
+def _make_ascii_namespace(namespace: str) -> str:
+    """
+    Convert namespace to ASCII-safe string for Pinecone.
+    - Normalize Unicode (NFC), strip diacritics
+    - Replace non-ASCII letters with ASCII equivalents
+    - Replace non-printable / special chars with underscore
+    """
+    # Decompose Unicode, strip combining marks
+    ascii_str = unicodedata.normalize("NFD", namespace)
+    ascii_str = "".join(c for c in ascii_str if unicodedata.category(c) != "Mn")
+    # Replace remaining non-ASCII with underscore
+    ascii_str = "".join(c if ord(c) < 128 else "_" for c in ascii_str)
+    # Collapse multiple underscores and strip leading/trailing
+    import re
+    ascii_str = re.sub(r"_+", "_", ascii_str).strip("_")
+    # If empty, fall back to hex hash
+    if not ascii_str:
+        import hashlib
+        ascii_str = hashlib.md5(namespace.encode()).hexdigest()
+    return ascii_str
 
 
 class VectorStore:
@@ -59,7 +87,7 @@ class VectorStore:
         if not index:
             return
 
-        namespace = f"{document_id}_{chapter_id}"
+        namespace = _make_ascii_namespace(f"{document_id}_{chapter_id}")
         records = []
 
         for chunk in chunks:
@@ -67,8 +95,17 @@ class VectorStore:
             if not embedding:
                 continue
 
+            import numpy as np
+            embedding = np.nan_to_num(embedding, nan=0.0, posinf=1.0, neginf=-1.0).tolist()
+
+            chunk_id = chunk.get("chunk_id", "")
+            # Pinecone requires ASCII-only vector IDs — strip any non-ASCII chars
+            safe_chunk_id = "".join(c if ord(c) < 128 else "_" for c in chunk_id)
+            if not safe_chunk_id:
+                safe_chunk_id = "chunk_unknown"
+
             records.append({
-                "id": chunk.get("chunk_id", ""),
+                "id": safe_chunk_id,
                 "values": embedding,
                 "metadata": {
                     "document_id": document_id,
@@ -91,8 +128,38 @@ class VectorStore:
             for i in range(0, len(records), 100):
                 batch = records[i:i + 100]
                 index.upsert(vectors=batch, namespace=namespace)
+        except Exception as e:
+            logger.warning(f"Pinecone upsert failed for namespace {namespace}: {e}")
+
+    async def count_chunks_in_scope(
+        self,
+        doc_id: str,
+        scope_chapters: list[str],
+    ) -> int:
+        """
+        Count total chunks across all scope chapters.
+
+        Uses describe_index_stats() for efficiency (single API call),
+        then filters by prefix-match on namespace. Falls back to 0
+        if the index or stats are unavailable.
+        """
+        index = await self._get_index()
+        if not index:
+            return 0
+
+        try:
+            stats = index.describe_index_stats()
+            if not stats:
+                return 0
+            namespaces: dict = stats.get("namespaces", {})
+            total = 0
+            for chapter in scope_chapters:
+                chapter_id = normalize_chapter_id(chapter)
+                ns_key = f"{doc_id}_{chapter_id}"
+                total += namespaces.get(ns_key, {}).get("vector_count", 0)
+            return total
         except Exception:
-            pass
+            return 0
 
     async def query_namespace(
         self,
@@ -111,7 +178,10 @@ class VectorStore:
         if not index:
             return []
 
-        namespace = f"{doc_id}_{chapter_id}"
+        namespace = _make_ascii_namespace(f"{doc_id}_{chapter_id}")
+
+        import numpy as np
+        query_embedding = np.nan_to_num(query_embedding, nan=0.0, posinf=1.0, neginf=-1.0).tolist()
 
         try:
             result = index.query(
@@ -150,7 +220,7 @@ class VectorStore:
             return
 
         for chapter_id in chapters:
-            namespace = f"{doc_id}_{chapter_id}"
+            namespace = _make_ascii_namespace(f"{doc_id}_{chapter_id}")
             try:
                 index.delete(delete_all=True, namespace=namespace)
             except Exception:

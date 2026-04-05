@@ -88,7 +88,15 @@ def _simple_chunk(
     """
     Fallback simple chunking when LlamaIndex is not available.
     Splits by paragraphs while preserving heading context.
+    Uses heading_tree to get canonical chapter_id for each heading.
     """
+    # Build title → canonical chapter_id lookup from heading_tree (case-insensitive)
+    title_to_canonical_id: dict[str, str] = {}
+    for ch in heading_tree.get("chapters", []):
+        ch_title = ch.get("title", "").strip().lower()
+        if ch_title and ch.get("chapter_id"):
+            title_to_canonical_id[ch_title] = ch["chapter_id"]
+
     lines = markdown.split("\n")
     chunks: list[dict] = []
     current_chunks: list[str] = []
@@ -103,11 +111,13 @@ def _simple_chunk(
         nonlocal current_chunks, current_size, chunk_index, current_chapter_id
         content = "\n".join(current_chunks)
         chunk_id = f"chunk_{current_chapter_id}_{chunk_index:04d}" if current_chapter_id else f"chunk_{chunk_index:04d}"
+        # Guarantee chapter_id is never empty string
+        safe_chapter_id = current_chapter_id or "ch_unknown"
         chunk = {
             "chunk_id": chunk_id,
             "document_id": "",
             "chapter": current_chapter,
-            "chapter_id": current_chapter_id,
+            "chapter_id": safe_chapter_id,
             "section": current_section,
             "section_id": current_section_id,
             "content_type": _detect_content_type(content),
@@ -134,7 +144,12 @@ def _simple_chunk(
                     current_chunks = []
                     current_size = 0
                 current_chapter = title
-                current_chapter_id = _title_to_chapter_id(title)
+                # Use canonical chapter_id from heading_tree if available
+                canonical = title_to_canonical_id.get(title.lower())
+                if canonical:
+                    current_chapter_id = canonical
+                else:
+                    current_chapter_id = _title_to_chapter_id(title)
                 current_section = ""
                 current_section_id = ""
 
@@ -175,6 +190,7 @@ def _get_heading_context(metadata: dict, heading_tree: dict) -> tuple[str, str, 
     from LlamaIndex node metadata and heading tree.
 
     Returns (chapter, chapter_id, section, section_id).
+    chapter_id is guaranteed non-empty if heading_tree has chapters.
     """
     chapter = ""
     chapter_id = ""
@@ -190,19 +206,22 @@ def _get_heading_context(metadata: dict, heading_tree: dict) -> tuple[str, str, 
             heading_id = _title_to_id(title)
             if level == 1:
                 chapter = title
-                chapter_id = heading_id
+                chapter_id = heading_id  # NEVER empty string (fixed in _title_to_id)
             elif level == 2:
                 section = title
                 section_id = heading_id
                 chapter_id = metadata.get("chapter_id", "")
 
-    # Fallback: try to find from heading_tree
+    # Fallback: ensure chapter_id is NEVER empty
     if not chapter_id and heading_tree:
         chapters = heading_tree.get("chapters", [])
         if chapters:
             first_ch = chapters[0]
             chapter_id = first_ch.get("chapter_id", "")
             chapter = first_ch.get("title", "")
+    if not chapter_id:
+        # Ultimate fallback — should never happen if heading_tree is populated
+        chapter_id = "ch_unknown"
 
     return chapter, chapter_id, section, section_id
 
@@ -235,10 +254,22 @@ def _extract_page_number(text: str) -> int | None:
 
 
 def _title_to_id(title: str) -> str:
-    """Convert heading title to a safe ID string."""
-    normalized = re.sub(r"[^\w\s]", "", title)
+    """Convert heading title to a safe ASCII-only ID string."""
+    # Step 1: strip non-ASCII (Vietnamese diacritics, emoji, etc.)
+    ascii_chars = []
+    for ch in title:
+        code = ord(ch)
+        if code < 128:
+            ascii_chars.append(ch)
+        elif ch.isalnum():
+            ascii_chars.append(ch)  # keep alphanum chars from any script
+        # else: drop punctuation/symbols
+    normalized = "".join(ascii_chars)
     normalized = re.sub(r"\s+", "_", normalized.strip().lower())
-    return normalized[:50]
+    result = normalized[:50]
+    if not result:
+        result = "untitled"
+    return result
 
 
 def _title_to_chapter_id(title: str) -> str:
@@ -249,7 +280,13 @@ def _title_to_chapter_id(title: str) -> str:
         for part in parts:
             if part.rstrip(".").isdigit():
                 return f"ch{part.rstrip('.')}"
-    return _title_to_id(title)
+    # If title is empty or doesn't match, use a hash-based fallback
+    # so chapter_id is NEVER an empty string
+    result = _title_to_id(title)
+    if not result:
+        import hashlib
+        result = "ch_" + hashlib.md5(title.encode()).hexdigest()[:6]
+    return result
 
 
 def _count_sections(existing_chunks: list[dict], chapter_id: str) -> int:

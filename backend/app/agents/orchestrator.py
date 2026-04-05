@@ -1,10 +1,13 @@
 """Orchestrator Agent - main entry point that coordinates all sub-agents."""
 
+import logging
 import time
 import uuid
 import json
 from typing import Any, Callable, Awaitable
 from uuid import UUID
+
+logger = logging.getLogger("app.agents.orchestrator")
 
 from app.agents.base import AgentBaseOutput, AgentStatus, TokenUsage
 from app.agents.retrieval import RetrievalAgent
@@ -205,8 +208,10 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
 
         # Verify exam_config_original was stored correctly
         session = await self.short_term.load_session(trace_id, user_id)
-        assert session is not None, "Session not found after save!"
-        assert session.get("exam_config_original") is not None, "exam_config_original not set in session!"
+        if session is None:
+            warnings.append("Session not found in short-term memory — proceeding with partial context")
+        elif session.get("exam_config_original") is None:
+            warnings.append("exam_config_original not set in session — proceeding with fallback config")
 
         # Step 2: Load long-term memory (teacher preferences)
         teacher_prefs = {}
@@ -268,6 +273,9 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             trace_id=trace_id,
         )
 
+        logger.info(f"Retrieval status: {retrieval_result.status}")
+        logger.info(f"Retrieval chunks count: {len(getattr(retrieval_result, 'retrieved_chunks', []))}")
+
         if retrieval_result.status == AgentStatus.PARTIAL:
             warnings.append("Retrieval returned partial results")
         elif retrieval_result.status == AgentStatus.FAILED:
@@ -277,6 +285,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         retrieved_chunks = []
         if hasattr(retrieval_result, 'retrieved_chunks'):
             retrieved_chunks = retrieval_result.retrieved_chunks
+
+        logger.info(f"retrieved_chunks passed to outline: {len(retrieved_chunks)}")
 
         cost_report["retrieval"] = retrieval_result.token_usage.model_dump()
 
@@ -309,6 +319,9 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             exam_config=full_config,
             trace_id=trace_id,
         )
+
+        logger.info(f"Outline status: {outline_result.status}")
+        logger.info(f"Blueprint slots count: {len(getattr(outline_result, 'blueprint', []))}")
 
         # Extract blueprint from the result
         blueprint = []
@@ -387,12 +400,17 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             trace_id=trace_id,
         )
 
+        logger.info(f"Builder status: {builder_result.status}")
+        logger.info(f"Builder questions count: {len(getattr(builder_result, 'questions', []))}")
+
         # Extract questions from the result
         questions = []
         if hasattr(builder_result, 'questions'):
             questions = builder_result.questions
         elif hasattr(builder_result, 'generated_questions'):
             questions = builder_result.generated_questions
+
+        logger.info(f"Final questions count before validator: {len(questions)}")
 
         cost_report["builder"] = builder_result.token_usage.model_dump()
 

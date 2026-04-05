@@ -11,11 +11,18 @@ from app.agents.llm import get_llm_client
 from app.observability.tracer import get_tracer
 from app.rag.vector_store import get_vector_store
 from app.rag.embedder import EmbeddingService
+from app.rag.structure import normalize_chapter_id
 from app.core.redis_client import RedisClient
 from app.core.config import get_settings
 
 settings = get_settings()
 tracer = get_tracer()
+
+try:
+    import tiktoken
+    _ENCODING = tiktoken.get_encoding("cl100k_base")
+except Exception:
+    _ENCODING = None
 
 
 class RetrievalAgent:
@@ -68,6 +75,13 @@ class RetrievalAgent:
                 top_k=settings.RAG_TOP_K_PER_CHAPTER,
             )
             warnings.extend(retrieval_warnings)
+
+            # Enforce token budget cap (Phase 1 guard)
+            all_chunks, token_warning = self._enforce_token_budget(
+                all_chunks, max_tokens=settings.MAX_CONTEXT_TOKENS
+            )
+            if token_warning:
+                warnings.append(token_warning)
 
             # Build coverage map
             coverage_map: dict[str, list[str]] = {}
@@ -215,6 +229,81 @@ Trả về JSON:
 
         return all_chunks, warnings
 
+    # ── Token budget guard ─────────────────────────────────────────────────────
+
+    def _enforce_token_budget(
+        self,
+        chunks: list[dict],
+        max_tokens: int = 3000,
+    ) -> tuple[list[dict], str | None]:
+        """
+        Truncate chunks so total token count stays within max_tokens.
+
+        Strategy:
+        - If tiktoken is available: count tokens precisely.
+        - If chunks have relevance scores: sort descending, truncate.
+        - Otherwise: character heuristic (1 token ≈ 4 chars).
+
+        Returns (truncated_chunks, warning_or_none).
+        """
+        if not chunks:
+            return chunks, None
+
+        warning = None
+
+        if _ENCODING is not None:
+            total_tokens = sum(
+                len(_ENCODING.encode(c.get("content", "")))
+                for c in chunks
+            )
+        else:
+            # Fallback heuristic: 1 token ≈ 4 chars
+            total_tokens = sum(len(c.get("content", "")) // 4 for c in chunks)
+
+        if total_tokens <= max_tokens:
+            return chunks, None
+
+        warning = (
+            f"Token budget exceeded: {total_tokens} tokens > {max_tokens} limit. "
+            f"Truncating to top-scoring chunks."
+        )
+
+        if _ENCODING is not None:
+            # Sort by score descending (keep highest-relevance chunks)
+            scored = [c for c in chunks if c.get("score", 0) > 0]
+            unsorted_rest = [c for c in chunks if c not in scored]
+            scored.sort(key=lambda c: c.get("score", 0), reverse=True)
+
+            kept: list[dict] = []
+            running_tokens = 0
+            for c in scored + unsorted_rest:
+                c_tokens = len(_ENCODING.encode(c.get("content", "")))
+                if running_tokens + c_tokens <= max_tokens:
+                    kept.append(c)
+                    running_tokens += c_tokens
+                else:
+                    break
+            return kept, warning
+        else:
+            # No tiktoken + no scores: character heuristic truncate
+            char_limit = max_tokens * 4
+            kept: list[dict] = []
+            running_chars = 0
+            for c in chunks:
+                content = c.get("content", "")
+                if running_chars + len(content) <= char_limit:
+                    kept.append(c)
+                    running_chars += len(content)
+                else:
+                    # Truncate the last chunk to fit
+                    remaining = char_limit - running_chars
+                    if remaining > 50:
+                        truncated = c.copy()
+                        truncated["content"] = content[:remaining]
+                        kept.append(truncated)
+                    break
+            return kept, warning
+
     async def _retrieve_for_chapter(
         self,
         document_id: str,
@@ -225,8 +314,7 @@ Trả về JSON:
         """Retrieve chunks for a specific chapter."""
         chapter_chunks = []
 
-        # Extract chapter_id from chapter name (normalize)
-        chapter_id = chapter.lower().replace(" ", "_").replace("chương_", "ch")
+        chapter_id = normalize_chapter_id(chapter)
 
         # Generate embedding for the query
         query_text = " ".join(queries[:3])

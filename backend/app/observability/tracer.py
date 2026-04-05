@@ -255,7 +255,7 @@ class CurriculumTracer:
 
     def skill_span(self, skill_name: str) -> Callable:
         """
-        Decorator that wraps an async skill method with a LangFuse span.
+        Decorator that wraps a skill method (sync or async) with a LangFuse span.
 
         Usage:
             @tracer.skill_span("bloom_classifier")
@@ -263,60 +263,119 @@ class CurriculumTracer:
                 ...
         """
         def decorator(func: Callable) -> Callable:
-            @functools.wraps(func)
-            async def wrapper(*args, **kwargs) -> Any:
-                start_time = time.time()
-                span: Any = None
+            import inspect as _inspect
 
-                if self.enabled:
+            common_span_setup = lambda: (
+                self._lf.span(
+                    name=f"skill:{skill_name}",
+                    metadata={
+                        "skill_name": skill_name,
+                        "type": "skill",
+                    },
+                )
+                if self.enabled
+                else None
+            )
+
+            common_span_update = lambda span, result, elapsed_ms, status, exc_msg=None: (
+                (
+                    span.update(
+                        metadata={
+                            "latency_ms": elapsed_ms,
+                            "output_hash": hash_output(result),
+                            "status": status,
+                        }
+                        if status == "success"
+                        else None,
+                        level="ERROR" if exc_msg else None,
+                        status_message=exc_msg,
+                    )
+                )
+                if span is not None
+                else None
+            )
+
+            common_span_end = lambda span: (
+                (span.end(), None) if span is not None else None
+            )
+
+            if _inspect.iscoroutinefunction(func):
+                @functools.wraps(func)
+                async def wrapper(*args, **kwargs) -> Any:
+                    start_time = time.time()
+                    span = None
+
+                    if self.enabled:
+                        try:
+                            span = common_span_setup()
+                        except Exception:
+                            pass
+
                     try:
-                        span = self._lf.span(
-                            name=f"skill:{skill_name}",
-                            metadata={
-                                "skill_name": skill_name,
-                                "type": "skill",
-                            },
-                        )
-                    except Exception:
-                        pass
-
-                try:
-                    result = await func(*args, **kwargs)
-
-                    if span is not None:
+                        result = await func(*args, **kwargs)
                         elapsed_ms = int((time.time() - start_time) * 1000)
+                        if span is not None:
+                            try:
+                                common_span_update(span, result, elapsed_ms, "success")
+                            except Exception:
+                                pass
+                        return result
+
+                    except Exception as exc:
+                        if span is not None:
+                            try:
+                                common_span_update(span, None, 0, "error", str(exc))
+                            except Exception:
+                                pass
+                        raise
+
+                    finally:
+                        if span is not None:
+                            try:
+                                span.end()
+                            except Exception:
+                                pass
+
+                return wrapper
+            else:
+                @functools.wraps(func)
+                def wrapper(*args, **kwargs) -> Any:
+                    start_time = time.time()
+                    span = None
+
+                    if self.enabled:
                         try:
-                            span.update(
-                                metadata={
-                                    "latency_ms": elapsed_ms,
-                                    "output_hash": hash_output(result),
-                                    "status": "success",
-                                }
-                            )
+                            span = common_span_setup()
                         except Exception:
                             pass
 
-                    return result
+                    try:
+                        result = func(*args, **kwargs)
+                        elapsed_ms = int((time.time() - start_time) * 1000)
+                        if span is not None:
+                            try:
+                                common_span_update(span, result, elapsed_ms, "success")
+                            except Exception:
+                                pass
+                        return result
 
-                except Exception as exc:
-                    if span is not None:
-                        try:
-                            span.update(
-                                level="ERROR",
-                                status_message=str(exc),
-                            )
-                        except Exception:
-                            pass
-                    raise
+                    except Exception as exc:
+                        if span is not None:
+                            try:
+                                common_span_update(span, None, 0, "error", str(exc))
+                            except Exception:
+                                pass
+                        raise
 
-                finally:
-                    if span is not None:
-                        try:
-                            span.end()
-                        except Exception:
-                            pass
+                    finally:
+                        if span is not None:
+                            try:
+                                span.end()
+                            except Exception:
+                                pass
 
-            return wrapper
+                return wrapper
+
         return decorator
 
     # ── LLM generation span helper ────────────────────────────────────────────

@@ -22,10 +22,11 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
+    MAX_GENERATES_PER_DAY: int = 9999
 
     # LLM Provider
     LLM_PROVIDER: str = "groq"
-    LLM_FALLBACK_CHAIN: str = "groq,g4f"
+    LLM_FALLBACK_CHAIN: str = "groq,ollama,g4f"
 
     @property
     def fallback_providers(self) -> list[str]:
@@ -136,6 +137,7 @@ class Settings(BaseSettings):
     RAG_CHUNK_SIZE: int = 1200
     RAG_CHUNK_OVERLAP: int = 200
     EMBEDDING_CACHE_TTL_SECONDS: int = 604800  # 7 days
+    MAX_CONTEXT_TOKENS: int = 3000  # Hard cap per chapter slot before truncation
 
     @field_validator("DEBUG", mode="before")
     @classmethod

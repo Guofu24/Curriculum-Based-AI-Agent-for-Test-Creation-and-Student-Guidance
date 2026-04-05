@@ -373,8 +373,15 @@ class G4FProvider(BaseLLMProvider):
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         import g4f
 
+        # g4f has its own model pool — don't pass Groq/OpenAI model names.
+        # Use g4f's auto-selection (picks best available).
+        g4f_model = getattr(g4f.models, "gpt_4o_mini", None) or getattr(g4f.models, "gpt_4o", None)
+        if g4f_model is None:
+            # Last-resort fallback
+            g4f_model = "gpt-4o-mini"
+
         response = await g4f.ChatCompletion.create_async(
-            model=model or g4f.models.gpt_4o,
+            model=g4f_model,
             messages=messages,
         )
         return str(response)
@@ -420,6 +427,61 @@ class G4FProvider(BaseLLMProvider):
 
 
 # ============================================================
+# QWEN VISION PROVIDER (self-hosted VLM via ngrok)
+# ============================================================
+
+class QwenVisionProvider(BaseLLMProvider):
+    """
+    Self-hosted Qwen3.5-9B via ngrok tunnel.
+    Uses QWEN_VISION_BASE_URL from .env (e.g. https://xxxx.ngrok-free.app).
+    OpenAI-compatible /v1/chat/completions endpoint.
+    """
+
+    def __init__(self) -> None:
+        base = settings.QWEN_VISION_BASE_URL.rstrip("/")
+        if not base:
+            raise RuntimeError("QWEN_VISION_BASE_URL is not set in .env")
+        self._base_url = f"{base}/v1"
+
+    async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key="not-needed", base_url=self._base_url)
+        resp = await client.chat.completions.create(
+            model=model or "Qwen/Qwen3.5-9B",
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return resp.choices[0].message.content or ""
+
+    async def chat_structured(
+        self,
+        messages: list[dict],
+        response_model: type[T],
+        model: str,
+        temperature: float = 0.3,
+        max_retries: int = 3,
+        **kwargs: Any,
+    ) -> T:
+        import instructor
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key="not-needed", base_url=self._base_url)
+        inst = instructor.from_openai(client)
+        return await inst.chat.completions.create(
+            model=model or "Qwen/Qwen3.5-9B",
+            messages=messages,
+            response_model=response_model,
+            temperature=temperature,
+            max_retries=max_retries,
+        )
+
+    def supports_vision(self) -> bool:
+        return True
+
+
+# ============================================================
 # PROVIDER FACTORY
 # ============================================================
 
@@ -430,6 +492,7 @@ _PROVIDER_MAP: dict[str, type[BaseLLMProvider]] = {
     "anthropic": AnthropicProvider,
     "ollama": OllamaProvider,
     "g4f": G4FProvider,
+    "qwen_vision": QwenVisionProvider,
 }
 
 
@@ -448,6 +511,8 @@ def _is_provider_available(name: str) -> bool:
         return True  # local server, no key needed
     if name == "g4f":
         return True  # free aggregator, no key needed
+    if name == "qwen_vision":
+        return bool(s.QWEN_VISION_BASE_URL)
     return False
 
 

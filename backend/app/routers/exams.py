@@ -10,6 +10,7 @@ from datetime import date
 from app.core.database import get_db
 from app.core.redis_client import get_redis_client, RedisClient
 from app.core.config import get_settings
+from app.core.config import get_settings as _get_settings
 from app.services.exam_service import ExamService, ExamServiceError
 from app.schemas.exam import (
     ExamConfigRequest,
@@ -38,7 +39,7 @@ router = APIRouter(prefix="/api/v1/exams", tags=["Exams"])
 
 
 # ── Rate limit helper (G13) ───────────────────────────────────────────────────
-MAX_GENERATES_PER_DAY = 10
+MAX_GENERATES_PER_DAY = _get_settings().MAX_GENERATES_PER_DAY
 
 
 async def check_generate_rate_limit(redis: RedisClient, user_id: str) -> None:
@@ -854,6 +855,7 @@ from app.schemas.exam import BlueprintApprovalRequest
 )
 async def approve_blueprint(
     exam_id: UUID,
+    body: BlueprintApprovalRequest,
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis_client),
     current_user: User = Depends(get_current_user),

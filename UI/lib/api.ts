@@ -963,6 +963,20 @@ export const generation = {
       body: JSON.stringify(data),
     });
   },
+
+  approveBlueprint(examId: string, approved: boolean, feedback?: string) {
+    return request(`/exams/${examId}/approve-blueprint`, {
+      method: "POST",
+      body: JSON.stringify({ approved, feedback }),
+    });
+  },
+
+  rejectBlueprint(examId: string, feedback: string) {
+    return request(`/exams/${examId}/reject-blueprint`, {
+      method: "POST",
+      body: JSON.stringify({ feedback }),
+    });
+  },
 };
 
 /**

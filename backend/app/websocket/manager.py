@@ -15,6 +15,7 @@ Design (Phase 14 — G19, G7):
 import asyncio
 import json
 import logging
+import redis.asyncio as async_redis
 from typing import Any, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -259,11 +260,13 @@ _manager: Optional[ConnectionManager] = None
 
 
 def get_connection_manager() -> ConnectionManager:
-    """Get the singleton ConnectionManager with Redis initialized."""
+    """Get the singleton ConnectionManager with async Redis initialized."""
     global _manager
     if _manager is None:
-        from app.core.redis_client import get_redis_client
-        _manager = ConnectionManager(redis=get_redis_client())
+        from app.core.config import get_settings
+        from app.core.redis_client import RedisClient
+        settings = get_settings()
+        _manager = ConnectionManager(redis=RedisClient(async_redis.from_url(settings.REDIS_URL)))
     return _manager
 
 

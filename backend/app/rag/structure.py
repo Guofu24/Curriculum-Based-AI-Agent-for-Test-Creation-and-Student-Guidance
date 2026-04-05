@@ -306,6 +306,99 @@ def detect_heading_tree(markdown: str) -> dict:
     }
 
 
+def normalize_chapter_id(raw: str) -> str:
+    """
+    Normalize a raw chapter identifier to the canonical "ch{n}" form.
+
+    Supported input patterns:
+      - "Chương 1: Động học"          → "ch1"
+      - "Chương 10"                   → "ch10"
+      - "ch1", "ch1_sec1"             → passthrough (already canonical)
+      - "chuong-1", "chuong_1"        → "ch1"
+      - "chapter-1", "chapter_1"      → "ch1"
+      - "bai-1", "bai_1"              → "ch1"
+      - "bài 1"                       → "ch1"
+      - "A.QUANG HÌNH HỌC"            → "ch_a"
+      - "B.CÁI GÌ ĐÓ"                 → "ch_b"
+      - "1", "01"                     → "ch1"
+      - Any input that doesn't match  → returned as-is + warning logged
+
+    Vietnamese accented characters are stripped before matching.
+    """
+    import logging as _log
+    _logger = _log.getLogger("rag.structure")
+
+    if not raw:
+        _logger.warning("[normalize_chapter_id] Received empty input")
+        return ""
+
+    original = raw
+    s = raw.strip()
+
+    # 1. Already canonical: starts with "ch" followed by digit
+    m = re.match(r"^ch(\d+)(?:_sec(\d+))?(?:_sub(\d+))?$", s, re.IGNORECASE)
+    if m:
+        num = m.group(1).lstrip("0") or "0"
+        result = f"ch{num}"
+        if m.group(2):
+            result += f"_sec{m.group(2)}"
+        if m.group(3):
+            result += f"_sub{m.group(3)}"
+        return result
+
+    # 2. Strip accents for Vietnamese character handling
+    import unicodedata
+    normalized = unicodedata.normalize("NFD", s)
+    stripped = "".join(c for c in normalized if unicodedata.category(c) != "Mn")
+
+    # 3. Extract chapter number from common patterns
+    chapter_num: str | None = None
+
+    # "Chương 1", "chuong-1", "chuong_1", "Chương 01"
+    m2 = re.search(r"chuong[_\s-]?(\d+)", stripped, re.IGNORECASE)
+    if not m2:
+        # "Chapter 1", "chapter-1", "chapter_1"
+        m2 = re.search(r"chapter[_\s-]?(\d+)", stripped, re.IGNORECASE)
+    if not m2:
+        # "Bài 1", "bai-1", "bai_1"
+        m2 = re.search(r"bai[_\s-]?(\d+)", stripped, re.IGNORECASE)
+    if not m2:
+        # "Phần 1"
+        m2 = re.search(r"phan[_\s-]?(\d+)", stripped, re.IGNORECASE)
+    if not m2:
+        # "A.QUANG HINH HOC", "B. CAI GI DO" -> ch_a, ch_b
+        letter_match = re.match(r"^\s*([A-Z])\.\s*[A-Z].*$", stripped, re.IGNORECASE)
+        if letter_match:
+            chapter_num = f"ch_{letter_match.group(1).lower()}"
+    if not m2 and not chapter_num:
+        # Standalone number: "1", "01", "1: Động học"
+        m2 = re.search(r"(?:^|_|\s)(\d+)(?:\s|:|$)", stripped)
+
+    if m2:
+        num_str = m2.group(1).lstrip("0") or "0"
+        chapter_num = f"ch{num_str}"
+
+    if chapter_num:
+        # Preserve _sec and _sub suffixes if present
+        # e.g. "Chương 1: 1.1 Lực" → check for section pattern after chapter
+        sec_match = re.search(r"_sec(\d+)", stripped, re.IGNORECASE)
+        sub_match = re.search(r"_sub(\d+)", stripped, re.IGNORECASE)
+        if sec_match:
+            chapter_num += f"_sec{sec_match.group(1)}"
+        if sub_match:
+            chapter_num += f"_sub{sub_match.group(1)}"
+        return chapter_num
+
+    # 4. Fallback: return original, log warning
+    _logger.warning(
+        "[normalize_chapter_id] Could not normalize input '%s' — returning as-is. "
+        "Known patterns: 'Chương N', 'Chapter N', 'Bài N', 'chuong-N', 'chN', "
+        "'N', 'N: Title'",
+        original,
+    )
+    return original
+
+
 def flatten_heading_tree(tree: dict) -> list[dict]:
     """
     Flatten heading tree into a list of all heading units (chapters, sections, subsections)
