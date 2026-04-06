@@ -207,13 +207,19 @@ export default function GenerateExamPage() {
     [router]
   )
 
-  // Handle live viewer errors — return to form
-  const handleLiveError = useCallback(
-    (message: string) => {
-      setGenerationError(message)
-      setLiveExamId(null)
-      setLiveWsUrl(null)
-      setIsGenerating(false)
+  // Handle HITL checkpoint approval/rejection
+  const handleApprove = useCallback(
+    async (examId: string, approved: boolean) => {
+      try {
+        if (approved) {
+          await generationApi.approveBlueprint(examId, true)
+        } else {
+          await generationApi.rejectBlueprint(examId, "Từ chối sườn đề")
+        }
+      } catch (err) {
+        console.error("[approve] HITL action failed:", err)
+        // Error is handled inside the live viewer component via connState
+      }
     },
     []
   )
@@ -271,9 +277,9 @@ export default function GenerateExamPage() {
     return (
       <GenerationLiveViewer
         examId={liveExamId}
-        websocketUrl={liveWsUrl}
+        wsUrl={liveWsUrl ?? ""}
+        onApprove={handleApprove}
         onComplete={handleLiveComplete}
-        onError={handleLiveError}
       />
     )
   }
