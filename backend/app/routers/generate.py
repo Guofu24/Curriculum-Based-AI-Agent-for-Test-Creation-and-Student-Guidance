@@ -185,6 +185,7 @@ async def _run_generation_inline(
         is_success = (
             status_val == "success"
             or (hasattr(status_val, "value") and status_val.value == "success")
+            or status_val == "partial"  # PARTIAL means questions were generated (with warnings)
         )
 
         if not generated_questions:

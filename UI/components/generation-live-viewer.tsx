@@ -121,6 +121,9 @@ export function GenerationLiveViewer({
   const [validationIssues, setValidationIssues] = useState(0)
   const [hitlStage, setHitlStage] = useState<string | null>(null)
   const [pendingBlueprint, setPendingBlueprint] = useState(false)
+  // Force re-render when blueprint panel is triggered (workaround for React batching)
+  const [, forceUpdate] = useState(0)
+  const pendingBlueprintRef = useRef(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [showRaw, setShowRaw] = useState(true) // default ON so user can see what's coming
@@ -239,7 +242,9 @@ export function GenerationLiveViewer({
           setHitlStage(label)
           pushLog("hitl", `HITL ${e.checkpoint_id}`, label, "warning")
           if (e.checkpoint_id === 1) {
+            pendingBlueprintRef.current = true
             setPendingBlueprint(true)
+            forceUpdate((n) => n + 1)
           }
           break
         }

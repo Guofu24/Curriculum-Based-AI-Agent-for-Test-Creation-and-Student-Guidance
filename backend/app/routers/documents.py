@@ -227,7 +227,7 @@ async def upload_document(
     background_tasks.add_task(_process_in_background, str(document.id))
 
     return DocumentUploadResponse(
-        document_id=document.id,
+        id=document.id,
         message="Document uploaded. Processing started in background.",
         s3_key=document.s3_key,
         processing_status="pending",

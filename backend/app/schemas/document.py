@@ -30,7 +30,7 @@ class DocumentUploadResponse(_BaseSchema):
     """
     Response from POST /api/v1/documents/upload.
 
-    - **document_id**: UUID of the newly created document record
+    - **id**: UUID of the newly created document record
     - **s3_key**: S3 object key where the file is stored
     - **message**: Confirmation message
     - **processing_status**: Initial status (always 'pending')
@@ -38,7 +38,7 @@ class DocumentUploadResponse(_BaseSchema):
 
     After upload, poll GET /documents/{id}/status until status='completed'.
     """
-    document_id: UUID = Field(..., description="UUID of the newly created document record.")
+    id: UUID = Field(..., description="UUID of the newly created document record.")
     message: str = Field(
         default="Document uploaded. Processing started in background.",
         description="Confirmation message.",
@@ -279,14 +279,18 @@ class CurriculumNodeSchema(_BaseSchema):
     """Flat curriculum node matching the frontend CurriculumNode interface."""
     id: str | None = Field(None, description="Node identifier (chapter_id or section_id).")
     title: str = Field(..., description="Node display title.")
+    level: int | None = Field(None, description="Depth level: 1=chapter, 2=section, 3=subsection.")
+    parent_id: str | None = Field(None, description="Parent node ID (null for root chapters).")
     section_type: str = Field(default="chapter", description="Type: chapter, section, or subsection.")
     section_order: int = Field(default=0, description="Order index within parent.")
     chapter_number: int = Field(default=1, description="1-based chapter number.")
+    chapter_id: str | None = Field(None, description="Chapter ID this node belongs to.")
     page_from: int | None = Field(None, description="Starting page number.")
     page_to: int | None = Field(None, description="Ending page number.")
     scope_label: str | None = Field(None, description="Scope label.")
     summary: str | None = Field(None, description="Node summary.")
     metadata: dict | None = Field(None, description="Extra metadata.")
+    chunk_count: int | None = Field(None, description="Number of chunks in this node.")
     children: list["CurriculumNodeSchema"] = Field(default_factory=list, description="Child nodes.")
 
 

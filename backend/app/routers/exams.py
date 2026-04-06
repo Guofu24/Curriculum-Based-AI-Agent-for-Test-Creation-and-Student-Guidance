@@ -101,6 +101,60 @@ def _exam_to_detail(exam, versions=None, feedback_events=None) -> dict:
     chapters_str: list[str] = exam.chapters or []
     chapters_num: list[int] = [i + 1 for i in range(len(chapters_str))]
 
+    # Normalize questions: ensure each question has a `type` alias for `question_type`
+    normalized_questions = []
+    for q in questions:
+        if isinstance(q, dict):
+            q = dict(q)
+            # Alias question_type → type for frontend compatibility
+            if "question_type" in q and "type" not in q:
+                q["type"] = q["question_type"]
+            # Normalize question → content (LLM may use "question" instead of "content")
+            if "question" in q and "content" not in q:
+                q["content"] = q.pop("question")
+            # Normalize answer → correct_answer (LLM may use "answer" instead of "correct_answer")
+            if "answer" in q and "correct_answer" not in q:
+                q["correct_answer"] = q.pop("answer")
+            # Normalize stem → content (if LLM sends stem instead of content)
+            if "stem" in q and "content" not in q:
+                q["content"] = q.pop("stem")
+            # Normalize correct → correct_answer (fallback)
+            if "correct" in q and "correct_answer" not in q:
+                q["correct_answer"] = q.pop("correct")
+            # Normalize warnings → validation_warnings
+            if "warnings" in q and "validation_warnings" not in q:
+                q["validation_warnings"] = q.get("warnings", [])
+            # Normalize MCQ options: backend uses {id, text}, frontend expects {label, text}
+            if "options" in q and isinstance(q["options"], list):
+                q["options"] = [
+                    {"label": str(opt.get("id", opt.get("label", ""))), "text": str(opt.get("text", ""))}
+                    if isinstance(opt, dict) else opt
+                    for opt in q["options"]
+                ]
+            normalized_questions.append(q)
+        else:
+            normalized_questions.append(q)
+
+    # Extract quality metrics from question data
+    q_list = [q for q in normalized_questions if isinstance(q, dict)]
+    verifier_passed = sum(1 for q in q_list if q.get("is_validated"))
+    evidence_covered = sum(1 for q in q_list if q.get("source_evidence"))
+    total_q = len(q_list)
+    verifier_pass_rate = round(verifier_passed / total_q, 4) if total_q > 0 else None
+    evidence_coverage_rate = round(evidence_covered / total_q, 4) if total_q > 0 else None
+    all_warnings = [w for q in q_list for w in q.get("warnings", [])]
+    warning_count = len(all_warnings)
+
+    # Normalize blueprint: if it's a dict with "slots" key, extract the list
+    raw_blueprint = exam.blueprint
+    blueprint_list: list[dict] = []
+    if isinstance(raw_blueprint, list):
+        blueprint_list = raw_blueprint
+    elif isinstance(raw_blueprint, dict) and "slots" in raw_blueprint:
+        blueprint_list = raw_blueprint.get("slots", [])
+    elif isinstance(raw_blueprint, dict) and "blueprint" in raw_blueprint:
+        blueprint_list = raw_blueprint.get("blueprint", [])
+
     return {
         "id": str(exam.id),
         "title": exam.title,
@@ -109,20 +163,23 @@ def _exam_to_detail(exam, versions=None, feedback_events=None) -> dict:
         "exam_type": exam.exam_type or "mixed",
         "difficulty": exam.difficulty or "medium",
         "status": exam.status or "draft",
-        "chapters": chapters_str,  # backend format (string titles)
-        "chapters_num": chapters_num,  # FE compatibility (number indices)
+        "chapters": chapters_str,
+        "chapters_num": chapters_num,
         "variant_number": exam.variant_number or 1,
         "total_questions": exam.total_questions or len(questions),
         "instructions": exam.instructions,
         "output_language": exam.output_language or "vi",
         "strict_scope_flag": exam.strict_scope_flag if exam.strict_scope_flag is not None else True,
         "quality_score": float(exam.quality_score) if exam.quality_score else None,
+        "verifier_pass_rate": verifier_pass_rate,
+        "evidence_coverage_rate": evidence_coverage_rate,
+        "warning_count": warning_count,
         "created_at": exam.created_at.isoformat() if exam.created_at else None,
         "updated_at": exam.updated_at.isoformat() if exam.updated_at else None,
         "published_at": exam.published_at.isoformat() if exam.published_at else None,
-        "questions": questions,
+        "questions": normalized_questions,
         "exam_spec": exam.exam_spec,
-        "blueprint": exam.blueprint,
+        "blueprint": blueprint_list,
         "selected_scope": exam.selected_scope,
         "quality_scores": exam.quality_scores,
         "grounding_reports": exam.grounding_reports,
@@ -137,17 +194,30 @@ def _exam_to_detail(exam, versions=None, feedback_events=None) -> dict:
 def _version_to_dict(version) -> dict:
     """Convert ExamVersion to dict matching frontend's ExamVersion."""
     snapshot = getattr(version, "snapshot", None) or {}
+    # Map snapshot status to change_type for frontend compatibility
+    raw_status = getattr(version, "status", None) or snapshot.get("status") or "draft"
+    # Normalize status → change_type for FE
+    change_type_map = {
+        "draft": "generate",
+        "under_review": "generate",
+        "published": "published",
+        "regenerating": "regenerate",
+    }
+    change_type = change_type_map.get(str(raw_status), "generate")
+
     return {
         "id": str(version.id),
         "version_number": getattr(version, "version_number", None) or 1,
-        "status": getattr(version, "status", None) or snapshot.get("status") or "draft",
+        "change_type": change_type,
+        "change_description": getattr(version, "change_summary", None) or getattr(version, "change_description", None) or getattr(version, "change_summary", "") or f"Phiên bản {getattr(version, 'version_number', 1)}",
+        "created_at": version.created_at.isoformat() if version.created_at else None,
+        # Additional fields for full compatibility
+        "status": raw_status,
         "created_by": str(getattr(version, "created_by", "") or ""),
         "parent_version_id": str(getattr(version, "parent_version_id", None)) if getattr(version, "parent_version_id", None) else None,
-        "change_summary": getattr(version, "change_summary", None) or getattr(version, "change_description", None),
-        "created_at": version.created_at.isoformat() if version.created_at else None,
         "questions": getattr(version, "questions", None) or snapshot.get("questions", []),
         "edit_operations": getattr(version, "edit_operations", None) or [],
-        "feedback_events": [],  # TODO: join
+        "feedback_events": [],
     }
 
 
@@ -294,13 +364,17 @@ async def list_exams(
 ):
     """List all exams for the current user. Returns list matching frontend's ExamListItem[]."""
     service = ExamService(db, redis)
-    exams, _ = await service.list_exams(
+    exams, total = await service.list_exams(
         user_id=current_user.id,
         page=page,
         limit=limit,
         status=status,
     )
-    return [_exam_to_list_item(e) for e in exams]
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        content=[_exam_to_list_item(e) for e in exams],
+        headers={"total-count": str(total)},
+    )
 
 
 @router.get(
@@ -658,7 +732,7 @@ async def regenerate_exam(
 @router.get(
     "/{exam_id}/export/pdf",
     summary="Export exam as PDF (G12)",
-    description="Generates a PDF file of the exam using WeasyPrint. "
+    description="Generates a PDF file of the exam using ReportLab. "
                  "**include_answers=False** → bản học sinh (no answer key). "
                  "**include_answers=True** → bản giáo viên (includes answer key, "
                  "explanations, and essay rubric). "
@@ -1013,12 +1087,53 @@ async def get_review_data(
     except Exception:
         pass
 
+    # Normalize questions for frontend compatibility
+    normalized_questions: list[dict] = []
+    for q in questions:
+        if isinstance(q, dict):
+            q = dict(q)
+            if "question_type" in q and "type" not in q:
+                q["type"] = q["question_type"]
+            # Normalize question → content (LLM may use "question" instead of "content")
+            if "question" in q and "content" not in q:
+                q["content"] = q.pop("question")
+            # Normalize answer → correct_answer (LLM may use "answer" instead of "correct_answer")
+            if "answer" in q and "correct_answer" not in q:
+                q["correct_answer"] = q.pop("answer")
+            # Normalize stem → content (if LLM sends stem instead of content)
+            if "stem" in q and "content" not in q:
+                q["content"] = q.pop("stem")
+            # Normalize correct → correct_answer (fallback)
+            if "correct" in q and "correct_answer" not in q:
+                q["correct_answer"] = q.pop("correct")
+            if "warnings" in q and "validation_warnings" not in q:
+                q["validation_warnings"] = q.get("warnings", [])
+            # Normalize MCQ options: backend uses {id, text}, frontend expects {label, text}
+            if "options" in q and isinstance(q["options"], list):
+                q["options"] = [
+                    {"label": str(opt.get("id", opt.get("label", ""))), "text": str(opt.get("text", ""))}
+                    if isinstance(opt, dict) else opt
+                    for opt in q["options"]
+                ]
+            normalized_questions.append(q)
+        else:
+            normalized_questions.append(q)
+
+    # Normalize blueprint: dict → list
+    raw_blueprint = exam.blueprint
+    if isinstance(raw_blueprint, list):
+        blueprint_list = raw_blueprint
+    elif isinstance(raw_blueprint, dict):
+        blueprint_list = raw_blueprint.get("slots", []) or raw_blueprint.get("blueprint", [])
+    else:
+        blueprint_list = []
+
     return {
         "exam_id": str(exam.id),
         "title": exam.title,
         "status": exam.status or "draft",
-        "questions": questions,
-        "blueprint": exam.blueprint,
+        "questions": normalized_questions,
+        "blueprint": blueprint_list,
         "exam_config": exam.exam_config,
         "quality_scores": quality_scores,
         "cost_report": cost_report,

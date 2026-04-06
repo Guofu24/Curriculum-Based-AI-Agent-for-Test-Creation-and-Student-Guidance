@@ -459,7 +459,7 @@ class ExamListResponse(BaseModel):
     exam_type: str = Field(..., description="Exam type: 'mcq', 'essay', or 'mixed'.")
     difficulty: str = Field(..., description="Difficulty level: 'easy', 'medium', or 'hard'.")
     status: str = Field(..., description="Status: 'draft', 'under_review', 'published'.")
-    chapters: list[int] = Field(default_factory=list, description="Chapter numbers included.")
+    chapters: list[str] = Field(default_factory=list, description="Chapter titles included.")
     total_questions: int = Field(default=0, description="Total question count.")
     strict_scope_flag: bool = Field(
         default=True,
@@ -498,7 +498,7 @@ class ExamResponse(BaseModel):
     exam_type: str = Field(..., description="Exam type: 'mcq', 'essay', or 'mixed'.")
     difficulty: str = Field(..., description="Difficulty level.")
     status: str = Field(..., description="Status: 'draft', 'under_review', 'published'.")
-    chapters: list[int] = Field(default_factory=list, description="Chapter numbers included.")
+    chapters: list[str] = Field(default_factory=list, description="Chapter titles included.")
     variant_number: int = Field(default=1, description="Variant number for multi-variant exams.")
     total_questions: int = Field(default=0, description="Total question count.")
     instructions: str | None = Field(None, description="Exam instructions shown at the top of the paper.")
@@ -516,7 +516,10 @@ class ExamResponse(BaseModel):
         description="Full list of exam questions.",
     )
     exam_spec: dict | None = Field(None, description="Internal exam specification dict.")
-    blueprint: dict | None = Field(None, description="Blueprint: list of slots with Bloom × chapter distribution.")
+    blueprint: list[dict] | dict | None = Field(
+        None,
+        description="Blueprint: list of slots or dict. Backend normalizes to list.",
+    )
     selected_scope: list[dict] | None = Field(None, description="Selected scope units (chapters/sections).")
     quality_scores: list[dict] | None = Field(
         None,
@@ -762,7 +765,7 @@ class ExportFormat(BaseModel):
     """
     format: Literal["pdf", "docx"] = Field(
         ...,
-        description="Output file format. 'pdf' uses WeasyPrint; 'docx' uses python-docx.",
+        description="Output file format. 'pdf' uses ReportLab; 'docx' uses python-docx.",
     )
     include_answers: bool = Field(
         default=False,
@@ -888,7 +891,10 @@ class ReviewDataResponse(BaseModel):
         default_factory=list,
         description="Full list of exam questions with all fields.",
     )
-    blueprint: dict | None = Field(None, description="Blueprint: list of slots with Bloom distribution.")
+    blueprint: list[dict] | dict | None = Field(
+        None,
+        description="Blueprint: list of slots (list) or dict format. FE expects list.",
+    )
     exam_config: dict | None = Field(None, description="Original exam configuration.")
     quality_scores: list[dict] = Field(
         default_factory=list,

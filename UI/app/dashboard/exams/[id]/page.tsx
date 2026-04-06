@@ -468,7 +468,7 @@ export default function ExamReviewPage() {
               onStartEdit={() =>
                 setEditState({
                   questionId: question.id,
-                  content: question.content,
+                  content: question.stem ?? question.content,
                   options: getEditableOptions(question),
                   correctAnswer: question.correct_answer || "A",
                   bloomLevel: question.bloom_level,
@@ -681,7 +681,7 @@ function QuestionCard({
           </div>
         ) : (
           <div className="mt-4 space-y-4">
-            <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{question.content}</p>
+            <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{question.stem ?? question.content}</p>
             <div className="space-y-2">
               {(() => {
                 const opts: MCQOption[] = Array.isArray(question.options)
@@ -727,9 +727,7 @@ function QuestionCard({
                   ))}
                 </div>
               </div>
-            ) : (
-              <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">This question does not have valid source evidence yet.</div>
-            )}
+            ) : null}
             {(relatedFeedback.length > 0 || relatedOperations.length > 0) ? (
               <div className="rounded-xl border bg-muted/20 p-4">
                 <div className="flex items-center gap-2 text-sm font-medium text-foreground"><History className="h-4 w-4" />Question activity</div>

@@ -24,6 +24,7 @@ import {
 } from "@/lib/api"
 import { GenerationLoadingScreen } from "@/components/generation-loading-screen"
 import { GenerationLiveViewer } from "@/components/generation-live-viewer"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -77,6 +78,7 @@ export default function GenerateExamPage() {
   const [liveExamId, setLiveExamId] = useState<string | null>(null)
   const [liveWsUrl, setLiveWsUrl] = useState<string | null>(null)
   const [rescanning, setRescanning] = useState(false)
+  const [scopeWarning, setScopeWarning] = useState<string | null>(null)
 
   const loadSources = useCallback(async () => {
     try {
@@ -252,6 +254,7 @@ export default function GenerateExamPage() {
 
     try {
       const result = await generationApi.generate(requestPayload)
+      setScopeWarning(result.scope_warning ?? null)
       setLiveExamId(result.exam_id)
       setLiveWsUrl(result.websocket_url ?? null)
       setGeneratedExamId(result.exam_id)
@@ -335,6 +338,18 @@ export default function GenerateExamPage() {
           <p className="text-xs text-muted-foreground">Tạo đề thi từ tài liệu đã xử lý</p>
         </div>
       </div>
+
+      {scopeWarning && liveExamId && (
+        <div className="px-6">
+          <Alert variant="warning" className="max-w-3xl mx-auto mb-4">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>Cảnh báo phạm vi</AlertTitle>
+            <AlertDescription>
+              {scopeWarning}. Một số nội dung có thể bị giới hạn token.
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
 
       <div className="flex-1 overflow-auto p-6">
         <div className="max-w-3xl mx-auto space-y-6">

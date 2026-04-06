@@ -183,6 +183,20 @@ Trả về JSON:
                         )
                         continue
 
+                    # Map evidence_chunks sang source_evidence nếu chưa có
+                    if not q.get("source_evidence") and q.get("evidence_chunks"):
+                        q["source_evidence"] = [
+                            {
+                                "chunk_id": chunk.get("chunk_id", ""),
+                                "content": chunk.get("text", chunk.get("content", "")),
+                                "page_number": chunk.get("page_number"),
+                                "section": chunk.get("section_id", ""),
+                                "relevance_score": chunk.get("score", 1.0),
+                            }
+                            for chunk in q.get("evidence_chunks", [])
+                            if isinstance(chunk, dict)
+                        ]
+
                     all_questions.append(q)
 
                     # Track topics

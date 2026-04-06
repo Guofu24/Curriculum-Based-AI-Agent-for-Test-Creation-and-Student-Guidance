@@ -266,9 +266,13 @@ class DocumentService:
         chapters = document.heading_tree.get("chapters", [])
         nodes: list[dict] = []
         for ch_idx, chapter in enumerate(chapters):
+            ch_id = chapter.get("chapter_id")
             nodes.append({
-                "id": chapter.get("chapter_id"),
+                "id": ch_id,
                 "title": chapter.get("title", ""),
+                "level": 1,
+                "parent_id": None,
+                "chapter_id": ch_id,
                 "section_type": "chapter",
                 "section_order": ch_idx,
                 "chapter_number": ch_idx + 1,
@@ -280,9 +284,13 @@ class DocumentService:
                 "children": [],
             })
             for sec in chapter.get("sections", []):
+                sec_id = sec.get("section_id")
                 nodes.append({
-                    "id": sec.get("section_id"),
+                    "id": sec_id,
                     "title": sec.get("title", ""),
+                    "level": 2,
+                    "parent_id": ch_id,
+                    "chapter_id": ch_id,
                     "section_type": "section",
                     "section_order": len(nodes),
                     "chapter_number": ch_idx + 1,
@@ -294,9 +302,13 @@ class DocumentService:
                     "children": [],
                 })
                 for sub in sec.get("subsections", []):
+                    sub_id = sub.get("section_id")
                     nodes.append({
-                        "id": sub.get("section_id"),
+                        "id": sub_id,
                         "title": sub.get("title", ""),
+                        "level": 3,
+                        "parent_id": sec_id,
+                        "chapter_id": ch_id,
                         "section_type": "subsection",
                         "section_order": len(nodes),
                         "chapter_number": ch_idx + 1,
@@ -339,8 +351,22 @@ class DocumentService:
         current_chapter: dict | None = None
         current_section: dict | None = None
 
+        def _get_stype(node: dict) -> str:
+            """Get section_type, falling back to level if not present."""
+            stype = node.get("section_type")
+            if stype:
+                return stype
+            level = node.get("level")
+            if level == 1:
+                return "chapter"
+            elif level == 2:
+                return "section"
+            elif level == 3:
+                return "subsection"
+            return "chapter"
+
         for node in flat_tree:
-            stype = node.get("section_type", "chapter")
+            stype = _get_stype(node)
             if stype == "chapter":
                 current_chapter = {
                     "chapter_id": node.get("id", ""),

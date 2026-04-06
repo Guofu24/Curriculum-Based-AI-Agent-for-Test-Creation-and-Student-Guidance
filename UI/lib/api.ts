@@ -388,6 +388,7 @@ export interface Question {
   question_type: string;
   bloom_level: string;
   difficulty_score: number;
+  stem?: string;
   content: string;
   options?: MCQOption[];
   correct_answer: string;

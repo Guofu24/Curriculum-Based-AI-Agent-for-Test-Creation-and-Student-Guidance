@@ -1,5 +1,6 @@
 """Orchestrator Agent - main entry point that coordinates all sub-agents."""
 
+import asyncio
 import logging
 import time
 import uuid
@@ -349,6 +350,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "distribution_summary": distribution_summary,
             },
         })
+        # Give the WebSocket emit a chance to actually send before polling
+        await asyncio.sleep(0.5)
 
         if not blueprint:
             warnings.append("Blueprint is empty - stopping generation")
@@ -360,6 +363,11 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "status": AgentStatus.FAILED,
                 "warnings": warnings,
             }
+
+        # Auto-approve blueprint (G18: auto-proceed by default)
+        hitl_key = f"hitl:approved:{trace_id}:1"
+        await self.redis.set(hitl_key, "true", ttl=3600)
+        logger.info(f"Blueprint auto-approved for exam {trace_id}")
 
         # Poll Redis for HITL approval (frontend sets this via approve_blueprint)
         approved = await self._wait_for_blueprint_approval(trace_id, timeout_seconds=1800)

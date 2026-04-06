@@ -71,31 +71,38 @@ class ExamExporter:
         Raises:
             ExamServiceError: if exam not found.
         """
-        exam = await self.exam_service.get_exam(exam_id, user_id=None)
-        if not exam:
-            from app.services.exam_service import ExamServiceError
-            raise ExamServiceError("Exam not found")
+        try:
+            exam = await self.exam_service.get_exam(exam_id, user_id=None)
+            if not exam:
+                from app.services.exam_service import ExamServiceError
+                raise ExamServiceError("Exam not found")
 
-        questions = exam.questions or []
-        blueprint = exam.blueprint or {}
-        html_content = self._render_html(exam, questions, blueprint, include_answers, include_blueprint)
+            questions = exam.questions or []
+            blueprint = exam.blueprint or {}
+            html_content = self._render_html(exam, questions, blueprint, include_answers, include_blueprint)
 
-        from weasyprint import HTML  # lazy — requires GTK on Linux/Docker
-        pdf_buffer = BytesIO()
-        HTML(string=html_content).write_pdf(pdf_buffer)
-        pdf_buffer.seek(0)
-        pdf_bytes = pdf_buffer.read()
+            from weasyprint import HTML  # lazy — requires GTK on Linux/Docker
+            pdf_buffer = BytesIO()
+            HTML(string=html_content).write_pdf(pdf_buffer)
+            pdf_buffer.seek(0)
+            pdf_bytes = pdf_buffer.read()
 
-        # G12: size guard — reject oversized PDFs before returning
-        size_mb = len(pdf_bytes) / (1024 * 1024)
-        if size_mb > MAX_PDF_SIZE_MB:
-            from app.services.exam_service import ExamServiceError
-            raise ExamServiceError(
-                f"PDF exceeds {MAX_PDF_SIZE_MB}MB limit ({size_mb:.1f}MB). "
-                "Try reducing question count or content."
+            # G12: size guard — reject oversized PDFs before returning
+            size_mb = len(pdf_bytes) / (1024 * 1024)
+            if size_mb > MAX_PDF_SIZE_MB:
+                from app.services.exam_service import ExamServiceError
+                raise ExamServiceError(
+                    f"PDF exceeds {MAX_PDF_SIZE_MB}MB limit ({size_mb:.1f}MB). "
+                    "Try reducing question count or content."
+                )
+
+            return pdf_bytes
+        except OSError as e:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=501,
+                detail=f"PDF export không khả dụng trên Windows (thiếu GTK). Dùng DOCX thay thế."
             )
-
-        return pdf_bytes
 
     async def export_docx(
         self,

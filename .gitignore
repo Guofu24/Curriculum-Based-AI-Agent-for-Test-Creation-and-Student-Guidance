@@ -1,85 +1,11 @@
-# ExamAI project
+# ExamAI monorepo aggregate gitignore
 
-# Environment and secrets
-.env
-.env.local
-.env.*.local
-backend/.env
-backend/.env.local
-UI/.env.local
-UI/.env.development.local
-UI/.env.test.local
-UI/.env.production.local
+# OS and editor files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg
-*.egg-info/
-.eggs/
-build/
-dist/
-*.whl
-.venv/
-venv/
-env/
-.conda/
-.python-version
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.hypothesis/
-.tox/
-.nox/
-.coverage
-.coverage.*
-htmlcov/
-.ipynb_checkpoints/
-
-# Node and Next.js
-node_modules/
-UI/node_modules/
-UI/.next/
-UI/out/
-UI/.turbo/
-UI/coverage/
-UI/.eslintcache
-UI/tsconfig.tsbuildinfo
-UI/.pnpm-store/
-.pnp
-.pnp.js
-.pnp.cjs
-
-# Backend runtime data
-backend/data/uploads/
-backend/uploads/
-backend/temp/
-backend/evals/output/
-celerybeat-schedule
-celerybeat.pid
-
-# Large local source assets
-Data sách/*.pdf
-Data sách/*.doc
-Data sách/*.docx
-Data sách/*.ppt
-Data sách/*.pptx
-
-# Databases
-*.db
-*.sqlite3
-
-# Logs
-*.log
-logs/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# IDE and editors
 .vscode/
 .idea/
 *.swp
@@ -89,17 +15,121 @@ pnpm-debug.log*
 .classpath
 .settings/
 
-# OS files
-.DS_Store
-Thumbs.db
-ehthumbs.db
-Desktop.ini
+# Environment and local secrets
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.env.staging
+.env.*
+.env.*.local
+.envrc
+!**/.env.example
 
-# Docker
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+*.whl
+.Python
+.python-version
+.venv/
+venv/
+env/
+ENV/
+.conda/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.pyre/
+.pytype/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.py,cover
+.ipynb_checkpoints/
+build/
+dist/
+pip-wheel-metadata/
+
+# Node / Next.js / v0
+node_modules/
+.next/
+out/
+.turbo/
+.vercel/
+.snowflake/
+.v0-trash/
+.pnpm-store/
+.npm/
+.parcel-cache/
+.eslintcache
+coverage/
+*.tsbuildinfo
+.pnp
+.pnp.js
+.pnp.cjs
+next.user-config.*
+__v0_runtime_loader.js
+__v0_devtools.tsx
+__v0_jsx-dev-runtime.ts
+
+# Logs and runtime state
+*.log
+*.err
+*.out
+*.pid
+*.pid.lock
+*.seed
+logs/
+log/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+celerybeat-schedule
+celerybeat.pid
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# Backend runtime data
+backend/data/uploads/
+backend/uploads/
+backend/temp/
+backend/evals/output/
+.langfuse/
+
+# Local reference/source assets
+Data sách/*.pdf
+Data sách/*.doc
+Data sách/*.docx
+Data sách/*.ppt
+Data sách/*.pptx
+Data sách/*.xls
+Data sách/*.xlsx
+
+# Docker local overrides
 docker-compose.override.yml
+compose.override.yml
 
-# Misc
+# Misc caches and temp files
+.cache/
 *.bak
 *.tmp
 *.temp
-.cache/
+*.orig
+*.rej
