@@ -1,498 +1,422 @@
-# ExamAI Backend
+# ExamAI — Hệ thống Tạo đề Kiểm tra Vật lý Tự động bằng Multi-Agent AI
 
-Hệ thống Multi-Agent AI tự động sinh đề thi từ giáo trình, sử dụng **LangGraph**, **FastAPI**, **Pinecone**, và **PostgreSQL**.
+<p align="center">
+  <img src="figures/logo.svg" width="120" alt="ExamAI Logo" />
+</p>
+
+<p align="center">
+  <img src="figures/architecture.svg" alt="System Architecture" />
+</p>
+
+> **ExamAI** là hệ thống tạo đề kiểm tra Vật lý tự động, sử dụng pipeline **5 agent AI phối hợp** với **Human-in-the-Loop (HITL)** — giảng viên kiểm soát hoàn toàn chất lượng đầu ra.
 
 ---
 
-## Tổng quan kiến trúc
+## Mục lục
+
+1. [Tổng quan](#tổng-quan)
+2. [Kiến trúc hệ thống](#kiến-trúc-hệ-thống)
+3. [Các thành phần chính](#các-thành-phần-chính)
+4. [Pipeline Agent — Luồng sinh đề 5 bước](#pipeline-agent--luồng-sinh-đề-5-bước)
+5. [Human-in-the-Loop (HITL)](#human-in-the-loop-hitl)
+6. [Tính năng nổi bật](#tính-năng-nổi-bật)
+7. [Bắt đầu](#bắt-đầu)
+8. [Cấu trúc thư mục](#cấu-trúc-thư-mục)
+9. [Công nghệ sử dụng](#công-nghệ-sử-dụng)
+
+---
+
+## Tổng quan
+
+**ExamAI** giải quyết bài toán: *"Giảng viên muốn tạo đề kiểm tra Vật lý nhanh, đúng chuẩn Bloom, có đáp án và rubric, từ tài liệu giáo trình PDF của mình — mà không cần viết tay từng câu."*
+
+### Vấn đề cũ (thủ công)
+- Tạo 1 đề 40 câu MCQ + 5 câu tự luận mất **2–4 giờ**
+- Khó đảm bảo phân bổ Bloom đều
+- Câu trả lời sai logic, đáp án mồi nhử không tốt
+- Không tái sử dụng được tài liệu
+
+### Giải pháp ExamAI
+- Sinh đề trong **vài phút** với chất lượng kiểm soát bởi giảng viên
+- Phân bổ Bloom chính xác theo cấu hình
+- Đáp án mồi nhử có logic, rubric chấm điểm rõ ràng
+- Ghi nhớ sở thích giảng viên (long-term memory)
+- **Xuất PDF / DOCX** sẵn sàng in
+
+---
+
+## Kiến trúc hệ thống
+
+<p align="center">
+  <img src="figures/agent_pipeline.svg" alt="Agent Pipeline" />
+</p>
+
+### Tổng quan kiến trúc
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│                          FastAPI Application                       │
-│                      http://localhost:8000/api/v1                  │
-├────────────────────────────────────────────────────────────────────┤
-│                                                                    │
-│  Routers                                                           │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │  /auth   │  │ /textbooks   │  │  /exams  │  │  /generate    │  │
-│  └────┬─────┘  └──────┬───────┘  └────┬─────┘  └──────┬────────┘  │
-│       │               │               │               │            │
-│  Services                                                          │
-│  ┌────┴───────────────┴───────────────┴───────────────┴─────────┐  │
-│  │  TextbookService      ExamService          RAGService         │  │
-│  └───────────────────────────┬───────────────────────────────────┘  │
-│                              │                                     │
-│  LangGraph Multi-Agent Pipeline                                    │
-│  ┌───────────────────────────┴───────────────────────────────────┐  │
-│  │                                                               │  │
-│  │  [Blueprint] → [Retrieval] → [QuestionGenerator]             │  │
-│  │                                      │                       │  │
-│  │                              [Validator] ──► pass?           │  │
-│  │                                  │ No                        │  │
-│  │                            [mark_retry] → [QuestionGenerator]│  │
-│  │                                  │ Yes                       │  │
-│  │                             [Finalize]                       │  │
-│  │                                                               │  │
-│  │  Partial Edit: [Reviewer] → [Validator] → [Finalize]         │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-│                                                                    │
-│  Storage                                                           │
-│  ┌───────────────┐   ┌─────────────────┐   ┌──────────────────┐   │
-│  │  PostgreSQL   │   │    Pinecone      │   │  File Storage    │   │
-│  │  (data+BM25)  │   │  (vector search) │   │  data/uploads/   │   │
-│  └───────────────┘   └─────────────────┘   └──────────────────┘   │
-└────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                        EXAMAI SYSTEM                                 │
+│                                                                      │
+│  ┌──────────────┐         ┌──────────────────────┐                   │
+│  │   Frontend   │◄───────►│   FastAPI Backend     │                   │
+│  │  (Next.js)   │  REST   │   ┌──────────────┐   │                   │
+│  │              │   +     │   │  Orchestrator │   │                   │
+│  │ Dashboard    │  WS     │   │    Agent      │   │                   │
+│  │ Generate     │         │   │  (Agent 0)    │   │                   │
+│  │ Review       │         │   └──────┬───────┘   │                   │
+│  │ History      │         │          │           │                   │
+│  └──────────────┘         │   ┌──────▼───────┐   │                   │
+│         │                 │   │ 5 Sub-Agents │   │                   │
+│         │                 │   └──────┬───────┘   │                   │
+│         │                 └──────────┼────────────┘                   │
+│         │                            │                                │
+│         ▼                            ▼                                │
+│  ┌─────────────┐          ┌───────────────────┐                       │
+│  │  PostgreSQL │          │      Redis        │                       │
+│  │ (Hồ sơ, đề,│          │ (Short-term mem,  │                       │
+│  │  người dùng)│          │  pub/sub events)  │                       │
+│  └─────────────┘          └───────────────────┘                       │
+│         │                            │                                │
+│         │                 ┌──────────▼──────────┐                     │
+│         │                 │     Pinecone        │                     │
+│         │                 │ (Vector store cho   │                     │
+│         │                 │  tài liệu PDF)     │                     │
+│         │                 └─────────────────────┘                     │
+│         │                                                          │
+│         │                 ┌─────────────────────┐                    │
+│         └────────────────►│  Celery Worker       │                    │
+│                           │  (Async task queue)  │                    │
+│                           └─────────────────────┘                    │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
+### Frontend — Next.js 16 (TypeScript)
+
+| Route | Mô tả |
+|---|---|
+| `/` | Trang chủ / Landing |
+| `/dashboard` | Dashboard chính |
+| `/dashboard/generate` | Giao diện sinh đề — chọn tài liệu, cấu hình, theo dõi realtime |
+| `/dashboard/exams/[id]` | Chi tiết đề — xem/sửa câu hỏi, HITL review |
+| `/dashboard/documents` | Quản lý tài liệu PDF |
+| `/dashboard/history` | Lịch sử đã tạo |
+| `/dashboard/settings` | Cài đặt giảng viên |
+
+### Backend — FastAPI (Python)
+
+| Module | Vai trò |
+|---|---|
+| `app/routers/auth.py` | Đăng nhập / đăng ký / JWT tokens |
+| `app/routers/documents.py` | Upload, xử lý, chunking PDF → Pinecone |
+| `app/routers/exams.py` | CRUD đề, approve/reject, export PDF/DOCX |
+| `app/routers/generate.py` | Khởi tạo sinh đề, WebSocket endpoint |
+| `app/agents/orchestrator.py` | Agent 0 — điều phối toàn bộ pipeline |
+| `app/agents/retrieval.py` | Agent 1 — truy xuất chunks từ Pinecone |
+| `app/agents/outline.py` | Agent 2 — tạo blueprint (sườn đề) |
+| `app/agents/builder.py` | Agent 3 — sinh câu hỏi từ blueprint |
+| `app/agents/validator.py` | Agent 4 — kiểm tra chất lượng |
+| `app/agents/planner.py` | Agent phụ — xử lý yêu cầu phức tạp |
+| `app/agents/memory/` | Long-term & short-term memory |
+
 ---
 
-## Agent Pipeline chi tiết
+## Pipeline Agent — Luồng sinh đề 5 bước
 
-### 1. Luồng sinh đề đầy đủ (Full Generation)
+<p align="center">
+  <img src="figures/dataflow.svg" alt="Data Flow" />
+</p>
 
 ```
-POST /api/v1/generate/exam/stream
-          │
-          ▼
-  ┌───────────────┐
-  │  ExamService  │  ← khởi tạo LLM, agents, initial AgentState
-  └───────┬───────┘
-          │  invoke LangGraph graph
-          ▼
-  ┌───────────────────────────────────────────────────────────┐
-  │                   LangGraph State Graph                   │
-  │                                                           │
-  │  Step 1: parse_textbook_node                              │
-  │    - Xác nhận sách giáo trình đã được xử lý              │
-  │    - Load textbook metadata từ PostgreSQL                  │
-  │    - progress: 20%                                        │
-  │                     │                                     │
-  │  Step 2: create_blueprint_node  ← BlueprintAgent          │
-  │    - Gọi LLM để lập kế hoạch đề thi                      │
-  │    - Phân bổ câu hỏi theo chương, Bloom level, độ khó    │
-  │    - Output: ExamBlueprint (danh sách QuestionSlot)       │
-  │    - progress: 40%                                        │
-  │                     │                                     │
-  │  Step 3: retrieve_context_node  ← RetrievalAgent          │
-  │    - Với mỗi QuestionSlot: tìm kiếm hybrid               │
-  │      · Vector search (Pinecone, cosine similarity)        │
-  │      · BM25 keyword search (PostgreSQL textbook_chunks)   │
-  │      · Reciprocal Rank Fusion → top 5 chunks/slot        │
-  │    - Output: list[RetrievedContext]                       │
-  │    - progress: 60%                                        │
-  │                     │                                     │
-  │  Step 4: generate_questions_node  ← QuestionGeneratorAgent│
-  │    - Với mỗi slot + context: gọi LLM               │
-  │    - Hỗ trợ MCQ (4 lựa chọn) và Essay                    │
-  │    - Có guidance cho applied questions, strict grounding  │
-  │    - Output: list[GeneratedQuestion]                      │
-  │    - progress: 80%                                        │
-  │                     │                                     │
-  │  Step 5: validate_questions_node  ← ValidatorAgent        │
-  │    - LLM-as-judge: kiểm tra mỗi câu hỏi                  │
-  │      · grounding_score: có bám sát nguồn không?           │
-  │      · accuracy_score: đáp án đúng không?                 │
-  │      · difficulty_alignment: độ khó có khớp không?       │
-  │      · hallucination_flags: liệt kê claim bị bịa         │
-  │    - Ngưỡng pass: overall_quality ≥ 0.7                   │
-  │    - progress: 90%                                        │
-  │                     │                                     │
-  │  Routing: should_retry_or_finalize                        │
-  │    - pass_rate < 60% AND _retry_attempted == False?       │
-  │      → mark_retry_node → generate_questions_node (once)   │
-  │    - pass_rate ≥ 60% OR đã retry rồi?                    │
-  │      → finalize_node                                      │
-  │                     │                                     │
-  │  Step 6: finalize_node                                    │
-  │    - Lưu Exam + ExamQuestion vào PostgreSQL               │
-  │    - Tính quality_score tổng thể                          │
-  │    - Trả về ExamResponse                                  │
-  │    - progress: 100%                                       │
-  └───────────────────────────────────────────────────────────┘
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│  Retrieval  │───►│   Outline   │───►│   HITL 1    │───►│   Builder   │───►│  Validator  │
+│   Agent     │    │   Agent     │    │   (Pause)   │    │   Agent     │    │   Agent     │
+│  (Agent 1)  │    │  (Agent 2)  │    │  ⏸  Pause   │    │  (Agent 3)  │    │  (Agent 4)  │
+└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
+      │                  │                  │                  │                  │
+      ▼                  ▼                  ▼                  ▼                  ▼
+ Chunking tài liệu   Tạo blueprint     Giảng viên phê     Sinh MCQ + Essay   Kiểm tra:
+   PDF → Vector     (sườn đề theo      duyệt sườn đề     với source evidence   - Scope
+   store (Pinecone)  Bloom levels)       trước khi AI      cho mỗi câu       - Bloom
+                        │              sinh câu hỏi          │               - Logic
+                   HITL 0: Xác                             ▼              - Duplicate
+                   nhận yêu cầu                          HITL 2: Full     - LaTeX
+                                              ◄────────  Review
+                                              │
+                                              ▼
+                                         HITL 3: Export Preview
 ```
 
-### 2. Luồng chỉnh sửa một phần (Partial Edit)
+### Chi tiết từng Agent
+
+#### Agent 1 — Retrieval Agent
+- Truy xuất chunks kiến thức từ **Pinecone vector store** dựa trên scope (chương)
+- Mỗi chunk có metadata: `chapter`, `page_number`, `section_id`, `relevance_score`
+- Hỗ trợ lọc theo target Bloom level
+- Output: danh sách `retrieved_chunks` → truyền sang Agent 2
+
+#### Agent 2 — Outline Agent
+- Nhận `retrieved_chunks` + `exam_config`
+- Xây dựng **blueprint** (sườn đề): mảng các slot, mỗi slot có:
+  - `question_id`, `bloom_level`, `chapter`, `topic_hint`, `content_type`
+- Phân bổ số lượng câu hỏi theo `bloom_distribution` cấu hình
+- **Output**: Blueprint → chờ giảng viên phê duyệt (HITL Checkpoint 1)
+
+#### Agent 3 — Builder Agent
+- Sinh câu hỏi thực tế từ từng slot trong blueprint
+- **MCQ**: 4 lựa chọn, 1 đúng, 3 mồi nhử có logic
+- **Essay**: có rubric chấm điểm (4 mức điểm)
+- Mỗi câu đi qua pipeline skills:
+  - `BloomClassifierSkill` — xác nhận mức Bloom
+  - `DedupCheckerSkill` — tránh trùng lặp chủ đề
+  - `DifficultyEstimatorSkill` — ước lượng độ khó
+  - `LatexRendererSkill` — render công thức LaTeX
+- **van_dung_cao**: tự động web search bài toán tương tự → adapt vào scope
+- **Guardrails**: kiểm soát token budget, scope restriction
+- **Output**: mảng `questions` có `source_evidence` cho từng câu
+
+#### Agent 4 — Validator Agent
+- Kiểm tra từng câu hỏi theo nhiều chiều:
+  - **Scope Guard**: câu hỏi chỉ dùng kiến thức trong phạm vi cho phép
+  - **Bloom alignment**: mức Bloom thực tế vs mức khai báo
+  - **Logic**: đáp án đúng có thực sự đúng?
+  - **Duplicate**: trùng lặp nội dung với câu khác
+  - **LaTeX**: cú pháp công thức
+- Nếu có lỗi → tự động retry (max 3 lần), chỉ sinh lại câu bị lỗi
+- **Output**: danh sách `issues` + `status`
+
+#### Planner Agent (Agent phụ)
+- Xử lý yêu cầu **phức tạp**: prompt > 200 ký tự, có từ khóa đặc biệt
+- Phân tích → tạo execution plan → gợi ý cấu hình Bloom
+
+---
+
+## Human-in-the-Loop (HITL)
 
 ```
-POST /api/v1/generate/exam/{id}/regenerate
-          │
-          ▼
-  ReviewerAgent
-    - Nhận edit_requests: [{question_ids, range_start, range_end, edit_prompt}]
-    - Xác định các câu cần tái sinh (theo ID hoặc range)
-    - Giữ nguyên các câu không cần sửa
-    - Gọi lại QuestionGeneratorAgent chỉ cho các slot cần thiết
-          │
-          ▼
-  ValidatorAgent → finalize_node
+HITL Checkpoint 0 ── Xác nhận yêu cầu (rewritten requirements)
+         │
+         ▼
+HITL Checkpoint 1 ── ⏸ PHÊ DUYỆT BLUEPRINT ── Giảng viên duyệt sườn đề
+         │                                         │
+         │  [Reject] ── Gửi phản hồi ──► Outline tái sinh ──► Checkpoint 1
+         │  [Approve] ──► Tiếp tục sinh câu hỏi
+         ▼
+HITL Checkpoint 2 ── ⏸ FULL REVIEW ── Xem toàn bộ đề, gửi phản hồi/sửa trực tiếp
+         │
+         │  [Reject] ── Gửi feedback ──► Builder tái sinh câu bị lỗi
+         │  [Approve] ──► Publish đề
+         ▼
+HITL Checkpoint 3 ── Export Preview ── Xem trước, chọn định dạng (PDF/DOCX)
 ```
 
----
+### 3 Điểm dừng HITL
 
-## Agents
+| Checkpoint | Giai đoạn | Hành động giảng viên |
+|---|---|---|
+| **HITL 0** | Sau khi làm rõ yêu cầu | Xác nhận requirements đã được diễn giải đúng |
+| **HITL 1** ⏸ | Sau Outline Agent | **Duyệt/Từ chối blueprint** — đây là checkpoint quan trọng nhất |
+| **HITL 2** ⏸ | Sau Validator Agent | Duyệt toàn bộ đề, chỉnh sửa trực tiếp từng câu hoặc gửi phản hồi |
 
-### BlueprintAgent (`agents/blueprint.py`)
-
-**Nhiệm vụ**: Lập kế hoạch cấu trúc đề thi trước khi sinh câu hỏi.
-
-- Input: `prompt`, `exam_type` (mcq/essay/mixed), `difficulty`, `chapters`, `question_distribution`, `gradually_increasing`, `constraints`, `textbook_metadata`
-- Gọi LLM với `BLUEPRINT_SYSTEM_PROMPT` → trả về JSON blueprint
-- Phân bổ câu hỏi theo Bloom's Taxonomy:
-
-  | Bloom Level | Difficulty Score |
-  |--|--|
-  | remember | 0.1 |
-  | understand | 0.25 |
-  | apply | 0.5 |
-  | analyze | 0.65 |
-  | evaluate | 0.8 |
-  | create | 0.95 |
-
-- Nếu `gradually_increasing=True`: sắp xếp slot từ dễ đến khó
-- Fallback khi LLM fail: tạo 5 MCQ slot mặc định
-- Output: `ExamBlueprint` với list `QuestionSlot`
-
-### RetrievalAgent (`agents/retrieval.py`)
-
-**Nhiệm vụ**: Tìm kiếm context liên quan từ sách giáo trình cho từng slot câu hỏi.
-
-- **Hybrid Search** cho mỗi `QuestionSlot`:
-  1. **Vector Search** (Pinecone): `similarity_search_with_score(query, k=10)` — tìm theo semantic similarity
-  2. **BM25 Keyword Search** (PostgreSQL `textbook_chunks`): xây `BM25Okapi` từ toàn bộ chunks của textbook, score từng chunk
-  3. **Reciprocal Rank Fusion (RRF)**: kết hợp 2 kết quả bằng công thức `1/(rank+60)`, lấy top 5
-
-- Query được build từ: `bloom_level + topics + chapter`
-- Output: `RetrievedContext` với `combined_text` (nối các chunk bằng `---`)
-
-### QuestionGeneratorAgent (`agents/question_generator.py`)
-
-**Nhiệm vụ**: Sinh câu hỏi dựa trên blueprint slot và context đã lấy.
-
-- Hỗ trợ 2 loại câu hỏi:
-  - **MCQ**: 4 lựa chọn A/B/C/D, 1 đáp án đúng, có giải thích
-  - **Essay**: câu hỏi tự luận, model answer, grading criteria
-- Với `difficulty ≥ 0.6` và `allow_applied_questions=True`: thêm `APPLIED_QUESTION_PROMPT` — yêu cầu tạo tình huống thực tế
-- Với `strict_grounding=True`: reminder bắt buộc bám sát context
-- Robust JSON parsing: regex `\`\`\`json...\`\`\`` → regex `{...}` → `json.loads()`
-- Output: `GeneratedQuestion` với `source_chunks[]` và `source_texts[]` để trích dẫn
-
-### ValidatorAgent (`agents/validator.py`)
-
-**Nhiệm vụ**: Anti-hallucination check — LLM đánh giá chất lượng câu hỏi.
-
-- Cho mỗi câu hỏi: gửi question + source_texts cho LLM để đánh giá
-- Output JSON từ LLM:
-  ```json
-  {
-    "is_valid": true,
-    "grounding_score": 0.0–1.0,
-    "accuracy_score": 0.0–1.0,
-    "difficulty_alignment": 0.0–1.0,
-    "hallucination_flags": ["list các claim bịa đặt"],
-    "issues": ["danh sách vấn đề"],
-    "suggestions": ["đề xuất cải thiện"],
-    "overall_quality": 0.0–1.0
-  }
-  ```
-- `QUALITY_THRESHOLD = 0.7` — câu nào dưới ngưỡng này bị flag `is_validated=False`
-- Summary: `{total, passed, failed, pass_rate, hallucination_flags}`
-
-### ReviewerAgent (`agents/reviewer.py`)
-
-**Nhiệm vụ**: Tái sinh một phần đề thi theo yêu cầu chỉnh sửa.
-
-- Nhận `edit_requests` dạng:
-  ```json
-  [{"question_ids": ["3","5"], "range_start": null, "range_end": null, "edit_prompt": "Make it harder"}]
-  ```
-- Chỉ regenerate đúng các slot được chỉ định (theo ID hoặc range)
-- Giữ nguyên các câu không trong danh sách edit
-- Gọi lại `QuestionGeneratorAgent` + `RetrievalAgent` cho các slot cần thiết
-
-### DocumentProcessorAgent (`agents/document_processor.py`)
-
-**Nhiệm vụ**: Xử lý tài liệu tải lên, tạo embeddings và lưu vào storage.
-
-- Hỗ trợ: **PDF** (pypdf), **DOCX** (python-docx), **PPTX** (python-pptx)
-- Chunking: `CHUNK_SIZE=1000` ký tự, `CHUNK_OVERLAP=200`
-- Mỗi chunk được gắn metadata: `textbook_id`, `chapter`, `page`, `chunk_index`
-- Lưu embeddings vào **Pinecone** (cloud vector DB)
-- Lưu raw text vào **PostgreSQL** `textbook_chunks` (cho BM25)
+> ⏸ = Pipeline **dừng lại** tại đây, chờ giảng viên hành động qua WebSocket/REST API
 
 ---
 
-## AgentState (Shared State)
+## Tính năng nổi bật
 
-Toàn bộ pipeline chia sẻ một `AgentState` (TypedDict) chạy qua LangGraph:
+### Multi-Agent Pipeline
+- **5 agent chuyên biệt**, mỗi agent có system prompt riêng
+- Memory分层: **Short-term** (Redis) + **Long-term** (PostgreSQL)
+- Planner Agent tự động nhận diện yêu cầu phức tạp
+- Retry tự động max 3 lần — chỉ tái sinh câu bị lỗi
 
-```python
-class AgentState(TypedDict):
-    # Input từ user
-    user_id: str
-    textbook_id: str
-    chapters: list[int]
-    prompt: str
-    exam_type: str          # mcq | essay | mixed
-    difficulty: str         # basic | advanced | application | high_application | custom
-    question_distribution: dict  # {mcq: {easy: N, medium: N, hard: N}, essay: {...}}
-    num_variants: int
-    gradually_increasing: bool
-    constraints: dict       # {strict_grounding, allow_applied_questions, bloom_levels, ...}
+### Real-time WebSocket
+- Giảng viên thấy **từng câu hỏi được sinh** theo thời gian thực
+- Trạng thái pipeline: Retrieval → Outline → Waiting → Building → Validating → Done
+- Tự động reconnect nếu mất kết nối (max 5 lần, exponential backoff)
 
-    # Outputs tích lũy qua từng step
-    textbook_metadata: dict
-    processing_status: str
-    blueprint: ExamBlueprint
-    retrieved_contexts: list[RetrievedContext]
-    generated_questions: list[GeneratedQuestion]
-    validated_questions: list[GeneratedQuestion]
-    validation_summary: dict
+### Kiểm soát chất lượng
+- **Bloom Taxonomy** 4 mức: nhận biết, thông hiểu, vận dụng, vận dụng cao
+- **Source Evidence**: mỗi câu hỏi gắn nguồn trích dẫn từ tài liệu gốc
+- **Quality Score** tổng hợp: pass rate, evidence coverage, warning count
+- Guardrails: kiểm soát token budget, scope restriction
 
-    # Tracking
-    current_step: str
-    step_progress: float    # 0.0 → 1.0
-    error: Optional[str]
+### Quản lý tài liệu thông minh
+- Upload PDF → tự động chunking, embedding → Pinecone
+- Hiển thị **curriculum tree** (cây chương trình) từ heading
+- Giảng viên có thể chỉnh sửa cây chương trình
+- Re-process nếu cần
 
-    # Partial edit
-    edit_requests: Optional[list[dict]]
-    is_partial_edit: bool
-
-    # Agent instances (inject tại entry, không lưu DB)
-    _retrieval_agent: Optional[Any]
-    _blueprint_agent: Optional[Any]
-    _question_generator: Optional[Any]
-    _validator: Optional[Any]
-    _reviewer: Optional[Any]
-    _retry_attempted: Optional[bool]
-```
+### Xuất đề đa dạng
+- **PDF**: đề + đáp án, có thể tách riêng
+- **DOCX**: import trực tiếp vào Word
+- Mỗi đề có thể tạo **nhiều biến thể** (variant)
+- Full edit history với khả năng **restore** về phiên bản trước
 
 ---
 
-## Storage Layer
-
-### PostgreSQL (SQLAlchemy async)
-
-| Bảng | Mô tả |
-|--|--|
-| `users` | Tài khoản người dùng, hashed password (bcrypt) |
-| `textbooks` | Metadata sách giáo trình (title, file_path, status, total_chunks) |
-| `textbook_chapters` | Cấu trúc chương (chapter_number, start_page, end_page, key_concepts) |
-| `textbook_chunks` | Raw text của từng chunk — dùng cho BM25 search |
-| `exams` | Đề thi đã tạo (config, quality_score, status) |
-| `exam_questions` | Từng câu hỏi (content, options, correct_answer, bloom_level, source_chunks) |
-
-**Exam status lifecycle**: `generating` → `generated` → `reviewed` → `published`
-
-### Pinecone (Vector DB)
-
-- Index: `examai-minilm`, dimension **384**, metric **cosine**, serverless (AWS us-east-1)
-- Mỗi vector = 1 text chunk, metadata: `{textbook_id, chapter, page, chunk_index}`
-- Namespace: theo `textbook_id` để isolate dữ liệu
-
-### Embedding Model
-
-**`sentence-transformers/all-MiniLM-L6-v2`** (HuggingFace, local):
-- Dimension: 384
-- Normalized embeddings (`normalize_embeddings=True`)
-- Không cần API key, chạy hoàn toàn offline
-
----
-
-## LLM Support
-
-Cấu hình qua `LLM_PROVIDER` trong `.env`:
-
-| Provider | Biến | Model mặc định | Ghi chú |
-|--|--|--|--|
-| `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | Free tier, 6000 req/ngày |
-| `google` | `GOOGLE_API_KEY` | `gemini-2.0-flash` | Free tier |
-| `openai` | `OPENAI_API_KEY` | `gpt-4o` | Trả phí |
-| `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` | Trả phí |
-| `together` | `TOGETHER_API_KEY` | `deepcogito/cogito-v1-preview-qwen-32B` | Free tier |
-| `g4f` | *(không cần)* | `gpt-4o` | Free, không ổn định |
-
----
-
-## API Endpoints
-
-### Auth — `/api/v1/auth`
-| Method | Path | Mô tả |
-|--|--|--|
-| `POST` | `/register` | Đăng ký tài khoản mới |
-| `POST` | `/login` | Đăng nhập, trả về JWT |
-| `GET` | `/me` | Thông tin user hiện tại |
-
-### Textbooks — `/api/v1/textbooks`
-| Method | Path | Mô tả |
-|--|--|--|
-| `GET` | `/` | Danh sách textbooks của user |
-| `POST` | `/` | Upload textbook (PDF/DOCX/PPTX) |
-| `GET` | `/{id}` | Chi tiết textbook + chapters |
-| `DELETE` | `/{id}` | Xóa textbook và vectors |
-
-### Generation — `/api/v1/generate`
-| Method | Path | Mô tả |
-|--|--|--|
-| `POST` | `/exam` | Sinh đề thi (synchronous) |
-| `POST` | `/exam/stream` | Sinh đề thi với SSE progress stream |
-| `POST` | `/exam/{id}/regenerate` | Tái sinh một phần đề đã tạo |
-
-### Exams — `/api/v1/exams`
-| Method | Path | Mô tả |
-|--|--|--|
-| `GET` | `/` | Danh sách đề thi của user |
-| `GET` | `/{id}` | Chi tiết đề thi + câu hỏi |
-| `DELETE` | `/{id}` | Xóa đề thi |
-
----
-
-## Cài đặt & Chạy
+## Bắt đầu
 
 ### Yêu cầu
-- Python 3.11+
-- PostgreSQL 15+ (hoặc Docker)
-- Pinecone account (free tier: https://pinecone.io)
-- Groq API key (free: https://console.groq.com)
 
-### Cài đặt
+- Python 3.11+
+- Node.js 20+
+- PostgreSQL 15+
+- Redis 7+
+- Pinecone account (vector store)
+
+### Backend
 
 ```bash
 cd backend
+
+# Tạo virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Cài đặt dependencies
 pip install -r requirements.txt
+
+# Cấu hình biến môi trường
+cp .env.example .env
+# Chỉnh sửa .env với API keys (OpenAI, Pinecone, PostgreSQL)
+
+# Chạy migration
+alembic upgrade head
+
+# Khởi động server
+uvicorn app.main:app --reload --port 8000
 ```
 
-### Cấu hình `.env`
-
-```ini
-# App
-APP_ENV=development
-SECRET_KEY=your-secret-key
-
-# Database
-DATABASE_URL=postgresql+asyncpg://examai:examai@localhost:5432/examai
-
-# LLM (chọn 1 provider)
-LLM_PROVIDER=groq
-GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxx
-GROQ_MODEL=llama-3.3-70b-versatile
-
-# Embedding (local, không cần API key)
-EMBEDDING_PROVIDER=huggingface
-EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-
-# Pinecone
-PINECONE_API_KEY=pcsk_xxxxxxxxxxxxxxxxxxxx
-PINECONE_INDEX_NAME=examai-minilm
-```
-
-### Khởi động PostgreSQL (Docker)
+### Frontend
 
 ```bash
-docker-compose up -d
+cd Frontend
+
+# Cài đặt dependencies
+npm install
+
+# Cấu hình biến môi trường
+cp .env.example .env.local
+
+# Khởi động dev server
+npm run dev
 ```
 
-### Chạy server
+### Celery Worker (cho async tasks)
 
 ```bash
-uvicorn main:app --reload --port 8000
+cd backend
+celery -A app.tasks.celery_app worker --loglevel=info
 ```
 
-### API Docs
+### Biến môi trường quan trọng
 
-Truy cập http://localhost:8000/docs để xem Swagger UI tương tác.
+| Variable | Mô tả |
+|---|---|
+| `OPENAI_API_KEY` | API key cho LLM (GPT-4o) |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `REDIS_URL` | Redis connection string |
+| `PINECONE_API_KEY` | Pinecone API key |
+| `JWT_SECRET_KEY` | Secret cho JWT tokens |
+| `NEXT_PUBLIC_API_URL` | Backend URL (frontend) |
 
 ---
 
-## Cấu trúc dự án
+## Cấu trúc thư mục
 
 ```
-backend/
-├── main.py                      # FastAPI app, startup/shutdown
-├── config.py                    # Settings từ .env (pydantic-settings)
-├── database.py                  # SQLAlchemy async engine + session
+ExamAI/
+├── Frontend/                      # Next.js 16 frontend
+│   ├── app/
+│   │   ├── dashboard/             # Dashboard routes
+│   │   │   ├── generate/          # Sinh đề mới
+│   │   │   ├── exams/[id]/        # Chi tiết đề
+│   │   │   ├── documents/         # Quản lý tài liệu
+│   │   │   ├── history/           # Lịch sử
+│   │   │   └── settings/          # Cài đặt
+│   │   ├── auth/                  # Trang đăng nhập
+│   │   └── page.tsx              # Landing page
+│   ├── components/               # React components
+│   │   ├── generation-live-viewer.tsx  # Realtime streaming UI
+│   │   ├── generation-stepper.tsx      # Pipeline stepper
+│   │   └── ui/                   # shadcn/ui components
+│   └── lib/
+│       └── api.ts               # API client + WebSocket
 │
-├── models/                      # ORM models (SQLAlchemy)
-│   ├── user.py                  # User
-│   ├── textbook.py              # Textbook, TextbookChapter, TextbookChunk
-│   └── exam.py                  # Exam, ExamQuestion (+ Enums)
+├── backend/                       # FastAPI backend
+│   ├── app/
+│   │   ├── agents/               # 5 AI agents
+│   │   │   ├── orchestrator.py   # Agent 0: điều phối
+│   │   │   ├── retrieval.py       # Agent 1: truy xuất
+│   │   │   ├── outline.py         # Agent 2: tạo blueprint
+│   │   │   ├── builder.py        # Agent 3: sinh câu hỏi
+│   │   │   ├── validator.py      # Agent 4: kiểm tra
+│   │   │   ├── planner.py        # Planner agent
+│   │   │   ├── base.py           # Base class
+│   │   │   ├── llm.py            # LLM client wrapper
+│   │   │   ├── memory/           # Memory management
+│   │   │   ├── guardrails.py     # Guardrails pipeline
+│   │   │   └── skills/           # Agent skills
+│   │   ├── routers/             # API routes
+│   │   │   ├── auth.py
+│   │   │   ├── documents.py
+│   │   │   ├── exams.py
+│   │   │   └── generate.py
+│   │   ├── core/                # Core utilities
+│   │   │   ├── config.py
+│   │   │   ├── database.py
+│   │   │   └── redis_client.py
+│   │   ├── models/              # Pydantic + SQLAlchemy models
+│   │   ├── services/            # Business logic
+│   │   └── tasks/               # Celery tasks
+│   ├── alembic/                 # DB migrations
+│   ├── requirements.txt
+│   └── .env.example
 │
-├── schemas/                     # Pydantic request/response schemas
-│   ├── auth.py
-│   ├── textbook.py
-│   └── exam.py                  # ExamGenerationRequest, ExamResponse, ...
+├── figures/                       # Diagram files
+│   ├── logo.svg
+│   ├── architecture.svg
+│   ├── agent_pipeline.svg
+│   └── dataflow.svg
 │
-├── agents/                      # LangGraph multi-agent system
-│   ├── state.py                 # AgentState TypedDict, dataclasses
-│   ├── orchestrator.py          # LangGraph StateGraph + routing logic
-│   ├── document_processor.py    # Parse PDF/DOCX/PPTX, chunk, embed, store
-│   ├── retrieval.py             # Hybrid search: Pinecone + BM25 + RRF
-│   ├── blueprint.py             # Exam structure planner (LLM)
-│   ├── question_generator.py    # MCQ/Essay generator (LLM)
-│   ├── validator.py             # Anti-hallucination validator (LLM-as-judge)
-│   ├── reviewer.py              # Partial regeneration handler
-│   └── llm_g4f.py               # LangChain wrapper cho g4f (GPT4Free)
-│
-├── services/                    # Business logic
-│   ├── rag_service.py           # Pinecone index + embedding manager (singleton)
-│   ├── textbook_service.py      # Textbook CRUD + trigger document processing
-│   └── exam_service.py          # Exam generation + CRUD + LLM factory
-│
-├── routers/                     # FastAPI route handlers
-│   ├── auth.py                  # JWT auth
-│   ├── textbooks.py             # Textbook upload/management
-│   ├── exams.py                 # Exam CRUD
-│   └── generation.py            # Generation endpoints (SSE stream)
-│
-├── utils/                       # Shared utilities
-├── alembic/                     # Database migrations
-├── data/uploads/                # Uploaded textbook files
-├── docker-compose.yml           # PostgreSQL container
-├── requirements.txt
-└── .env                         # Environment variables (không commit)
+└── README.md
 ```
 
 ---
 
-## Chiến lược Anti-Hallucination
+## Công nghệ sử dụng
 
-1. **Strict Grounding**: Câu hỏi chỉ được dùng thông tin có trong context đã retrieve — bắt buộc qua system prompt
-2. **Citation Tracking**: Mỗi `GeneratedQuestion` lưu `source_chunks[]` (IDs) và `source_texts[]` (raw text)
-3. **Validator Agent (LLM-as-judge)**: Agent thứ 4 độc lập kiểm tra từng câu theo 4 tiêu chí
-4. **Chapter Filtering**: Retrieval chỉ lấy chunks từ các chương được chọn
-5. **Retry Loop**: Nếu pass rate < 60%, tự động regenerate một lần (tránh vòng lặp vô hạn bằng `_retry_attempted`)
-6. **Robust JSON Parsing**: Tất cả agents parse LLM output qua regex fallback, không crash khi LLM trả định dạng sai
+### Frontend
+| Công nghệ | Mục đích |
+|---|---|
+| Next.js 16 | React framework |
+| TypeScript | Type safety |
+| Tailwind CSS | Styling |
+| shadcn/ui | Component library |
+| Zustand | State management |
+| WebSocket | Real-time updates |
 
+### Backend
+| Công nghệ | Mục đích |
+|---|---|
+| FastAPI | REST API framework |
+| Pydantic v2 | Data validation |
+| SQLAlchemy | ORM |
+| Alembic | Database migrations |
+| Celery | Async task queue |
+| Redis | Pub/sub, short-term memory |
+| PostgreSQL | Primary database |
+| Pinecone | Vector database |
 
-## API Endpoints
+### AI / LLM
+| Công nghệ | Mục đích |
+|---|---|
+| OpenAI GPT-4o | LLM cho tất cả agents |
+| Bloom Taxonomy | Cognitive level classification |
+| OpenAI Embeddings | Document chunk embedding |
 
-### Auth
-- `POST /api/v1/auth/login` — Login
-- `POST /api/v1/auth/register` — Register
-- `GET  /api/v1/auth/me` — Current user
+---
 
-### Textbooks
-- `POST /api/v1/textbooks/upload` — Upload textbook (multipart)
-- `GET  /api/v1/textbooks/` — List textbooks
-- `GET  /api/v1/textbooks/{id}` — Get textbook details
-- `DELETE /api/v1/textbooks/{id}` — Delete textbook
+## License
 
-### Exams
-- `GET  /api/v1/exams/` — List exams
-- `GET  /api/v1/exams/{id}` — Get exam with questions
-- `DELETE /api/v1/exams/{id}` — Delete exam
-
-### Generation
-- `POST /api/v1/generate/exam` — Generate exam (synchronous)
-- `POST /api/v1/generate/exam/stream` — Generate with SSE progress
-- `POST /api/v1/generate/partial-regenerate` — Edit specific questions
-
-## Bloom's Taxonomy Mapping
-
-| Level | Difficulty | Question Style |
-|-------|-----------|---------------|
-| Remember | 0.1 | Recall facts, definitions |
-| Understand | 0.25 | Explain, summarize |
-| Apply | 0.5 | Use in new situations |
-| Analyze | 0.65 | Compare, pattern recognition |
-| Evaluate | 0.8 | Judge, critique |
-| Create | 0.95 | Design, construct |
+MIT License — dự án phục vụ mục đích nghiên cứu và giáo dục.
