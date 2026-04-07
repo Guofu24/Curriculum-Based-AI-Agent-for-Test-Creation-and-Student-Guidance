@@ -1,5 +1,6 @@
 """Outline Agent - creates exam blueprint from retrieved context."""
 
+import logging
 import time
 import json
 from typing import Any
@@ -13,6 +14,7 @@ from app.core.config import get_settings
 
 settings = get_settings()
 tracer = get_tracer()
+logger = logging.getLogger("app.agents.outline")
 
 
 class OutlineAgent:
@@ -136,11 +138,46 @@ Trả về JSON:
             if validation_warning:
                 warnings.append(validation_warning)
 
+            # ─── Strict enforcement: MCQ-only or Essay-only ───
+            # If the user requested only MCQ (essay_count=0), strip any essay slots the LLM may have generated.
+            # If the user requested only Essay (mcq_count=0), strip any MCQ slots.
+            essay_count = exam_config.get("essay_count", 5)
+            mcq_count = exam_config.get("mcq_count", 40)
+
+            # Debug: log config values
+            logger.info(f"[OUTLINE AGENT] exam_type={exam_config.get('exam_type')} "
+                        f"mcq_count={mcq_count} essay_count={essay_count} "
+                        f"LLM returned {len(blueprint)} slots")
+
+            if essay_count == 0 and mcq_count > 0:
+                # MCQ-only: remove essay slots, then truncate to exactly mcq_count
+                blueprint = [s for s in blueprint if s.get("type") != "essay"]
+                original_len = len(blueprint)
+                if len(blueprint) > mcq_count:
+                    blueprint = blueprint[:mcq_count]
+                    warnings.append(
+                        f"Blueprint had {original_len} MCQ slots but config requires {mcq_count}. "
+                        "Truncated to match configuration."
+                    )
+                elif len(blueprint) < mcq_count:
+                    warnings.append(
+                        f"Blueprint has only {len(blueprint)} MCQ slots but config requires {mcq_count}."
+                    )
+            elif mcq_count == 0 and essay_count > 0:
+                # Essay-only: remove MCQ slots
+                original_len = len(blueprint)
+                blueprint = [s for s in blueprint if s.get("type") != "mcq"]
+                if len(blueprint) < original_len:
+                    warnings.append(
+                        f"LLM generated {original_len - len(blueprint)} MCQ slots but exam is Essay-only. "
+                        "These were removed to match the configuration."
+                    )
+                if len(blueprint) > essay_count:
+                    blueprint = blueprint[:essay_count]
+
             # If blueprint doesn't match config, adjust
             actual_total = len(blueprint)
-            expected_total = (
-                exam_config.get("mcq_count", 40) + exam_config.get("essay_count", 5)
-            )
+            expected_total = mcq_count + essay_count
 
             if abs(actual_total - expected_total) > 2:
                 warnings.append(
@@ -349,6 +386,8 @@ Tao blueprint chi tiet:"""
                 mcq_id += 1
 
         for i in range(essay_count):
+            if essay_count == 0:
+                break  # Skip essay slots if exam is MCQ-only
             chapter = chapters[i % len(chapters)]
             slot = {
                 "question_id": f"ESSAY_{essay_id:03d}",

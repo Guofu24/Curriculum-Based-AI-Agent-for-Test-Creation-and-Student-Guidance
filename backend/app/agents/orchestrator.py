@@ -315,6 +315,12 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             "total_steps": 5,
         })
 
+        # Debug: log the exact config being used for outline
+        logger.info(f"[OUTLINE DEBUG] full_config exam_type={full_config.get('exam_type')} "
+                     f"mcq_count={full_config.get('mcq_count')} "
+                     f"essay_count={full_config.get('essay_count')} "
+                     f"total_questions={full_config.get('total_questions', 'N/A')}")
+
         outline_result = await self.outline.create_outline(
             retrieved_context=retrieved_chunks,
             exam_config=full_config,
@@ -331,6 +337,12 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         distribution_summary = {}
         if hasattr(outline_result, 'distribution_summary'):
             distribution_summary = outline_result.distribution_summary
+
+        # Debug: log blueprint composition
+        mcq_slots = [s for s in blueprint if s.get('type') != 'essay']
+        essay_slots = [s for s in blueprint if s.get('type') == 'essay']
+        logger.info(f"[OUTLINE DEBUG] Blueprint composition: "
+                    f"total={len(blueprint)}, MCQ={len(mcq_slots)}, Essay={len(essay_slots)}")
 
         cost_report["outline"] = outline_result.token_usage.model_dump()
 
@@ -364,10 +376,14 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "warnings": warnings,
             }
 
-        # Auto-approve blueprint (G18: auto-proceed by default)
-        hitl_key = f"hitl:approved:{trace_id}:1"
-        await self.redis.set(hitl_key, "true", ttl=3600)
-        logger.info(f"Blueprint auto-approved for exam {trace_id}")
+        # NOTE: Auto-approve is DISABLED. The pipeline pauses at HITL Checkpoint 1
+        # until the teacher manually approves or rejects via:
+        #   POST /api/v1/exams/{id}/approve-blueprint
+        #   POST /api/v1/exams/{id}/reject-blueprint
+        #
+        # NEVER enable auto-approve — it defeats the entire purpose of HITL Checkpoint 1.
+        # The _wait_for_blueprint_approval() poll loop below will correctly wait
+        # because the Redis key was never set (we removed the await self.redis.set line).
 
         # Poll Redis for HITL approval (frontend sets this via approve_blueprint)
         approved = await self._wait_for_blueprint_approval(trace_id, timeout_seconds=1800)
@@ -481,9 +497,17 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
 
             await self._emit({
                 "type": "plan_step",
-                "message": f"Đang sửa câu hỏi (retry {retry_count})...",
+                "message": f"Đang sửa câu hỏi (retry {retry_count}/{max_retries})...",
                 "step": 4,
                 "total_steps": 5,
+            })
+
+            # Emit the issues being fixed so the frontend can display them
+            await self._emit({
+                "type": "validation_result",
+                "passed": False,
+                "issues_count": len(issues),
+                "issues": issues,
             })
 
             # Filter blueprint to exclude already-good slots
@@ -571,6 +595,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             "checkpoint_id": 3,
             "data": {
                 "exam_id": trace_id,
+                "blueprint": blueprint,
+                "distribution_summary": distribution_summary,
                 "questions": questions,
                 "cost_report": cost_report,
             },
@@ -633,24 +659,82 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         timeout_seconds: int = 1800,
     ) -> bool:
         """
-        Poll Redis for HITL blueprint approval.
-        Returns True if approved, False if rejected/timeout.
+        Wait for HITL blueprint approval via Redis pub/sub (not polling).
+
+        This is event-driven: instead of polling Redis every 2s (which blocks
+        the event loop and prevents WebSocket messages from being received),
+        we subscribe to the exam channel and BLOCK until a message arrives.
         """
         import asyncio
+        channel = f"exam:{exam_id}"
+
+        # Quick check: if already approved (e.g. from a previous call), return True
         key = f"hitl:approved:{exam_id}:1"
-        elapsed = 0
-        interval = 2.0  # poll every 2 seconds
+        val = await self.redis.get(key)
+        if val == "true":
+            logger.info(f"Blueprint already approved for exam {exam_id}")
+            return True
+        if val == "rejected":
+            logger.info(f"Blueprint already rejected for exam {exam_id}")
+            return False
 
-        while elapsed < timeout_seconds:
-            val = await self.redis.get(key)
-            if val == "true":
-                return True
-            if val == "rejected":
-                return False
-            await asyncio.sleep(interval)
-            elapsed += interval
+        # Subscribe to the exam channel and wait for an approval/rejection message
+        try:
+            sub = self.redis.client.pubsub()
+            await sub.subscribe(channel)
+            logger.info(f"Subscribed to channel '{channel}', waiting for blueprint approval...")
 
-        return False  # timeout
+            start_time = time.time()
+            while True:
+                elapsed = time.time() - start_time
+                if elapsed >= timeout_seconds:
+                    logger.warning(f"Blueprint approval timeout for exam {exam_id}")
+                    break
+
+                # Wait for message on channel with a short timeout
+                msg = await sub.get_message(ignore_subscribe_messages=True, timeout=2.0)
+                if msg and msg.get("type") == "message":
+                    data = msg.get("data", "")
+                    # Parse the approval event
+                    try:
+                        event = json.loads(data)
+                        if event.get("type") in ("blueprint_approved", "hitl_approved"):
+                            logger.info(f"Blueprint approved via pub/sub for exam {exam_id}")
+                            break
+                        if event.get("type") in ("blueprint_rejected", "hitl_rejected"):
+                            logger.info(f"Blueprint rejected via pub/sub for exam {exam_id}")
+                            return False
+                    except Exception:
+                        pass
+
+                # Also check Redis key periodically (belt-and-suspenders)
+                val = await self.redis.get(key)
+                if val == "true":
+                    logger.info(f"Blueprint approved via Redis key for exam {exam_id}")
+                    break
+                if val == "rejected":
+                    logger.info(f"Blueprint rejected via Redis key for exam {exam_id}")
+                    return False
+
+            await sub.unsubscribe(channel)
+            await sub.aclose()
+        except Exception as e:
+            logger.warning(f"Pub/sub wait failed, falling back to Redis key polling: {e}")
+            # Fallback to simple polling
+            elapsed = 0
+            interval = 2.0
+            while elapsed < timeout_seconds:
+                val = await self.redis.get(key)
+                if val == "true":
+                    return True
+                if val == "rejected":
+                    return False
+                await asyncio.sleep(interval)
+                elapsed += interval
+
+        # Check final state
+        val = await self.redis.get(key)
+        return val == "true"
 
     async def reject_blueprint(
         self,

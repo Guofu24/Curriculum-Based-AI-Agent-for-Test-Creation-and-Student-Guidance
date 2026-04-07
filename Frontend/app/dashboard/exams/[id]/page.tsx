@@ -63,6 +63,7 @@ import {
   XCircle,
   BookOpen,
   TrendingUp,
+  Database,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { 
@@ -445,6 +446,60 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
 
             {/* Questions Tab */}
             <TabsContent value="questions" className="space-y-4">
+              {/* Blueprint summary inline */}
+              {blueprint.length > 0 && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50/30 p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Database className="h-3.5 w-3.5 text-amber-600" />
+                    <span className="text-xs font-semibold text-amber-900">Sườn đề ({blueprint.length} câu)</span>
+                    <Badge variant="outline" className="text-[10px] ml-auto cursor-pointer"
+                      onClick={() => setActiveTab('blueprint')}>
+                      Xem chi tiết →
+                    </Badge>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-amber-200/40">
+                          <th className="px-2 py-1 text-left font-medium text-amber-800">#</th>
+                          <th className="px-2 py-1 text-left font-medium text-amber-800">Loại</th>
+                          <th className="px-2 py-1 text-left font-medium text-amber-800">Bloom</th>
+                          <th className="px-2 py-1 text-left font-medium text-amber-800">Chương</th>
+                          <th className="px-2 py-1 text-left font-medium text-amber-800">Chủ đề</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {blueprint.map((slot, i) => {
+                          const bloomLvl = typeof slot.bloom_level === 'string' ? slot.bloom_level : 'thong_hieu'
+                          const bloomInfo = BLOOM_CONFIG[bloomLvl as BloomLevel]
+                          return (
+                            <tr key={`${slot.question_id}-${i}`} className="border-b border-amber-100/30 last:border-0">
+                              <td className="px-2 py-1 text-muted-foreground">{i + 1}</td>
+                              <td className="px-2 py-1">
+                                <Badge variant={(slot.type || 'mcq') === 'mcq' ? 'secondary' : 'outline'} className="text-[10px] px-1">
+                                  {(slot.type || 'mcq').toUpperCase()}
+                                </Badge>
+                              </td>
+                              <td className="px-2 py-1">
+                                {bloomInfo ? (
+                                  <span className={cn("font-medium text-[10px]", bloomInfo.color)}>{bloomInfo.short}</span>
+                                ) : '—'}
+                              </td>
+                              <td className="px-2 py-1 text-muted-foreground truncate max-w-[80px]">
+                                {typeof slot.chapter === 'string' ? slot.chapter : '—'}
+                              </td>
+                              <td className="px-2 py-1 text-muted-foreground truncate max-w-[100px]">
+                                {typeof slot.topic_hint === 'string' ? slot.topic_hint : '—'}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {/* Filter */}
               <div className="flex items-center gap-4">
                 <Select
@@ -495,7 +550,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
                 <CardContent>
                   {blueprint.length === 0 ? (
                     <div className="text-center py-8 text-muted-foreground">
-                      Không có dữ liệu sườn đề
+                      Sườn đề không có sẵn cho đề này.
                     </div>
                   ) : (
                     <Table>

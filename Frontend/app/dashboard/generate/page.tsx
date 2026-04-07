@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { DashboardHeader } from '@/components/dashboard-header'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -13,11 +13,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Label } from '@/components/ui/label'
-import { Progress } from '@/components/ui/progress'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { FieldGroup, Field, FieldLabel, FieldDescription } from '@/components/ui/field'
-import { Spinner } from '@/components/ui/spinner'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
   FileText,
   ChevronRight,
@@ -25,23 +21,20 @@ import {
   Sparkles,
   Check,
   AlertCircle,
-  AlertTriangle,
   BookOpen,
   Layers,
-  Eye,
-  RefreshCw,
 } from 'lucide-react'
 import { toast } from 'sonner'
-import { 
-  documentsApi, 
+import {
+  documentsApi,
   generateApi,
-  createExamWebSocket,
-  Document, 
+  examsApi,
+  Document,
   CurriculumNode,
   ExamGenerationRequest,
   BloomLevel,
-  WSEvent,
 } from '@/lib/api'
+import { GenerationLiveViewer } from '@/components/generation-live-viewer'
 import { cn } from '@/lib/utils'
 
 type ExamType = 'mcq' | 'essay' | 'mixed'
@@ -90,13 +83,8 @@ export default function GeneratePage() {
   const [curriculum, setCurriculum] = useState<CurriculumNode[]>([])
   const [isLoadingDocs, setIsLoadingDocs] = useState(true)
   const [isLoadingCurriculum, setIsLoadingCurriculum] = useState(false)
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [generationEvents, setGenerationEvents] = useState<WSEvent[]>([])
   const [examId, setExamId] = useState<string | null>(null)
-  const [progress, setProgress] = useState(0)
-  const [scopeWarning, setScopeWarning] = useState<string | null>(null)
-  const wsRef = useRef<WebSocket | null>(null)
-  const eventsEndRef = useRef<HTMLDivElement>(null)
+  const [wsUrl, setWsUrl] = useState<string | null>(null)
 
   // Fetch completed documents
   useEffect(() => {
@@ -119,7 +107,7 @@ export default function GeneratePage() {
   // Fetch curriculum when document is selected
   useEffect(() => {
     if (!config.documentId) return
-    
+
     async function fetchCurriculum() {
       setIsLoadingCurriculum(true)
       try {
@@ -136,11 +124,6 @@ export default function GeneratePage() {
     }
     fetchCurriculum()
   }, [config.documentId])
-
-  // Auto-scroll events
-  useEffect(() => {
-    eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [generationEvents])
 
   const handleSelectDocument = (docId: string) => {
     setConfig(prev => ({ ...prev, documentId: docId, scope: [] }))
@@ -174,11 +157,6 @@ export default function GeneratePage() {
   const handleStartGeneration = async () => {
     if (!canProceedStep2) return
 
-    setIsGenerating(true)
-    setStep(3)
-    setGenerationEvents([])
-    setProgress(0)
-
     try {
       const request: ExamGenerationRequest = {
         document_id: config.documentId,
@@ -196,52 +174,41 @@ export default function GeneratePage() {
       setExamId(response.exam_id)
 
       if (response.scope_warning) {
-        setScopeWarning(response.scope_warning)
         toast.warning(response.scope_warning)
-      } else {
-        setScopeWarning(null)
       }
 
-      // Connect WebSocket
-      wsRef.current = createExamWebSocket(
-        response.exam_id,
-        handleWSEvent,
-        () => toast.error('Mất kết nối WebSocket'),
-        () => console.log('WebSocket closed')
-      )
+      // Use websocket_url from API response — backend resolves the correct host/port
+      // so WebSocket connects properly even when backend is on a different port.
+      setWsUrl(response.websocket_url || `/ws/exam/${response.exam_id}`)
+      setStep(3)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Không thể bắt đầu tạo đề')
-      setIsGenerating(false)
-      setStep(2)
     }
   }
 
-  const handleWSEvent = useCallback((event: WSEvent) => {
-    setGenerationEvents(prev => [...prev, event])
-
-    switch (event.type) {
-      case 'plan_step':
-        if (event.step && event.total_steps) {
-          setProgress((event.step / event.total_steps) * 100)
-        }
-        break
-      case 'question_generated':
-        // Increment progress slightly
-        setProgress(prev => Math.min(prev + 2, 95))
-        break
-      case 'completed':
-        setProgress(100)
-        setIsGenerating(false)
-        toast.success('Đã tạo đề thi thành công!')
-        wsRef.current?.close()
-        break
-      case 'error':
-        setIsGenerating(false)
-        toast.error(event.message || 'Có lỗi xảy ra')
-        wsRef.current?.close()
-        break
+  const handleApprove = async (id: string, approved: boolean, feedback?: string) => {
+    try {
+      if (approved) {
+        await examsApi.approveBlueprint(id)
+      } else {
+        // Backend requires feedback min 5 chars; send placeholder if user clicks without typing
+        await examsApi.rejectBlueprint(id, feedback || 'Yêu cầu tạo lại sườn đề.')
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Không thể xác nhận sườn đề')
     }
-  }, [])
+  }
+
+  const handleExamTypeChange = (v: ExamType) => {
+    setConfig(prev => ({
+      ...prev,
+      examType: v,
+      // Reset counts so hidden fields don't carry over to new type
+      ...(v === 'mcq' ? { essayCount: 0 } : {}),
+      ...(v === 'essay' ? { mcqCount: 0 } : {}),
+      ...(v === 'mixed' ? {} : {}),
+    }))
+  }
 
   const selectedDoc = documents.find(d => d.id === config.documentId)
   const chapters = curriculum.filter(n => n.level === 1)
@@ -451,7 +418,7 @@ export default function GeneratePage() {
                       <FieldLabel>Loại đề thi</FieldLabel>
                       <RadioGroup
                         value={config.examType}
-                        onValueChange={(v) => setConfig(prev => ({ ...prev, examType: v as ExamType }))}
+                        onValueChange={handleExamTypeChange}
                         className="flex flex-wrap gap-4"
                       >
                         <div className="flex items-center gap-2">
@@ -574,159 +541,20 @@ export default function GeneratePage() {
             </div>
           )}
 
-          {/* Step 3: Generation Progress */}
-          {step === 3 && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  {isGenerating ? (
-                    <>
-                      <Spinner />
-                      Đang tạo đề thi...
-                    </>
-                  ) : progress === 100 ? (
-                    <>
-                      <Check className="h-5 w-5 text-primary" />
-                      Hoàn thành!
-                    </>
-                  ) : (
-                    <>
-                      <AlertCircle className="h-5 w-5 text-destructive" />
-                      Có lỗi xảy ra
-                    </>
-                  )}
-                </CardTitle>
-                <CardDescription>
-                  {isGenerating 
-                    ? "Vui lòng đợi trong khi AI đang sinh đề thi"
-                    : progress === 100
-                    ? "Đề thi đã được tạo thành công"
-                    : "Quá trình tạo đề đã dừng"
-                  }
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                {/* Progress Bar */}
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span>Tiến độ</span>
-                    <span>{Math.round(progress)}%</span>
-                  </div>
-                  <Progress value={progress} className="h-2" />
-                </div>
-
-                {/* Events Log */}
-                <div className="space-y-2">
-                  <h4 className="font-medium text-sm">Nhật ký tạo đề</h4>
-                  <ScrollArea className="h-[300px] rounded-lg border bg-muted/30 p-4">
-                    <div className="space-y-2 font-mono text-sm">
-                      {generationEvents.map((event, i) => (
-                        <EventLogItem key={i} event={event} />
-                      ))}
-                      <div ref={eventsEndRef} />
-                    </div>
-                  </ScrollArea>
-                </div>
-
-                {/* Actions */}
-                <div className="flex justify-between">
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setStep(2)
-                      setIsGenerating(false)
-                      setGenerationEvents([])
-                      wsRef.current?.close()
-                    }}
-                    disabled={isGenerating}
-                  >
-                    <RefreshCw className="mr-2 h-4 w-4" />
-                    Tạo đề mới
-                  </Button>
-                  
-                  {examId && progress === 100 && (
-                    <>
-                      {scopeWarning && (
-                        <Alert variant="warning" className="mb-4">
-                          <AlertTriangle className="h-4 w-4" />
-                          <AlertTitle>Cảnh báo phạm vi</AlertTitle>
-                          <AlertDescription>
-                            {scopeWarning}. Một số nội dung có thể bị giới hạn token.
-                          </AlertDescription>
-                        </Alert>
-                      )}
-                      <Button onClick={() => router.push(`/dashboard/exams/${examId}`)}>
-                        <Eye className="mr-2 h-4 w-4" />
-                        Xem đề
-                      </Button>
-                    </>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
+          {/* Step 3: Generation Live Viewer */}
+          {step === 3 && examId && (
+            <GenerationLiveViewer
+              examId={examId}
+              wsUrl={wsUrl || `/ws/exam/${examId}`}
+              examType={config.examType}
+              onApprove={handleApprove}
+              onComplete={(id) => {
+                router.push(`/dashboard/exams/${id}`)
+              }}
+            />
           )}
         </div>
       </main>
     </>
-  )
-}
-
-function EventLogItem({ event }: { event: WSEvent }) {
-  const getEventDisplay = () => {
-    switch (event.type) {
-      case 'plan_step':
-        return {
-          icon: '📋',
-          text: `Bước ${event.step}/${event.total_steps}: ${event.message}`,
-          color: 'text-blue-500'
-        }
-      case 'question_generated':
-        return {
-          icon: '✅',
-          text: `Đã sinh câu hỏi ${event.question_id}`,
-          color: 'text-emerald-500'
-        }
-      case 'validation_result':
-        return {
-          icon: event.passed ? '✓' : '⚠',
-          text: event.passed 
-            ? `Kiểm tra đạt: ${event.issues_count} vấn đề` 
-            : `Cần xem lại: ${event.issues_count} vấn đề`,
-          color: event.passed ? 'text-emerald-500' : 'text-amber-500'
-        }
-      case 'hitl_checkpoint':
-        return {
-          icon: '⏸',
-          text: `Checkpoint HITL #${event.checkpoint_id}`,
-          color: 'text-purple-500'
-        }
-      case 'completed':
-        return {
-          icon: '🎉',
-          text: `Hoàn thành! Chi phí: $${event.total_cost_usd?.toFixed(4) || '0.00'}`,
-          color: 'text-primary'
-        }
-      case 'error':
-        return {
-          icon: '❌',
-          text: `Lỗi: ${event.message}`,
-          color: 'text-destructive'
-        }
-      default:
-        return {
-          icon: '•',
-          text: JSON.stringify(event),
-          color: 'text-muted-foreground'
-        }
-    }
-  }
-
-  const { icon, text, color } = getEventDisplay()
-
-  return (
-    <div className={cn("flex items-start gap-2", color)}>
-      <span>{icon}</span>
-      <span>{text}</span>
-    </div>
   )
 }

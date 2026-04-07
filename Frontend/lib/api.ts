@@ -482,7 +482,10 @@ export const examsApi = {
   },
   
   approveBlueprint: async (examId: string): Promise<void> => {
-    await apiFetch(`/exams/${examId}/approve-blueprint`, { method: 'POST' })
+    await apiFetch(`/exams/${examId}/approve-blueprint`, {
+      method: 'POST',
+      body: JSON.stringify({ approved: true }),
+    })
   },
   
   rejectBlueprint: async (examId: string, feedback: string): Promise<void> => {

@@ -261,17 +261,29 @@ def _map_fe_to_be_request(data: dict) -> ExamConfigRequest:
 
     # Map question_type from FE naming conventions to BE counts
     # FE sends: "mcq_single_answer", "mcq_multiple_answer", "essay", "mixed"
+    # and separate mcq_count/essay_count fields (from individual inputs)
     mcq_count = 0
     essay_count = 0
     qt = data.get("question_type", "")
+    # Priority: use explicit mcq_count/essay_count from FE; fall back to total_questions
+    explicit_mcq = data.get("mcq_count")
+    explicit_essay = data.get("essay_count")
     total_q = data.get("total_questions", 10)
-    if qt in ("mcq_single_answer", "mcq_multiple_answer", "mcq"):
-        mcq_count = total_q
-    elif qt == "essay":
-        essay_count = total_q
-    elif qt == "mixed" or qt == "":
-        mcq_count = total_q
-        essay_count = max(total_q // 5, 2)
+
+    if explicit_mcq is not None:
+        mcq_count = int(explicit_mcq)
+    if explicit_essay is not None:
+        essay_count = int(explicit_essay)
+
+    # If neither was provided, derive from question_type and total_questions
+    if explicit_mcq is None and explicit_essay is None:
+        if qt in ("mcq_single_answer", "mcq_multiple_answer", "mcq"):
+            mcq_count = total_q
+        elif qt == "essay":
+            essay_count = total_q
+        elif qt == "mixed" or qt == "":
+            mcq_count = total_q
+            essay_count = max(total_q // 5, 2)
 
     from app.schemas.exam import BloomDistribution
     return ExamConfigRequest(

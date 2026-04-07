@@ -951,6 +951,17 @@ async def approve_blueprint(
         exam_id=str(exam_id),
         user_id=str(current_user.id),
     )
+    # Also publish to Redis channel so the orchestrator's pub/sub listener unblocks immediately
+    # Use the already-injected redis dependency (async client)
+    try:
+        await redis.publish(f"exam:{exam_id}", {
+            "type": "blueprint_approved",
+            "exam_id": str(exam_id),
+            "user_id": str(current_user.id),
+            "timestamp": time.time(),
+        })
+    except Exception:
+        pass  # Non-blocking — Redis key is already set as fallback
     return {"status": "approved", "message": "Blueprint đã được phê duyệt. Bắt đầu sinh câu hỏi."}
 
 
