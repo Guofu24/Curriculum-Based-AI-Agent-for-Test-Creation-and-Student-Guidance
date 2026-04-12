@@ -113,6 +113,13 @@ backend/temp/
 backend/evals/output/
 .langfuse/
 
+# Local project folders
+/kaggle_marker_server/
+/chunking_demo/
+/Chunking/
+/docs/
+/Data sách/
+
 # Local reference/source assets
 Data sách/*.pdf
 Data sách/*.doc
