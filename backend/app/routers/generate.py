@@ -21,7 +21,8 @@ from app.core.config import get_settings
 from app.schemas.exam import ExamConfigRequest, ExamGenerateResponse
 from app.dependencies import get_current_user
 from app.models.user import User
-from app.websocket.manager import get_connection_manager
+from app.routers.exams import check_generate_rate_limit
+from app.tasks.exam_task import _build_demo_payload
 import uuid
 
 router = APIRouter(prefix="/api/v1/generate", tags=["Generation"])
@@ -218,10 +219,23 @@ async def _run_generation_inline(
                         total_cost_usd=result.get("cost_report", {}).get("total_cost_usd"),
                     ),
                 )
+            elif result.get("pipeline_paused"):
+                # Pipeline paused at HITL checkpoint — emit a pause event so the
+                # frontend knows to show the approval UI and wait for user input.
+                await manager.emit(
+                    exam_id,
+                    {
+                        "type": "pipeline_paused",
+                        "checkpoint_id": 1,
+                        "message": "Chờ phê duyệt blueprint...",
+                        "blueprint": result.get("blueprint", []),
+                        "distribution_summary": result.get("distribution_summary", {}),
+                    },
+                )
             else:
                 await manager.emit(
                     exam_id,
-                    SSEvent.error("Exam generation completed with warnings", "orchestrator"),
+                    SSEvent.error(f"Exam generation failed: {status_val}", "orchestrator"),
                 )
 
         return {
@@ -239,7 +253,6 @@ def _map_fe_to_be_request(data: dict) -> ExamConfigRequest:
     BE uses: document_id, bloom_distribution, output_language.
     """
     scope = data.get("scope", [])
-    scope_items = len(scope) if isinstance(scope, list) else 0
 
     if isinstance(scope, list) and scope and isinstance(scope[0], dict):
         scope = [s.get("title") or s.get("scope_type", "") for s in scope if isinstance(s, dict)]
@@ -336,7 +349,6 @@ async def generate_exam_fe(
         )
 
     # Rate limit check
-    from app.routers.exams import check_generate_rate_limit
     await check_generate_rate_limit(redis, str(current_user.id))
 
     service = ExamService(db, redis)
@@ -406,11 +418,12 @@ async def generate_exam_fe(
 
     async def _background_generation():
         """Run generation in background — emits events via WebSocket as it progresses."""
-        import asyncio
         import logging as _bg_log
+        from app.websocket.manager import get_connection_manager
+        from langgraph.errors import GraphInterrupt
         _bg = _bg_log.getLogger("generate.background")
         try:
-            await _run_generation_inline(
+            result = await _run_generation_inline(
                 exam_id=exam_uuid,
                 user_id=str(current_user.id),
                 document_id=str(config.document_id) if config.document_id else None,
@@ -419,7 +432,10 @@ async def generate_exam_fe(
                 user_prompt=config.user_prompt,
                 extra_instructions=config.extra_instructions,
             )
-            _bg.info("Background generation completed for exam_id=%s", exam_uuid)
+            _bg.info("Generation completed (or paused) for exam_id=%s, status=%s",
+                     exam_uuid, result.get("status"))
+        except GraphInterrupt:
+            _bg.info("Generation interrupted (HITL checkpoint) for exam_id=%s — waiting for frontend approval", exam_uuid)
         except TimeoutError:
             _bg.error("Generation timed out after 120s for exam_id=%s", exam_uuid)
             _mgr = get_connection_manager()

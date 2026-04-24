@@ -82,11 +82,27 @@ interface PageParams {
   id: string
 }
 
+interface McqEditForm {
+  content?: string
+  options: Record<string, string>
+  rubric?: string
+  bloom_level?: string
+  correct_answer?: string
+  [key: string]: unknown
+}
+
 const BLOOM_LABELS: Record<BloomLevel, string> = {
   nhan_biet: 'Nhận biết',
   thong_hieu: 'Thông hiểu',
   van_dung: 'Vận dụng',
   van_dung_cao: 'Vận dụng cao',
+}
+
+const BLOOM_CONFIG: Record<BloomLevel, { short: string; color: string }> = {
+  nhan_biet: { short: 'NB', color: 'text-green-600' },
+  thong_hieu: { short: 'TH', color: 'text-blue-600' },
+  van_dung: { short: 'VD', color: 'text-amber-600' },
+  van_dung_cao: { short: 'VDC', color: 'text-red-600' },
 }
 
 export default function ExamDetailPage({ params }: { params: Promise<PageParams> }) {
@@ -99,7 +115,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
   const [activeTab, setActiveTab] = useState('questions')
   const [questionFilter, setQuestionFilter] = useState<'all' | 'mcq' | 'essay'>('all')
   const [editingQuestion, setEditingQuestion] = useState<string | null>(null)
-  const [editForm, setEditForm] = useState<Partial<Question>>({})
+  const [editForm, setEditForm] = useState<McqEditForm>({ options: {} })
   const [isSaving, setIsSaving] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
   const [showPublishDialog, setShowPublishDialog] = useState(false)
@@ -210,24 +226,40 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
 
   const handleStartEditQuestion = (question: Question) => {
     setEditingQuestion(question.id)
+    // Convert options from array format [{label, text}] to Record format {A, B, C, D}
+    const optionsRecord: Record<string, string> = {}
+    if (Array.isArray(question.options)) {
+      for (const opt of question.options) {
+        if (opt.label && typeof opt.label === 'string') {
+          optionsRecord[opt.label] = opt.text || ''
+        }
+      }
+    }
     setEditForm({
       content: question.content,
-      options: question.options,
+      options: optionsRecord,
       correct_answer: question.correct_answer,
       bloom_level: question.bloom_level,
-      rubric: question.rubric,
+      rubric: question.rubric ? JSON.stringify(question.rubric) : '',
     })
   }
 
   const handleSaveQuestion = async (questionId: string) => {
     setIsSaving(true)
     try {
-      const updated = await examsApi.updateQuestion(id, questionId, editForm)
+      // Convert options from Record format back to array format [{label, text}] for API
+      const optionsArray = Object.entries(editForm.options).map(([label, text]) => ({ label, text }))
+      const updated = await examsApi.updateQuestion(id, questionId, {
+        content: editForm.content,
+        options: optionsArray,
+        rubric: editForm.rubric ? { rubrics: editForm.rubric } as unknown as Record<string, unknown> : undefined,
+        bloom_level: editForm.bloom_level as BloomLevel | undefined,
+      })
       setExam(prev => {
         if (!prev) return null
         return {
           ...prev,
-          questions: prev.questions.map(q => 
+          questions: (prev.questions ?? []).map(q => 
             q.id === questionId ? { ...q, ...updated } : q
           )
         }
@@ -342,7 +374,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
     <>
       <DashboardHeader breadcrumbs={[
         { label: 'Đề thi', href: '/dashboard/exams' },
-        { label: exam.title }
+        { label: exam.title || 'Đề thi' }
       ]} />
       
       <main className="flex-1 overflow-auto">
@@ -817,8 +849,8 @@ function QuestionCard({
   question: Question
   index: number
   isEditing: boolean
-  editForm: Partial<Question>
-  setEditForm: (form: Partial<Question>) => void
+  editForm: McqEditForm
+  setEditForm: (form: McqEditForm) => void
   isSaving: boolean
   onStartEdit: () => void
   onSave: () => void
@@ -848,7 +880,7 @@ function QuestionCard({
                   {formatPercent(question.quality_score)}
                 </Badge>
               )}
-              {question.validation_warnings?.length > 0 && (
+              {question.validation_warnings && question.validation_warnings.length > 0 && (
                 <Badge variant="outline" className="text-amber-500">
                   <AlertTriangle className="mr-1 h-3 w-3" />
                   {question.validation_warnings.length} cảnh báo
@@ -934,7 +966,7 @@ function QuestionCard({
                   <Field>
                     <FieldLabel>Rubric chấm điểm</FieldLabel>
                     <Textarea
-                      value={editForm.rubric || ''}
+                      value={editForm.rubric ?? ''}
                       onChange={(e) => setEditForm({ ...editForm, rubric: e.target.value })}
                       rows={4}
                     />

@@ -2,12 +2,10 @@
 
 import logging
 import unicodedata
-
+from app.rag.structure import normalize_chapter_id
 from app.core.config import get_settings
 
 logger = logging.getLogger("app.rag.vector_store")
-from app.rag.structure import normalize_chapter_id
-
 settings = get_settings()
 
 
@@ -18,15 +16,11 @@ def _make_ascii_namespace(namespace: str) -> str:
     - Replace non-ASCII letters with ASCII equivalents
     - Replace non-printable / special chars with underscore
     """
-    # Decompose Unicode, strip combining marks
     ascii_str = unicodedata.normalize("NFD", namespace)
     ascii_str = "".join(c for c in ascii_str if unicodedata.category(c) != "Mn")
-    # Replace remaining non-ASCII with underscore
     ascii_str = "".join(c if ord(c) < 128 else "_" for c in ascii_str)
-    # Collapse multiple underscores and strip leading/trailing
     import re
     ascii_str = re.sub(r"_+", "_", ascii_str).strip("_")
-    # If empty, fall back to hex hash
     if not ascii_str:
         import hashlib
         ascii_str = hashlib.md5(namespace.encode()).hexdigest()
@@ -64,7 +58,8 @@ class VectorStore:
 
             except ImportError:
                 self._index = None
-            except Exception:
+            except Exception as e:
+                logger.warning("Pinecone connection failed: %s", e)
                 self._index = None
 
         return self._index
@@ -99,7 +94,6 @@ class VectorStore:
             embedding = np.nan_to_num(embedding, nan=0.0, posinf=1.0, neginf=-1.0).tolist()
 
             chunk_id = chunk.get("chunk_id", "")
-            # Pinecone requires ASCII-only vector IDs — strip any non-ASCII chars
             safe_chunk_id = "".join(c if ord(c) < 128 else "_" for c in chunk_id)
             if not safe_chunk_id:
                 safe_chunk_id = "chunk_unknown"
@@ -124,12 +118,27 @@ class VectorStore:
         if not records:
             return
 
-        try:
-            for i in range(0, len(records), 100):
-                batch = records[i:i + 100]
-                index.upsert(vectors=batch, namespace=namespace)
-        except Exception as e:
-            logger.warning(f"Pinecone upsert failed for namespace {namespace}: {e}")
+        def _upsert_batch(batch_records, ns):
+            for attempt in range(3):
+                try:
+                    index.upsert(vectors=batch_records, namespace=ns)
+                    return
+                except Exception as e:
+                    if attempt < 2:
+                        logger.warning(
+                            "Pinecone upsert attempt %d failed for namespace '%s': %s — retrying",
+                            attempt + 1, ns, e,
+                        )
+                    else:
+                        logger.error(
+                            "Pinecone upsert FAILED for namespace '%s' after 3 attempts: %s",
+                            ns, e,
+                        )
+                        raise
+
+        for i in range(0, len(records), 100):
+            batch = records[i:i + 100]
+            _upsert_batch(batch, namespace)
 
     async def count_chunks_in_scope(
         self,
@@ -145,6 +154,7 @@ class VectorStore:
         """
         index = await self._get_index()
         if not index:
+            logger.warning("Pinecone index unavailable for count_chunks_in_scope")
             return 0
 
         try:
@@ -155,7 +165,7 @@ class VectorStore:
             total = 0
             for chapter in scope_chapters:
                 chapter_id = normalize_chapter_id(chapter)
-                ns_key = f"{doc_id}_{chapter_id}"
+                ns_key = _make_ascii_namespace(f"{doc_id}_{chapter_id}")
                 total += namespaces.get(ns_key, {}).get("vector_count", 0)
             return total
         except Exception:
@@ -176,6 +186,7 @@ class VectorStore:
         """
         index = await self._get_index()
         if not index:
+            logger.warning("Pinecone index unavailable for query_namespace")
             return []
 
         namespace = _make_ascii_namespace(f"{doc_id}_{chapter_id}")
@@ -213,29 +224,72 @@ class VectorStore:
         """
         Delete all vectors for specific chapters of a document.
 
-        Deletes namespace {doc_id}_{chapter_id} for each chapter in the list.
+        Deletes namespace {doc_id}_{chapter_id} for each chapter in the list,
+        plus the 'ch_unknown' namespace (chunks without detected headings).
+        Uses retry loop to handle transient Pinecone errors.
         """
         index = await self._get_index()
         if not index:
+            logger.warning(
+                "Pinecone index unavailable — cannot delete vectors for doc %s", doc_id
+            )
             return
 
-        for chapter_id in chapters:
+        all_chapters = list(chapters) + ["ch_unknown"]
+
+        for chapter_id in all_chapters:
             namespace = _make_ascii_namespace(f"{doc_id}_{chapter_id}")
-            try:
-                index.delete(delete_all=True, namespace=namespace)
-            except Exception:
-                continue
+            for attempt in range(3):
+                try:
+                    index.delete(delete_all=True, namespace=namespace)
+                    logger.info(
+                        "Deleted Pinecone namespace '%s' for doc %s", namespace, doc_id
+                    )
+                    break
+                except Exception as e:
+                    if attempt < 2:
+                        logger.warning(
+                            "Pinecone delete attempt %d failed for namespace '%s': %s — retrying",
+                            attempt + 1, namespace, e,
+                        )
+                    else:
+                        logger.error(
+                            "Pinecone delete FAILED for namespace '%s' after 3 attempts: %s",
+                            namespace, e,
+                        )
 
     async def delete_all_document_vectors(self, doc_id: str) -> bool:
-        """Delete all vectors for a document (all namespaces)."""
+        """
+        Delete all vectors for a document (all namespaces).
+
+        Lists all namespaces matching this doc_id prefix and deletes each.
+        Returns True if Pinecone is reachable, False if unreachable.
+        """
         index = await self._get_index()
         if not index:
+            logger.warning(
+                "Pinecone index unavailable — cannot delete vectors for doc %s", doc_id
+            )
             return False
 
         try:
-            index.delete(filter={"document_id": {"$eq": doc_id}})
-            return True
-        except Exception:
+            stats = index.describe_index_stats()
+            namespaces: dict = stats.get("namespaces", {})
+            deleted_any = False
+            for ns in namespaces:
+                if ns.startswith(doc_id.replace('-', '')) or ns.startswith(f"{doc_id}_"):
+                    try:
+                        index.delete(delete_all=True, namespace=ns)
+                        logger.info("Deleted Pinecone namespace '%s' (doc %s)", ns, doc_id)
+                        deleted_any = True
+                    except Exception as e:
+                        logger.error("Failed to delete namespace '%s': %s", ns, e)
+            return deleted_any or True
+        except Exception as e:
+            logger.error(
+                "describe_index_stats failed during delete_all for doc %s: %s",
+                doc_id, e,
+            )
             return False
 
     async def describe_index_stats(self) -> dict | None:

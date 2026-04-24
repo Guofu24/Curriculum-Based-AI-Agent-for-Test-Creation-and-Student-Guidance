@@ -9,7 +9,7 @@ from celery import Task
 from app.tasks.celery_app import celery_app
 from app.core.database import async_session_maker
 from app.services.document_service import DocumentService
-from app.websocket.manager import get_connection_manager, SSEvent
+from app.websocket.manager import get_document_upload_manager, SSEvent
 
 
 def _run_document_task(document_id: str) -> dict:
@@ -20,34 +20,42 @@ def _run_document_task(document_id: str) -> dict:
             from app.core.redis_client import get_redis_client
             redis = get_redis_client()
             service = DocumentService(db, redis)
-            manager = get_connection_manager()
+            manager = get_document_upload_manager()
 
             try:
-                await manager.emit(
-                    f"doc:{document_id}",
-                    SSEvent.progress(10, "Đang tải tài liệu...")
+                # Emit: queued (before service.process_document takes over)
+                await manager.broadcast(
+                    document_id,
+                    SSEvent.processing_step(
+                        document_id, "queued",
+                        "Đang chờ xử lý...", 5
+                    ),
                 )
 
                 result = await service.process_document(uuid.UUID(document_id))
 
-                # Handle "completed" vs "failed" status
                 if result.get("processing_status") == "completed":
-                    await manager.emit(
-                        f"doc:{document_id}",
-                        SSEvent.progress(100, "Hoàn thành xử lý!")
+                    await manager.broadcast(
+                        document_id,
+                        SSEvent.processing_step(
+                            document_id, "done",
+                            "Hoàn thành xử lý!", 100
+                        ),
                     )
                 else:
-                    await manager.emit(
-                        f"doc:{document_id}",
-                        SSEvent.error(result.get("error", "Processing failed"), "document")
+                    await manager.broadcast(
+                        document_id,
+                        SSEvent.processing_failed(
+                            document_id, result.get("error", "Processing failed")
+                        ),
                     )
 
                 return result
 
             except Exception as e:
-                await manager.emit(
-                    f"doc:{document_id}",
-                    SSEvent.error(str(e), "document")
+                await manager.broadcast(
+                    document_id,
+                    SSEvent.processing_failed(document_id, str(e)),
                 )
                 raise
 
@@ -61,11 +69,13 @@ def _run_document_task(document_id: str) -> dict:
             return loop.run_until_complete(_run())
         finally:
             loop.close()
-    else:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(loop.run_until_complete, _run())
-            return future.result()
+    # Safe async-in-thread pattern: when a running loop exists, delegate to a
+    # thread pool so we don't nest event loops.  Using 8 workers lets this Celery
+    # process handle multiple documents concurrently while Celery itself manages the
+    # multi-process parallelism (start Celery with --concurrency=N for true scale-out).
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        future = executor.submit(loop.run_until_complete, _run())
+        return future.result()
 
 
 @celery_app.task(

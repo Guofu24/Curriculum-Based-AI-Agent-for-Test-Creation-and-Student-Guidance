@@ -26,18 +26,17 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
-import { Progress } from '@/components/ui/progress'
 import {
   FileText,
   Upload,
   Trash2,
   Eye,
-  RefreshCw,
   FileType,
   File,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { documentsApi, Document } from '@/lib/api'
+import { useUploadNotification } from '@/components/upload-notification-provider'
 import { StatusBadge } from '@/components/status-badge'
 import { formatDateTime, formatFileSize } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -51,10 +50,9 @@ const FILE_ICONS: Record<string, React.ElementType> = {
 export default function DocumentsPage() {
   const [documents, setDocuments] = useState<Document[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const [isUploading, setIsUploading] = useState(false)
-  const [uploadProgress, setUploadProgress] = useState(0)
   const [isDragging, setIsDragging] = useState(false)
   const [pollingIds, setPollingIds] = useState<Set<string>>(new Set())
+  const { startUpload } = useUploadNotification()
 
   const fetchDocuments = useCallback(async () => {
     try {
@@ -138,18 +136,8 @@ export default function DocumentsPage() {
       return
     }
 
-    setIsUploading(true)
-    setUploadProgress(0)
-
-    // Simulate progress
-    const progressInterval = setInterval(() => {
-      setUploadProgress(prev => Math.min(prev + 10, 90))
-    }, 200)
-
     try {
-      const newDoc = await documentsApi.upload(file)
-      setUploadProgress(100)
-      clearInterval(progressInterval)
+      const newDoc = await startUpload(file)
 
       toast.success('Upload thành công! Đang xử lý tài liệu...')
 
@@ -157,7 +145,6 @@ export default function DocumentsPage() {
         setDocuments(prev => [newDoc, ...prev])
         setPollingIds(prev => new Set([...prev, newDoc.id!]))
       } else {
-        // Fallback: backend returned document_id instead of id — refetch list
         const response = await documentsApi.list(1, 50)
         setDocuments(response.items)
         setPollingIds(new Set(
@@ -167,11 +154,7 @@ export default function DocumentsPage() {
         ))
       }
     } catch (error) {
-      clearInterval(progressInterval)
       toast.error(error instanceof Error ? error.message : 'Upload thất bại')
-    } finally {
-      setIsUploading(false)
-      setUploadProgress(0)
     }
   }
 
@@ -179,6 +162,11 @@ export default function DocumentsPage() {
     try {
       await documentsApi.delete(doc.id)
       setDocuments(prev => prev.filter(d => d.id !== doc.id))
+      setPollingIds(prev => {
+        const next = new Set(prev)
+        next.delete(doc.id)
+        return next
+      })
       toast.success('Đã xóa tài liệu')
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Xóa thất bại')
@@ -231,38 +219,23 @@ export default function DocumentsPage() {
           <Card
             className={cn(
               "border-2 border-dashed transition-colors cursor-pointer",
-              isDragging && "border-primary bg-primary/5",
-              isUploading && "pointer-events-none opacity-70"
+              isDragging && "border-primary bg-primary/5"
             )}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-            onClick={() => !isUploading && document.getElementById('file-input')?.click()}
+            onClick={() => document.getElementById('file-input')?.click()}
           >
             <CardContent className="flex flex-col items-center justify-center py-12">
-              {isUploading ? (
-                <div className="w-full max-w-xs space-y-4">
-                  <div className="flex items-center justify-center">
-                    <RefreshCw className="h-8 w-8 animate-spin text-primary" />
-                  </div>
-                  <Progress value={uploadProgress} className="h-2" />
-                  <p className="text-center text-sm text-muted-foreground">
-                    Đang upload... {uploadProgress}%
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 mb-4">
-                    <Upload className="h-6 w-6 text-primary" />
-                  </div>
-                  <p className="text-lg font-medium">
-                    Kéo thả file vào đây
-                  </p>
-                  <p className="text-sm text-muted-foreground">
-                    hoặc click để chọn file (PDF, DOCX, PPTX)
-                  </p>
-                </>
-              )}
+              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 mb-4">
+                <Upload className="h-6 w-6 text-primary" />
+              </div>
+              <p className="text-lg font-medium">
+                Kéo thả file vào đây
+              </p>
+              <p className="text-sm text-muted-foreground">
+                hoặc click để chọn file (PDF, DOCX, PPTX)
+              </p>
             </CardContent>
           </Card>
 

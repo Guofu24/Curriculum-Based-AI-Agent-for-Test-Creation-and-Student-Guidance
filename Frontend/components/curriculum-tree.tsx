@@ -9,7 +9,7 @@ import { Save } from "lucide-react"
 
 // ── Flat type from API ──────────────────────────────────────────────────────
 
-interface FlatCurriculumNode {
+export interface FlatCurriculumNode {
   id: string
   title: string
   level: number       // 1=chapter, 2=section, 3=subsection

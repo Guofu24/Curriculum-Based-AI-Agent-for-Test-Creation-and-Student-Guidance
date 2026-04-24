@@ -142,36 +142,29 @@ class ShortTermMemory:
 
     async def increment_retry(self, exam_id: str, user_id: str) -> int:
         """
-        Increment retry_count in session. Returns the new count.
-        G2: used by validator retry loop.
+        Increment retry_count in session atomically using Redis INCR.
+        Returns the new count.
+        G9: used by validator retry loop. Uses atomic INCR to avoid race conditions.
         """
-        session = await self.load_session(exam_id, user_id)
-        if session is None:
-            count = 1
-        else:
-            count = session.get("retry_count", 0) + 1
-
-        if session is None:
-            session = {"retry_count": count, "topics_used": [], "conversation_history": []}
-        else:
-            session["retry_count"] = count
-
-        await self.redis.set_json(
-            self._session_key(exam_id, user_id),
-            session,
-            ttl=SHORT_TERM_TTL,
-        )
-        return count
+        key = f"retry_count:{exam_id}:{user_id}"
+        new_count = await self.redis.client.incr(key)
+        await self.redis.expire(key, SHORT_TERM_TTL)
+        return int(new_count)
 
     async def get_retry_count(self, exam_id: str, user_id: str) -> int:
         """
-        Load retry_count from session. Returns 0 if not found.
+        Load retry_count from the atomic counter key.
+        Returns 0 if not found.
         G9: Used by orchestrator retry loop to track retry attempts.
         """
-        session = await self.load_session(exam_id, user_id)
-        if session is None:
+        key = f"retry_count:{exam_id}:{user_id}"
+        val = await self.redis.client.get(key)
+        if val is None:
             return 0
-        return session.get("retry_count", 0)
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return 0
 
     # ── G9 Methods ─────────────────────────────────────────────────────────────
 

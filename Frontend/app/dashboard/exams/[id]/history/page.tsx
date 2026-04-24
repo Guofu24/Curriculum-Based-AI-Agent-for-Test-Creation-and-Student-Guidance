@@ -125,7 +125,7 @@ export default function ExamHistoryPage({ params }: { params: Promise<PageParams
     <>
       <DashboardHeader breadcrumbs={[
         { label: 'Đề thi', href: '/dashboard/exams' },
-        { label: exam.title, href: `/dashboard/exams/${id}` },
+        { label: exam.title || 'Đề thi', href: `/dashboard/exams/${id}` },
         { label: 'Lịch sử' }
       ]} />
       

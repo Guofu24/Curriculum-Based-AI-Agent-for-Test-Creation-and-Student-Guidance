@@ -4,7 +4,7 @@ import { useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { SidebarProvider, SidebarInset } from '@/components/ui/sidebar'
 import { AppSidebar } from '@/components/app-sidebar'
-import { AuthProvider, useAuth } from '@/components/auth-provider'
+import { useAuth } from '@/components/auth-provider'
 import { Spinner } from '@/components/ui/spinner'
 
 function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
@@ -47,9 +47,5 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode
 }) {
-  return (
-    <AuthProvider>
-      <DashboardLayoutContent>{children}</DashboardLayoutContent>
-    </AuthProvider>
-  )
+  return <DashboardLayoutContent>{children}</DashboardLayoutContent>
 }

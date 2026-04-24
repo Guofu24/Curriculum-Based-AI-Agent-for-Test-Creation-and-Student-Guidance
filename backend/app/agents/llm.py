@@ -84,10 +84,14 @@ class BaseLLMProvider(ABC):
 # ============================================================
 
 class OpenAIProvider(BaseLLMProvider):
+    def __init__(self, api_key: str | None = None) -> None:
+        self._api_key = api_key or settings.OPENAI_API_KEY
+        self._base_url = settings.BASE_URL
+
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs) -> str:  # noqa: ARG002
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        client = AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
         resp = await client.chat.completions.create(
             model=model,
             messages=messages,
@@ -108,7 +112,7 @@ class OpenAIProvider(BaseLLMProvider):
         import instructor
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        client = AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
         inst = instructor.from_openai(client)
         return await inst.chat.completions.create(
             model=model,
@@ -131,15 +135,19 @@ class OpenRouterProvider(BaseLLMProvider):
 
     BASE_URL = "https://openrouter.ai/api/v1"
 
+    def __init__(self, api_key: str | None = None) -> None:
+        self._api_key = api_key or settings.OPENROUTER_API_KEY
+        self._app_name = settings.OPENROUTER_APP_NAME
+
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(
-            api_key=settings.OPENROUTER_API_KEY,
+            api_key=self._api_key,
             base_url=self.BASE_URL,
             default_headers={
                 "HTTP-Referer": "https://github.com/curriculum-ai",
-                "X-Title": settings.OPENROUTER_APP_NAME,
+                "X-Title": self._app_name,
             },
         )
         resp = await client.chat.completions.create(
@@ -163,11 +171,11 @@ class OpenRouterProvider(BaseLLMProvider):
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(
-            api_key=settings.OPENROUTER_API_KEY,
+            api_key=self._api_key,
             base_url=self.BASE_URL,
             default_headers={
                 "HTTP-Referer": "https://github.com/curriculum-ai",
-                "X-Title": settings.OPENROUTER_APP_NAME,
+                "X-Title": self._app_name,
             },
         )
         inst = instructor.from_openai(client)
@@ -190,10 +198,13 @@ class OpenRouterProvider(BaseLLMProvider):
 class GroqProvider(BaseLLMProvider):
     """Groq: Inference cực nhanh (LPU chip), free tier 14,400 req/ngày. URL: https://console.groq.com"""
 
+    def __init__(self, api_key: str | None = None) -> None:
+        self._api_key = api_key or settings.GROQ_API_KEY
+
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         from groq import AsyncGroq
 
-        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        client = AsyncGroq(api_key=self._api_key)
         resp = await client.chat.completions.create(
             model=model,
             messages=messages,
@@ -214,7 +225,7 @@ class GroqProvider(BaseLLMProvider):
         import instructor
         from groq import AsyncGroq
 
-        client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+        client = AsyncGroq(api_key=self._api_key)
         inst = instructor.from_groq(client, mode=instructor.Mode.JSON)
         return await inst.chat.completions.create(
             model=model,
@@ -235,12 +246,14 @@ class GroqProvider(BaseLLMProvider):
 class AnthropicProvider(BaseLLMProvider):
     """Anthropic Claude. Models: claude-3-5-sonnet, claude-3-haiku."""
 
+    def __init__(self, api_key: str | None = None) -> None:
+        self._api_key = api_key or settings.ANTHROPIC_API_KEY
+
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         import anthropic
 
-        client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        client = anthropic.AsyncAnthropic(api_key=self._api_key)
 
-        # Anthropic tách system message riêng
         system = ""
         filtered = []
         for m in messages:
@@ -270,7 +283,7 @@ class AnthropicProvider(BaseLLMProvider):
         import anthropic
         import instructor
 
-        client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        client = anthropic.AsyncAnthropic(api_key=self._api_key)
 
         system = ""
         filtered = []
@@ -302,11 +315,14 @@ class AnthropicProvider(BaseLLMProvider):
 class OllamaProvider(BaseLLMProvider):
     """Ollama: chạy LLM hoàn toàn local. Cài: https://ollama.ai"""
 
+    def __init__(self, api_key: str | None = None) -> None:  # noqa: ARG002
+        self._base_url = settings.OLLAMA_BASE_URL
+
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(
-            base_url=f"{settings.OLLAMA_BASE_URL}/v1",
+            base_url=f"{self._base_url}/v1",
             api_key="ollama",
         )
         resp = await client.chat.completions.create(
@@ -329,7 +345,7 @@ class OllamaProvider(BaseLLMProvider):
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(
-            base_url=f"{settings.OLLAMA_BASE_URL}/v1",
+            base_url=f"{self._base_url}/v1",
             api_key="ollama",
         )
         inst = instructor.from_openai(client, mode=instructor.Mode.JSON)
@@ -343,7 +359,6 @@ class OllamaProvider(BaseLLMProvider):
                 max_retries=max_retries,
             )
         except Exception:
-            # Manual JSON extraction fallback
             schema = response_model.model_json_schema()
             augmented_messages = messages + [{
                 "role": "user",
@@ -366,7 +381,7 @@ class OllamaProvider(BaseLLMProvider):
 class G4FProvider(BaseLLMProvider):
     """g4f (gpt4free): reverse engineering, không cần API key. Chỉ dev/test."""
 
-    def __init__(self) -> None:
+    def __init__(self, api_key: str | None = None) -> None:  # noqa: ARG002
         import g4f
         self._g4f = g4f
 
@@ -433,22 +448,22 @@ class G4FProvider(BaseLLMProvider):
 class QwenVisionProvider(BaseLLMProvider):
     """
     Self-hosted Qwen3.5-9B via ngrok tunnel.
-    Uses QWEN_VISION_BASE_URL from .env (e.g. https://xxxx.ngrok-free.app).
+    Uses VISION_PROVIDER / VISION_API_KEY from .env (e.g. https://xxxx.ngrok-free.app).
     OpenAI-compatible /v1/chat/completions endpoint.
     """
 
-    def __init__(self) -> None:
-        base = settings.QWEN_VISION_BASE_URL.rstrip("/")
+    def __init__(self, base_url: str | None = None) -> None:
+        base = base_url or settings.QWEN_VISION_BASE_URL
         if not base:
             raise RuntimeError("QWEN_VISION_BASE_URL is not set in .env")
-        self._base_url = f"{base}/v1"
+        self._base_url = f"{base.rstrip('/')}/v1"
 
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(api_key="not-needed", base_url=self._base_url)
         resp = await client.chat.completions.create(
-            model=model or "Qwen/Qwen3.5-9B",
+            model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -470,7 +485,7 @@ class QwenVisionProvider(BaseLLMProvider):
         client = AsyncOpenAI(api_key="not-needed", base_url=self._base_url)
         inst = instructor.from_openai(client)
         return await inst.chat.completions.create(
-            model=model or "Qwen/Qwen3.5-9B",
+            model=model,
             messages=messages,
             response_model=response_model,
             temperature=temperature,
@@ -496,33 +511,16 @@ _PROVIDER_MAP: dict[str, type[BaseLLMProvider]] = {
 }
 
 
-def _is_provider_available(name: str) -> bool:
-    """Return True if a provider has a valid (non-empty) API key configured."""
-    s = settings
-    if name == "openai":
-        return bool(s.OPENAI_API_KEY)
-    if name == "openrouter":
-        return bool(s.OPENROUTER_API_KEY)
-    if name == "groq":
-        return bool(s.GROQ_API_KEY)
-    if name == "anthropic":
-        return bool(s.ANTHROPIC_API_KEY)
-    if name == "ollama":
-        return True  # local server, no key needed
-    if name == "g4f":
-        return True  # free aggregator, no key needed
-    if name == "qwen_vision":
-        return bool(s.QWEN_VISION_BASE_URL)
-    return False
-
-
-def _build_provider(name: str) -> BaseLLMProvider:
+def _build_provider(name: str, api_key: str | None = None) -> BaseLLMProvider:
     cls = _PROVIDER_MAP.get(name.lower())
     if not cls:
         raise ValueError(
             f"Unknown LLM provider: '{name}'. Available: {list(_PROVIDER_MAP.keys())}"
         )
     try:
+        return cls(api_key=api_key)
+    except TypeError:
+        # Provider không nhận api_key (Ollama, G4F)
         return cls()
     except Exception as e:
         raise RuntimeError(f"Failed to init provider '{name}': {e}") from e
@@ -543,56 +541,72 @@ class LLMClient:
 
     # Role → model tier mapping
     STRONG_ROLES: set[str] = {"orchestrator", "builder", "validator"}
-    LIGHT_ROLES: set[str] = {"planner", "reranker", "outline", "dedup", "skills", "classifier"}
+    LIGHT_ROLES: set[str] = {"planner", "reranker", "outline", "dedup", "skills", "classifier", "guardrails"}
+
+    # Role → config field suffixes
+    ROLE_FIELDS: dict[str, str] = {
+        "orchestrator": "ORCHESTRATOR",
+        "builder": "BUILDER",
+        "validator": "VALIDATOR",
+        "planner": "PLANNER",
+        "reranker": "RERANKER",
+        "outline": "OUTLINE",
+        "dedup": "DEDUP",
+        "skills": "SKILLS",
+        "classifier": "CLASSIFIER",
+        "guardrails": "GUARDRAILS",
+        "vision": "VISION",
+    }
 
     def __init__(self) -> None:
-        primary_name = settings.LLM_PROVIDER
-        if not _is_provider_available(primary_name):
-            logger.warning(
-                f"Primary provider '{primary_name}' has no API key — "
-                f"falling back to available providers."
-            )
-
-        self._primary: BaseLLMProvider | None = None
-        self._fallbacks: list[BaseLLMProvider] = []
-
-        # Try primary first if available
-        if _is_provider_available(primary_name):
-            try:
-                self._primary = _build_provider(primary_name)
-            except Exception as e:
-                logger.warning(f"Primary provider '{primary_name}' init failed: {e}")
-
-        # Build fallback chain, skipping unavailable ones
-        for name in settings.fallback_providers:
-            if name == primary_name:
-                continue
-            if not _is_provider_available(name):
-                continue
-            try:
-                self._fallbacks.append(_build_provider(name))
-            except Exception as e:
-                logger.warning(f"Fallback provider '{name}' init failed: {e}")
-
-        if not self._primary and not self._fallbacks:
-            raise RuntimeError(
-                "No LLM provider available. Set at least one of: "
-                "GROQ_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, "
-                "ANTHROPIC_API_KEY (or ensure Ollama/G4F is reachable)."
-            )
-
-        logger.info(
-            f"LLMClient ready | primary={self._primary.name() if self._primary else 'NONE'} "
-            f"| fallbacks={[p.name() for p in self._fallbacks]}"
-        )
+        self._role_providers: dict[str, list[BaseLLMProvider]] = {}
+        self._all_providers: dict[str, BaseLLMProvider] = {}
+        logger.info("LLMClient ready | per-role provider+apikey+model routing enabled")
 
     def _get_model(self, role: str) -> str:
-        """Chọn model dựa trên role."""
+        """Chọn model dựa trên role. Ưu tiên: per-role override > tier default."""
+        suffix = self.ROLE_FIELDS.get(role)
+        if suffix:
+            model = getattr(settings, f"{suffix}_MODEL", None)
+            if model:
+                return model
+
         if role in self.STRONG_ROLES:
-            return settings.LLM_MODEL_STRONG
+            return settings.LLM_MODEL_STRONG_DEFAULT
         if role == "vision":
-            return settings.LLM_MODEL_VISION
-        return settings.LLM_MODEL_LIGHT
+            return settings.VISION_MODEL
+        return settings.LLM_MODEL_LIGHT_DEFAULT
+
+    def _get_providers_for_role(self, role: str) -> list[BaseLLMProvider]:
+        """Lấy danh sách provider cho role, mỗi provider dùng API key riêng của role."""
+        if role in self._role_providers:
+            return self._role_providers[role]
+
+        suffix = self.ROLE_FIELDS.get(role, "")
+        provider_name = getattr(settings, f"{suffix}_PROVIDER", None) or settings.LLM_PROVIDER_DEFAULT
+        api_key = getattr(settings, f"{suffix}_API_KEY", None) or ""
+
+        # Build provider instances với key riêng
+        role_providers: list[BaseLLMProvider] = []
+
+        # Primary
+        key = f"{provider_name}:{api_key}"
+        if key not in self._all_providers:
+            try:
+                self._all_providers[key] = _build_provider(provider_name, api_key=api_key or None)
+            except Exception as e:
+                logger.warning(f"Provider '{provider_name}' init failed: {e}")
+        if key in self._all_providers:
+            role_providers.append(self._all_providers[key])
+
+        if not role_providers:
+            raise RuntimeError(
+                f"No provider available for role '{role}'. "
+                f"Check {suffix}_PROVIDER and {suffix}_API_KEY in .env."
+            )
+
+        self._role_providers[role] = role_providers
+        return role_providers
 
     async def chat(
         self,
@@ -610,8 +624,7 @@ class LLMClient:
         trace_name: tên span cho LangFuse tracing
         """
         resolved_model = model or self._get_model(role)
-        primary_provider = self._primary
-        providers = ([primary_provider] if primary_provider else []) + self._fallbacks
+        providers = self._get_providers_for_role(role)
 
         tracer = _get_tracer()
         last_error: Exception | None = None
@@ -684,8 +697,7 @@ class LLMClient:
         Auto-retry nếu parse fail. Fallback qua providers nếu cần.
         """
         resolved_model = model or self._get_model(role)
-        primary_provider = self._primary
-        providers = ([primary_provider] if primary_provider else []) + self._fallbacks
+        providers = self._get_providers_for_role(role)
 
         tracer = _get_tracer()
         last_error: Exception | None = None
@@ -784,10 +796,10 @@ Các đoạn văn bản:
     ) -> str:
         """
         Gọi LLM với image input (cho RAG image description).
-        Tự chọn provider hỗ trợ vision.
+        Dùng provider từ per-role override hoặc fallback chain.
         """
         vision_providers = [
-            p for p in [self._primary] + self._fallbacks
+            p for p in self._all_providers.values()
             if p.supports_vision()
         ]
         if not vision_providers:
@@ -813,7 +825,7 @@ Các đoạn văn bản:
             else:
                 vision_messages.append(m)
 
-        model = settings.LLM_MODEL_VISION
+        model = settings.VISION_MODEL
         for provider in vision_providers:
             try:
                 return await provider.chat(vision_messages, model=model)

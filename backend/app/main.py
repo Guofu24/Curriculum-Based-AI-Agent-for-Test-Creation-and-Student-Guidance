@@ -2,9 +2,10 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.websockets import WebSocketDisconnect
 import logging
 
 from app.core.config import get_settings
@@ -21,6 +22,13 @@ settings = get_settings()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+# Reduce SQLAlchemy noise — only show warnings/errors, not every query
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+# Show uvicorn access logs
+logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+# Suppress passlib + bcrypt version mismatch noise (cosmetic, auth still works)
+logging.getLogger("passlib.handlers.bcrypt").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 
@@ -172,7 +180,7 @@ app.include_router(playbook_router)
 # ── WebSocket Endpoint ─────────────────────────────────────────────────────────
 
 from fastapi import WebSocket
-from app.websocket.manager import get_connection_manager
+from app.websocket.manager import get_connection_manager, get_document_upload_manager
 
 
 @app.websocket("/ws/exam/{exam_id}")
@@ -199,6 +207,27 @@ async def websocket_exam_stream(websocket: WebSocket, exam_id: str):
         pass
     finally:
         await manager.disconnect(websocket, exam_id)
+
+
+@app.websocket("/ws/document/{document_id}")
+async def websocket_document_upload(websocket: WebSocket, document_id: str):
+    """
+    WebSocket endpoint for real-time document upload/processing progress.
+    Clients connect to receive live progress events regardless of which page they're on.
+    """
+    manager = get_document_upload_manager()
+    await manager.connect(websocket, document_id)
+
+    try:
+        while True:
+            # Keep connection alive — client disconnects when done
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        await manager.disconnect(websocket, document_id)
 
 
 # ── Error Handlers ──────────────────────────────────────────────────────────
@@ -241,4 +270,5 @@ if __name__ == "__main__":
         host=settings.HOST,
         port=settings.PORT,
         reload=settings.DEBUG,
+        access_log=False,
     )

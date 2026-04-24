@@ -6,18 +6,29 @@ import { cn } from '@/lib/utils'
 import type { ExamStatus, BloomLevel } from '@/lib/api'
 
 // Document & Exam Status Badge
-const statusConfig = {
+type BadgeVariant = 'secondary' | 'default' | 'destructive' | 'outline'
+
+interface StatusConfigEntry {
+  label: string
+  variant: BadgeVariant
+  className?: string
+  showSpinner?: boolean
+}
+
+type StatusConfig = Record<string, StatusConfigEntry>
+
+const statusConfig: StatusConfig = {
   // Document statuses
-  pending: { label: 'Đang chờ', variant: 'secondary' as const },
-  processing: { label: 'Đang xử lý', variant: 'default' as const, showSpinner: true },
-  completed: { label: 'Hoàn thành', variant: 'default' as const, className: 'bg-primary/10 text-primary border-primary/20' },
-  failed: { label: 'Lỗi', variant: 'destructive' as const },
-  
+  pending: { label: 'Đang chờ', variant: 'secondary' },
+  processing: { label: 'Đang xử lý', variant: 'default', showSpinner: true },
+  completed: { label: 'Hoàn thành', variant: 'default', className: 'bg-primary/10 text-primary border-primary/20' },
+  failed: { label: 'Lỗi', variant: 'destructive' },
+
   // Exam statuses
-  draft: { label: 'Nháp', variant: 'secondary' as const },
-  ready_for_review: { label: 'Chờ duyệt', variant: 'default' as const, className: 'bg-warning/10 text-warning-foreground border-warning/20' },
-  regenerating: { label: 'Đang tạo lại', variant: 'default' as const, showSpinner: true },
-  published: { label: 'Đã xuất bản', variant: 'default' as const, className: 'bg-primary/10 text-primary border-primary/20' },
+  draft: { label: 'Nháp', variant: 'secondary' },
+  ready_for_review: { label: 'Chờ duyệt', variant: 'default', className: 'bg-warning/10 text-warning-foreground border-warning/20' },
+  regenerating: { label: 'Đang tạo lại', variant: 'default', showSpinner: true },
+  published: { label: 'Đã xuất bản', variant: 'default', className: 'bg-primary/10 text-primary border-primary/20' },
 }
 
 export function StatusBadge({ 
@@ -28,9 +39,9 @@ export function StatusBadge({
   className?: string 
 }) {
   const safeStatus = typeof status === 'string' ? status : 'unknown'
-  const config = statusConfig[safeStatus as keyof typeof statusConfig] || { 
-    label: safeStatus, 
-    variant: 'secondary' as const 
+  const config = statusConfig[safeStatus] || {
+    label: safeStatus,
+    variant: 'secondary' as const,
   }
   
   return (

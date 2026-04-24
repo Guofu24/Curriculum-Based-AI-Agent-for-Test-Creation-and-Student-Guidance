@@ -15,6 +15,36 @@ from app.websocket.manager import get_connection_manager, SSEvent
 
 settings = get_settings()
 
+# In-memory fallback for HITL approvals and graph state when Redis is unavailable.
+# Key: exam_id, Value: {"approval": "approved"|"rejected"|None, "state": {...}}
+_hitl_fallback_approvals: dict[str, dict] = {}
+
+
+def set_fallback_approval(exam_id: str, value: str) -> None:
+    """Set fallback approval in memory (used when Redis is unavailable)."""
+    if exam_id not in _hitl_fallback_approvals:
+        _hitl_fallback_approvals[exam_id] = {}
+    _hitl_fallback_approvals[exam_id]["approval"] = value
+
+
+def get_fallback_approval(exam_id: str) -> str | None:
+    """Get fallback approval from memory."""
+    return _hitl_fallback_approvals.get(exam_id, {}).get("approval")
+
+
+def set_fallback_graph_state(exam_id: str, state: dict) -> None:
+    """Save graph state when pausing at HITL checkpoint (used when Redis is unavailable)."""
+    _hitl_fallback_approvals[exam_id] = {
+        "approval": None,
+        "state": state,
+    }
+
+
+def get_fallback_graph_state(exam_id: str) -> dict | None:
+    """Get saved graph state after approval."""
+    entry = _hitl_fallback_approvals.get(exam_id)
+    return entry.get("state") if entry else None
+
 
 def _build_demo_payload(
     exam_id: str | None,
@@ -244,37 +274,57 @@ def _run_async_task(
                         document_id=document_id,
                     )
 
+                # Emit blueprint if pipeline is paused (before waiting for approval)
+                # This happens when wait_for_blueprint_approval returned PENDING
+                if result.get("pipeline_paused") and result.get("blueprint"):
+                    await manager.emit(
+                        exam_id,
+                        {
+                            "type": "hitl_checkpoint",
+                            "checkpoint_id": 1,
+                            "data": {
+                                "blueprint": result.get("blueprint", []),
+                                "distribution_summary": result.get("distribution_summary", {}),
+                            },
+                        },
+                    )
+
                 if exam_id:
-                    exam_service = ExamService(db, redis_client)
-                    await exam_service.update_questions(
-                        exam_id=uuid.UUID(exam_id),
-                        questions=result.get("questions", []),
-                        cost_report=result.get("cost_report"),
-                    )
-
-                    status_val = result.get("status")
-                    is_success = (
-                        status_val == "success"
-                        or (hasattr(status_val, "value") and status_val.value == "success")
-                        or status_val == "partial"  # PARTIAL means questions were generated (with warnings)
-                    )
-
-                    if is_success:
-                        await manager.emit(
-                            exam_id,
-                            SSEvent.completed(
-                                exam_id,
-                                total_cost_usd=result.get("cost_report", {}).get("total_cost_usd"),
+                    # Only update DB and emit completion if NOT paused at a checkpoint.
+                    # If paused, the background polling task will resume the graph
+                    # and emit the final events when approval arrives.
+                    if not result.get("pipeline_paused"):
+                        if result.get("questions"):
+                            exam_service = ExamService(db, redis_client)
+                            await exam_service.update_questions(
+                                exam_id=uuid.UUID(exam_id),
+                                questions=result.get("questions", []),
+                                cost_report=result.get("cost_report"),
                             )
+
+                        status_val = result.get("status")
+                        is_success = (
+                            status_val == "success"
+                            or (hasattr(status_val, "value") and status_val.value == "success")
+                            or status_val == "partial"
                         )
-                    else:
-                        await manager.emit(
-                            exam_id,
-                            SSEvent.error(
-                                "Exam generation completed with warnings",
-                                "orchestrator"
-                            ),
-                        )
+
+                        if is_success:
+                            await manager.emit(
+                                exam_id,
+                                SSEvent.completed(
+                                    exam_id,
+                                    total_cost_usd=result.get("cost_report", {}).get("total_cost_usd"),
+                                )
+                            )
+                        else:
+                            await manager.emit(
+                                exam_id,
+                                SSEvent.error(
+                                    f"Exam generation failed: {status_val}",
+                                    "orchestrator",
+                                ),
+                            )
 
                 return {
                     "exam_id": exam_id,
@@ -285,30 +335,31 @@ def _run_async_task(
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        return loop.run_until_complete(_run())
+        try:
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
     except Exception as e:
         if exam_id:
             try:
                 # Best-effort fallback event so the frontend is not left hanging.
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                manager = get_connection_manager()
-                loop.run_until_complete(
-                    manager.emit(
-                        exam_id,
-                        SSEvent.error(str(e), "orchestrator"),
+                err_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(err_loop)
+                try:
+                    manager = get_connection_manager()
+                    err_loop.run_until_complete(
+                        manager.emit(
+                            exam_id,
+                            SSEvent.error(str(e), "orchestrator"),
+                        )
                     )
-                )
-            finally:
-                loop.close()
-                asyncio.set_event_loop(None)
+                finally:
+                    err_loop.close()
+                    asyncio.set_event_loop(None)
+            except Exception:
+                logger.error("Failed to emit error event for exam %s: %s", exam_id, e)
         raise
-    finally:
-        try:
-            loop.close()
-        except Exception:
-            pass
-        asyncio.set_event_loop(None)
 
 
 @celery_app.task(
@@ -332,13 +383,28 @@ def generate_exam_task(
     """
     Run the full multi-agent exam generation pipeline.
 
-    Steps:
-    1. Load exam record from DB
-    2. Orchestrator: execute full pipeline
-    3. Emit WebSocket events via Redis pub/sub
-    4. Save result + cost_report to DB
-    5. Update exam status
+    Idempotency: checks Redis key task:started:{exam_id} to prevent
+    duplicate execution when Celery retries the same task.
     """
+    # Idempotency guard: prevent duplicate execution on Celery retry
+    if exam_id:
+        try:
+            redis_client = get_redis_client()
+            task_key = f"task:started:{exam_id}"
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                already_running = loop.run_until_complete(redis_client.get(task_key))
+                if already_running:
+                    logger.info("Task already running for exam %s, skipping duplicate execution", exam_id)
+                    return {"status": "already_running", "exam_id": exam_id}
+                loop.run_until_complete(redis_client.set(task_key, "1", ttl=7200))
+            finally:
+                loop.close()
+                asyncio.set_event_loop(None)
+        except Exception as e:
+            logger.warning("Idempotency check failed for exam %s: %s", exam_id, e)
     # Use _run_async_task directly - it handles event loop internally
     return _run_async_task(
         exam_id=exam_id,

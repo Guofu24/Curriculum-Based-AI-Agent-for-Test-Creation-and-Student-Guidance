@@ -6,24 +6,33 @@ import redis.asyncio as redis
 
 from app.core.config import get_settings
 
-settings = get_settings()
+# Lazy pool — only created on first access to avoid connection errors at import time
+_redis_pool: "redis.ConnectionPool | None" = None
 
-# Redis connection pool
-redis_pool: redis.ConnectionPool = redis.ConnectionPool.from_url(
-    settings.REDIS_URL,
-    max_connections=20,
-    decode_responses=True,
-)
+
+def _get_pool() -> redis.ConnectionPool:
+    global _redis_pool
+    if _redis_pool is None:
+        settings = get_settings()
+        _redis_pool = redis.ConnectionPool.from_url(
+            settings.REDIS_URL,
+            max_connections=20,
+            decode_responses=True,
+        )
+    return _redis_pool
 
 
 def get_redis() -> redis.Redis:
     """Get Redis client instance."""
-    return redis.Redis(connection_pool=redis_pool)
+    return redis.Redis(connection_pool=_get_pool())
 
 
 async def close_redis() -> None:
     """Close Redis connection pool."""
-    await redis_pool.disconnect()
+    global _redis_pool
+    if _redis_pool is not None:
+        await _redis_pool.disconnect()
+        _redis_pool = None
 
 
 class RedisClient:
@@ -100,6 +109,12 @@ class RedisClient:
         return count
 
 
+_redis_client_instance: "RedisClient | None" = None
+
+
 def get_redis_client() -> RedisClient:
-    """Get Redis client wrapper."""
-    return RedisClient(get_redis())
+    """Get Redis client wrapper, reusing existing async connection."""
+    global _redis_client_instance
+    if _redis_client_instance is None:
+        _redis_client_instance = RedisClient(get_redis())
+    return _redis_client_instance

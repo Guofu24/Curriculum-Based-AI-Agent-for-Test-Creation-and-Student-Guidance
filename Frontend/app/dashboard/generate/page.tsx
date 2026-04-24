@@ -91,8 +91,9 @@ export default function GeneratePage() {
     async function fetchDocuments() {
       try {
         const response = await documentsApi.list(1, 100)
+        // Accept both 'completed' (parsing done) and 'indexed' (fully processed with embeddings)
         const completed = response.items.filter(
-          doc => doc.processing_status === 'completed'
+          doc => doc.processing_status === 'completed' || doc.processing_status === 'indexed'
         )
         setDocuments(completed)
       } catch (error) {
@@ -186,16 +187,27 @@ export default function GeneratePage() {
     }
   }
 
-  const handleApprove = async (id: string, approved: boolean, feedback?: string) => {
+  const handleApprove = async (
+    id: string,
+    approved: boolean,
+    feedback?: string,
+    checkpointId?: number,
+  ) => {
+    const cp = checkpointId ?? 1
     try {
-      if (approved) {
-        await examsApi.approveBlueprint(id)
+      if (cp === 2) {
+        // Checkpoint 2: final exam review
+        await examsApi.submitReview(id, { approved, feedback })
       } else {
-        // Backend requires feedback min 5 chars; send placeholder if user clicks without typing
-        await examsApi.rejectBlueprint(id, feedback || 'Yêu cầu tạo lại sườn đề.')
+        // Checkpoint 0 & 1: requirements / blueprint approval
+        if (approved) {
+          await examsApi.approveBlueprint(id)
+        } else {
+          await examsApi.rejectBlueprint(id, feedback || 'Yêu cầu điều chỉnh.')
+        }
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Không thể xác nhận sườn đề')
+      toast.error(err instanceof Error ? err.message : 'Có lỗi xảy ra khi xác nhận')
     }
   }
 

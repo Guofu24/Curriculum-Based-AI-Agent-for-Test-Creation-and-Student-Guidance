@@ -86,11 +86,19 @@ class ConnectionManager:
             1. store_event FIRST — event is persisted before any send
             2. send_json to local WebSocket clients
             3. redis.publish to exam:{exam_id} for multi-instance fan-out
+
+        Redis failures are fully isolated — the WebSocket send always succeeds
+        even if Redis is down.
         """
-        # Step 1: ALWAYS store before sending (G19)
-        await self.store_event(exam_id, event)
+        # Step 1: Store event in Redis (non-critical, failures are isolated)
+        if self._redis is not None:
+            try:
+                await self.store_event(exam_id, event)
+            except Exception as e:
+                logger.warning(f"emit: store_event failed (non-critical): {e}")
 
         # Step 2: Send to all connected local WebSocket clients
+        # (always try, even without Redis — this is the critical path for local dev)
         if exam_id in self.active:
             stale: list[WebSocket] = []
             for ws in self.active[exam_id]:
@@ -106,9 +114,12 @@ class ConnectionManager:
                 await self.disconnect(ws, exam_id)
 
         # Step 3: Publish to Redis for other app instances (multi-instance fan-out)
-        if self._redis:
+        if self._redis is not None:
             channel = f"exam:{exam_id}"
-            await self._redis.publish(channel, event)
+            try:
+                await self._redis.publish(channel, event)
+            except Exception as e:
+                logger.warning(f"Failed to publish to Redis channel {channel}: {e}")
 
     # ── G19: Event persistence for replay ────────────────────────────────────
 
@@ -122,7 +133,6 @@ class ConnectionManager:
 
         key = f"ws_events:{exam_id}"
         try:
-            # Use rpush to append to list, expire to auto-cleanup after 1 hour
             await self._redis.client.rpush(key, json.dumps(event, ensure_ascii=False))
             await self._redis.client.expire(key, self._EVENT_LIST_TTL)
         except Exception as e:
@@ -148,7 +158,9 @@ class ConnectionManager:
             events_raw = await self._redis.client.lrange(key, from_index, -1)
             for raw in events_raw:
                 try:
-                    await websocket.send_text(raw)
+                    # raw may be bytes or str depending on decode_responses setting
+                    text = raw.decode() if isinstance(raw, bytes) else raw
+                    await websocket.send_text(text)
                 except Exception:
                     # If send fails (client disconnected during replay), abort
                     break
@@ -260,13 +272,19 @@ _manager: Optional[ConnectionManager] = None
 
 
 def get_connection_manager() -> ConnectionManager:
-    """Get the singleton ConnectionManager with async Redis initialized."""
+    """Get the singleton ConnectionManager. Gracefully handles Redis being unavailable."""
     global _manager
     if _manager is None:
         from app.core.config import get_settings
-        from app.core.redis_client import RedisClient
+        from app.core.redis_client import RedisClient, get_redis
         settings = get_settings()
-        _manager = ConnectionManager(redis=RedisClient(async_redis.from_url(settings.REDIS_URL)))
+        # Try to get existing shared client first, fall back to direct connection
+        redis_client: RedisClient | None = None
+        try:
+            redis_client = RedisClient(get_redis())
+        except Exception:
+            pass  # Redis unavailable — manager works without it
+        _manager = ConnectionManager(redis=redis_client)
     return _manager
 
 
@@ -372,3 +390,114 @@ class SSEvent:
             "progress_percent": progress_percent,
             "message": message,
         }
+
+    # ── Document Upload Events ───────────────────────────────────────────────
+
+    @staticmethod
+    def upload_started(document_id: str, filename: str) -> dict:
+        return {
+            "type": "upload_started",
+            "document_id": document_id,
+            "filename": filename,
+        }
+
+    @staticmethod
+    def upload_progress(document_id: str, percent: int) -> dict:
+        return {
+            "type": "upload_progress",
+            "document_id": document_id,
+            "percent": percent,
+        }
+
+    @staticmethod
+    def processing_step(document_id: str, step: str, message: str, percent: int) -> dict:
+        return {
+            "type": "processing_step",
+            "document_id": document_id,
+            "step": step,
+            "message": message,
+            "percent": percent,
+        }
+
+    @staticmethod
+    def processing_completed(document_id: str, filename: str) -> dict:
+        return {
+            "type": "processing_completed",
+            "document_id": document_id,
+            "filename": filename,
+        }
+
+    @staticmethod
+    def processing_failed(document_id: str, error: str) -> dict:
+        return {
+            "type": "processing_failed",
+            "document_id": document_id,
+            "error": error,
+        }
+
+
+# ── Document Upload Connection Manager ─────────────────────────────────────────
+
+class DocumentUploadManager:
+    """
+    Manages WebSocket connections per document_id for real-time upload/processing progress.
+    Mirrors ConnectionManager but scoped to document uploads.
+    """
+
+    def __init__(self, redis: Optional[RedisClient] = None):
+        # Map: document_id -> list of WebSocket connections
+        self.active: dict[str, list[WebSocket]] = {}
+        self._redis = redis
+        self._listener_tasks: dict[str, asyncio.Task[None]] = {}
+
+    async def connect(self, websocket: WebSocket, document_id: str) -> None:
+        await websocket.accept()
+        self.active.setdefault(document_id, []).append(websocket)
+
+    async def disconnect(self, websocket: WebSocket, document_id: str) -> None:
+        connections = self.active.get(document_id, [])
+        if websocket in connections:
+            connections.remove(websocket)
+        if not connections:
+            del self.active[document_id]
+            task = self._listener_tasks.pop(document_id, None)
+            if task and not task.done():
+                task.cancel()
+
+    async def emit(self, document_id: str, event: dict) -> None:
+        """Send an event to all WebSocket clients tracking this document."""
+        if document_id not in self.active:
+            return
+
+        stale: list[WebSocket] = []
+        for ws in self.active[document_id]:
+            try:
+                if ws.client_state == WebSocketState.CONNECTED:
+                    await ws.send_json(event)
+                else:
+                    stale.append(ws)
+            except Exception:
+                stale.append(ws)
+
+        for ws in stale:
+            await self.disconnect(ws, document_id)
+
+    async def broadcast(self, document_id: str, event: dict) -> None:
+        await self.emit(document_id, event)
+
+
+_doc_manager: Optional[DocumentUploadManager] = None
+
+
+def get_document_upload_manager() -> DocumentUploadManager:
+    """Get the singleton DocumentUploadManager."""
+    global _doc_manager
+    if _doc_manager is None:
+        from app.core.redis_client import RedisClient
+        from app.core.redis_client import get_redis
+        try:
+            redis_client = RedisClient(get_redis())
+        except Exception:
+            redis_client = None
+        _doc_manager = DocumentUploadManager(redis=redis_client)
+    return _doc_manager

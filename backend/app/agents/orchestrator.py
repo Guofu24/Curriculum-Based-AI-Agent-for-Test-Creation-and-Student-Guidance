@@ -76,6 +76,7 @@ Trả về JSON:
         self.builder = BuilderAgent(redis)
         self.validator = ValidatorAgent(redis)
         self.planner = PlannerAgent()
+        self.graph = None
         self._stream_callback: StreamingCallback | None = None
         self._pending_blueprint: list[dict] = []
         self._pending_distribution: dict = {}
@@ -103,7 +104,7 @@ Trả về JSON:
         4. Has bloom_distribution AND prompt > 100 chars
         """
         signals = [
-            (user_prompt or "") > "",
+            bool(user_prompt and user_prompt.strip()),
             len(user_prompt or "") > 200,
             any(kw in (user_prompt or "") for kw in ["tập trung", "thực tế", "ưu tiên", "hạn chế", "tránh"]),
             exam_config.get("extra_instructions") not in (None, ""),
@@ -152,7 +153,13 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         document_id: str | None = None,
     ) -> dict:
         """
-        Main entry point: orchestrate the full exam generation pipeline.
+        Main entry point: orchestrate the full exam generation pipeline via LangGraph.
+
+        Uses the LangGraph StateGraph instead of the manual if/elif flow.
+        Handles HITL interrupts by running a loop:
+          1. Run graph.ainvoke() until interrupt or completion
+          2. If interrupt: save state and return pause status
+          3. Frontend calls approve_blueprint/reject_blueprint to resume
 
         Returns:
             {
@@ -164,458 +171,67 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "warnings": [...],
             }
         """
-        start_time = time.time()
-        trace_id = exam_id
-        warnings: list[str] = []
-        cost_report: dict[str, Any] = {}
+        if self.graph is None:
+            from app.agents.graph.builder import build_exam_graph
+            self.graph = build_exam_graph()
 
-        # Merge exam config — scope and document_id come from exam_config dict
-        scope = exam_config.get("scope", [])
-        doc_id = document_id or exam_config.get("document_id", "")
+        config = {"configurable": {"thread_id": exam_id}}
 
-        full_config = {
-            "scope": scope,
-            "user_prompt": user_prompt or "",
-            "extra_instructions": extra_instructions or "",
-            **exam_config,
+        initial_state = {
+            "exam_id": exam_id,
+            "user_id": user_id,
+            "document_id": document_id,
+            "exam_config": exam_config,
+            "user_prompt": user_prompt,
+            "extra_instructions": extra_instructions,
+            # NOTE: redis and db_session are NOT stored in graph state — nodes
+            # retrieve them directly via get_redis_client() / async_session_maker()
+            # to avoid msgpack serialization errors with non-serializable objects.
         }
 
-        # Step 0: Check clarity - emit clarification if needed
-        clarification = await self._check_clarity(user_prompt or "", full_config)
-        if clarification:
-            await self._emit({
-                "type": "clarification_needed",
-                "data": clarification,
-            })
-            # Return early - frontend should handle clarification flow
+        # Run the graph
+        return await self._run_graph(initial_state, config)
+
+    async def _run_graph(self, initial_state: dict, config: dict) -> dict:
+        """
+        Run the LangGraph and handle interrupts.
+
+        For non-interrupt nodes, this is a single ainvoke() call.
+        For interrupt nodes (HITL checkpoints), this loops:
+          1. Run until interrupt or completion
+          2. If interrupt: emit pipeline_paused event and return pause info
+          3. Caller (Celery task / HTTP endpoint) resumes via approve/reject API
+        """
+        from langgraph.types import Command
+        import time
+
+        result = await self.graph.ainvoke(initial_state, config)
+
+        # If the graph hit an interrupt, it pauses there
+        if result.get("__interrupt__"):
+            interrupt_type = result.get("__interrupt__", {}).get("interrupt_type", "")
+            checkpoint_id = 1 if "checkpoint_1" in str(interrupt_type) else 2
             return {
-                "exam_id": trace_id,
+                "exam_id": result.get("exam_id"),
                 "questions": [],
-                "blueprint": [],
-                "cost_report": {},
+                "blueprint": result.get("blueprint") or [],
+                "distribution_summary": result.get("distribution_summary") or {},
+                "cost_report": result.get("cost_report") or {},
                 "status": AgentStatus.RETRY_NEEDED,
-                "warnings": ["Yêu cầu chưa rõ ràng - cần làm rõ trước"],
-                "clarification": clarification,
+                "warnings": result.get("warnings", []) + [f"Pipeline paused at checkpoint {checkpoint_id}"],
+                "pipeline_paused": True,
+                "interrupt_type": interrupt_type,
             }
 
-        # Step 1: Save session to short-term memory
-        await self.short_term.save_session(
-            exam_id=trace_id,
-            user_id=user_id,
-            exam_config=full_config,
-            exam_config_original=exam_config,  # Preserve original config for edit-via-prompt and retry loops
-            topics_used=[],
-        )
-
-        # Verify exam_config_original was stored correctly
-        session = await self.short_term.load_session(trace_id, user_id)
-        if session is None:
-            warnings.append("Session not found in short-term memory — proceeding with partial context")
-        elif session.get("exam_config_original") is None:
-            warnings.append("exam_config_original not set in session — proceeding with fallback config")
-
-        # Step 2: Load long-term memory (teacher preferences)
-        teacher_prefs = {}
-        if self.long_term:
-            try:
-                prefs = await self.long_term.get_preferences(UUID(user_id))
-                if prefs:
-                    teacher_prefs = prefs
-                    warnings.append("Loaded teacher preferences from long-term memory")
-            except Exception:
-                pass
-
-        # Step 3: Determine if complex (needs Planner) or simple — G6
-        is_complex = self._is_complex_request(
-            full_config.get("user_prompt", ""), full_config
-        )
-
-        if is_complex:
-            await self._emit({
-                "type": "plan_step",
-                "message": "Yêu cầu phức tạp - đang tạo execution plan...",
-                "step": 0,
-                "total_steps": 5,
-            })
-            plan_result = await self.planner.create_plan(
-                user_request=full_config.get("user_prompt", ""),
-                exam_config=full_config,
-                trace_id=trace_id,
-            )
-            plan = plan_result.model_dump()
-            cost_report["planner"] = plan_result.token_usage.model_dump()
-        else:
-            plan = self.planner.get_default_plan()
-
-        # ─── HITL Checkpoint 0: Requirements Confirmation ───
-        rewritten_req = self._rewrite_requirements(full_config, teacher_prefs)
-        await self._emit({
-            "type": "hitl_checkpoint",
-            "checkpoint_id": 0,
-            "data": {
-                "requirements": rewritten_req,
-                "teacher_preferences": teacher_prefs,
-            },
-        })
-
-        # Step 4: Retrieve knowledge
-        await self._emit({
-            "type": "plan_step",
-            "message": "Đang truy xuất kiến thức...",
-            "step": 1,
-            "total_steps": 5,
-        })
-
-        bloom_targets = list(full_config.get("bloom_distribution", {}).keys())
-        retrieval_result = await self.retrieval.retrieve(
-            document_id=doc_id,
-            scope_chapters=scope,
-            bloom_targets=bloom_targets,
-            trace_id=trace_id,
-        )
-
-        logger.info(f"Retrieval status: {retrieval_result.status}")
-        logger.info(f"Retrieval chunks count: {len(getattr(retrieval_result, 'retrieved_chunks', []))}")
-
-        if retrieval_result.status == AgentStatus.PARTIAL:
-            warnings.append("Retrieval returned partial results")
-        elif retrieval_result.status == AgentStatus.FAILED:
-            warnings.append("Retrieval failed - proceeding with empty context")
-
-        # Extract retrieved chunks from the result
-        retrieved_chunks = []
-        if hasattr(retrieval_result, 'retrieved_chunks'):
-            retrieved_chunks = retrieval_result.retrieved_chunks
-
-        logger.info(f"retrieved_chunks passed to outline: {len(retrieved_chunks)}")
-
-        cost_report["retrieval"] = retrieval_result.token_usage.model_dump()
-
-        # Store retrieved_context + metadata in session for reject_blueprint (G8)
-        await self.short_term.save_session(
-            exam_id=trace_id,
-            user_id=user_id,
-            retrieved_context=retrieved_chunks,
-            scope=scope,
-            document_id=doc_id,
-        )
-
-        # Build allowed_concepts from retrieved chunks for ScopeGuard
-        allowed_concepts = []
-        for chunk in retrieved_chunks:
-            content = chunk.get("content", "")[:200]
-            if content:
-                allowed_concepts.append(content)
-
-        # Step 5: Create outline
-        await self._emit({
-            "type": "plan_step",
-            "message": "Đang tạo sườn đề (blueprint)...",
-            "step": 2,
-            "total_steps": 5,
-        })
-
-        # Debug: log the exact config being used for outline
-        logger.info(f"[OUTLINE DEBUG] full_config exam_type={full_config.get('exam_type')} "
-                     f"mcq_count={full_config.get('mcq_count')} "
-                     f"essay_count={full_config.get('essay_count')} "
-                     f"total_questions={full_config.get('total_questions', 'N/A')}")
-
-        outline_result = await self.outline.create_outline(
-            retrieved_context=retrieved_chunks,
-            exam_config=full_config,
-            trace_id=trace_id,
-        )
-
-        logger.info(f"Outline status: {outline_result.status}")
-        logger.info(f"Blueprint slots count: {len(getattr(outline_result, 'blueprint', []))}")
-
-        # Extract blueprint from the result
-        blueprint = []
-        if hasattr(outline_result, 'blueprint'):
-            blueprint = outline_result.blueprint
-        distribution_summary = {}
-        if hasattr(outline_result, 'distribution_summary'):
-            distribution_summary = outline_result.distribution_summary
-
-        # Debug: log blueprint composition
-        mcq_slots = [s for s in blueprint if s.get('type') != 'essay']
-        essay_slots = [s for s in blueprint if s.get('type') == 'essay']
-        logger.info(f"[OUTLINE DEBUG] Blueprint composition: "
-                    f"total={len(blueprint)}, MCQ={len(mcq_slots)}, Essay={len(essay_slots)}")
-
-        cost_report["outline"] = outline_result.token_usage.model_dump()
-
-        if outline_result.status != AgentStatus.SUCCESS:
-            warnings.append("Outline creation had issues")
-
-        # Store for HITL checkpoint
-        self._pending_blueprint = blueprint
-        self._pending_distribution = distribution_summary
-
-        # ─── HITL Checkpoint 1: Blueprint Review — PAUSE, wait for approval ───
-        await self._emit({
-            "type": "hitl_checkpoint",
-            "checkpoint_id": 1,
-            "data": {
-                "blueprint": blueprint,
-                "distribution_summary": distribution_summary,
-            },
-        })
-        # Give the WebSocket emit a chance to actually send before polling
-        await asyncio.sleep(0.5)
-
-        if not blueprint:
-            warnings.append("Blueprint is empty - stopping generation")
-            return {
-                "exam_id": trace_id,
-                "questions": [],
-                "blueprint": [],
-                "cost_report": cost_report,
-                "status": AgentStatus.FAILED,
-                "warnings": warnings,
-            }
-
-        # NOTE: Auto-approve is DISABLED. The pipeline pauses at HITL Checkpoint 1
-        # until the teacher manually approves or rejects via:
-        #   POST /api/v1/exams/{id}/approve-blueprint
-        #   POST /api/v1/exams/{id}/reject-blueprint
-        #
-        # NEVER enable auto-approve — it defeats the entire purpose of HITL Checkpoint 1.
-        # The _wait_for_blueprint_approval() poll loop below will correctly wait
-        # because the Redis key was never set (we removed the await self.redis.set line).
-
-        # Poll Redis for HITL approval (frontend sets this via approve_blueprint)
-        approved = await self._wait_for_blueprint_approval(trace_id, timeout_seconds=1800)
-        if not approved:
-            await self._emit({
-                "type": "pipeline_paused",
-                "checkpoint_id": 1,
-                "message": "Chờ phê duyệt blueprint...",
-            })
-            return {
-                "exam_id": trace_id,
-                "questions": [],
-                "blueprint": blueprint,
-                "distribution_summary": distribution_summary,
-                "cost_report": cost_report,
-                "status": AgentStatus.RETRY_NEEDED,
-                "warnings": warnings + ["Blueprint chưa được phê duyệt - đang chờ"],
-                "checkpoint": 1,
-            }
-
-        # Step 6: Build questions
-        await self._emit({
-            "type": "plan_step",
-            "message": "Đang sinh câu hỏi...",
-            "step": 3,
-            "total_steps": 5,
-        })
-
-        session = await self.short_term.load_session(trace_id, user_id)
-        topics_used = session.get("topics_used", []) if session else []
-
-        builder_result = await self.builder.build(
-            blueprint=blueprint,
-            retrieved_context=retrieved_chunks,
-            topics_used=topics_used,
-            allowed_concepts=allowed_concepts,
-            scope_chapters=scope,
-            trace_id=trace_id,
-        )
-
-        logger.info(f"Builder status: {builder_result.status}")
-        logger.info(f"Builder questions count: {len(getattr(builder_result, 'questions', []))}")
-
-        # Extract questions from the result
-        questions = []
-        if hasattr(builder_result, 'questions'):
-            questions = builder_result.questions
-        elif hasattr(builder_result, 'generated_questions'):
-            questions = builder_result.generated_questions
-
-        logger.info(f"Final questions count before validator: {len(questions)}")
-
-        cost_report["builder"] = builder_result.token_usage.model_dump()
-
-        if builder_result.status != AgentStatus.SUCCESS:
-            warnings.append("Builder had issues generating questions")
-
-        # Update short-term memory with topics
-        if questions:
-            new_topics = [q.get("topic_hint", "") for q in questions if q.get("topic_hint")]
-            topics_used = list(set(topics_used + new_topics))
-            await self.short_term.update_topics(trace_id, user_id, topics_used)
-
-        # Emit individual question events for streaming
-        for q in questions:
-            await self._emit({
-                "type": "question_generated",
-                "question_id": q.get("question_id", ""),
-                "question": q,
-            })
-
-        # Step 7: Validate
-        await self._emit({
-            "type": "plan_step",
-            "message": "Đang kiểm tra đề...",
-            "step": 4,
-            "total_steps": 5,
-        })
-
-        validation_result = await self.validator.validate(
-            questions=questions,
-            exam_config=full_config,
-            retrieved_context=retrieved_chunks,
-            trace_id=trace_id,
-        )
-
-        cost_report["validator"] = validation_result.token_usage.model_dump()
-
-        # Extract issues from validation result
-        issues = []
-        if hasattr(validation_result, 'issues'):
-            issues = validation_result.issues
-        validation_passed = validation_result.status == AgentStatus.SUCCESS
-
-        # Retry loop (max 3)
-        retry_count = await self.short_term.get_retry_count(trace_id, user_id)
-        max_retries = settings.AGENT_MAX_VALIDATION_RETRIES
-
-        while (
-            validation_result.status in [AgentStatus.RETRY_NEEDED, AgentStatus.PARTIAL]
-            and retry_count < max_retries
-        ):
-            # G9: Load issues from Redis (survives Celery worker restarts)
-            issues = await self.short_term.load_retry_issues(trace_id)
-            if not issues:
-                break  # No issues to retry on
-
-            retry_count += 1
-            await self.short_term.increment_retry(trace_id, user_id)
-            warnings.append(f"Validation issues found - retry {retry_count}/{max_retries}")
-
-            await self._emit({
-                "type": "plan_step",
-                "message": f"Đang sửa câu hỏi (retry {retry_count}/{max_retries})...",
-                "step": 4,
-                "total_steps": 5,
-            })
-
-            # Emit the issues being fixed so the frontend can display them
-            await self._emit({
-                "type": "validation_result",
-                "passed": False,
-                "issues_count": len(issues),
-                "issues": issues,
-            })
-
-            # Filter blueprint to exclude already-good slots
-            bad_question_ids = {issue["question_id"] for issue in issues}
-            filtered_blueprint = [s for s in blueprint if s.get("question_id") not in bad_question_ids]
-
-            # Regenerate only the bad slots
-            builder_result = await self.builder.build(
-                blueprint=filtered_blueprint,
-                retrieved_context=retrieved_chunks,
-                topics_used=topics_used,
-                allowed_concepts=allowed_concepts,
-                scope_chapters=scope,
-                trace_id=f"{trace_id}_retry_{retry_count}",
-            )
-
-            retry_questions = []
-            if hasattr(builder_result, 'questions'):
-                retry_questions = builder_result.questions
-            elif hasattr(builder_result, 'generated_questions'):
-                retry_questions = builder_result.generated_questions
-
-            # Replace bad questions with new ones
-            new_q_dict = {q.get("question_id"): q for q in retry_questions}
-            updated_questions = []
-            for q in questions:
-                qid = q.get("question_id")
-                if qid in bad_question_ids and qid in new_q_dict:
-                    updated_questions.append(new_q_dict[qid])
-                else:
-                    updated_questions.append(q)
-            questions = updated_questions
-
-            validation_result = await self.validator.validate(
-                questions=questions,
-                exam_config=full_config,
-                retrieved_context=retrieved_chunks,
-                trace_id=f"{trace_id}_retry_{retry_count}_validate",
-            )
-
-            if hasattr(validation_result, 'issues'):
-                issues = validation_result.issues
-            else:
-                issues = []
-
-        if validation_result.status != AgentStatus.SUCCESS:
-            warnings.append("Validation did not pass after max retries")
-
-        # Emit validation result
-        await self._emit({
-            "type": "validation_result",
-            "passed": validation_result.status == AgentStatus.SUCCESS,
-            "issues_count": len(issues),
-            "issues": issues,
-        })
-
-        # ─── HITL Checkpoint 2: Full Review ───
-        await self._emit({
-            "type": "hitl_checkpoint",
-            "checkpoint_id": 2,
-            "data": {
-                "questions": questions,
-                "validation_passed": validation_result.status == AgentStatus.SUCCESS,
-                "issues": issues,
-                "warnings": warnings,
-            },
-        })
-
-        # Calculate total cost
-        total_tokens = sum(
-            (cost_report.get(k, {}).get("total_tokens", 0) or 0)
-            for k in ["retrieval", "outline", "builder", "validator"]
-        )
-        total_cost = sum(
-            (cost_report.get(k, {}).get("estimated_cost_usd", 0) or 0)
-            for k in ["retrieval", "outline", "builder", "validator"]
-        )
-
-        cost_report["total_tokens"] = total_tokens
-        cost_report["total_cost_usd"] = round(total_cost, 6)
-
-        # ─── HITL Checkpoint 3: Export Preview ───
-        await self._emit({
-            "type": "hitl_checkpoint",
-            "checkpoint_id": 3,
-            "data": {
-                "exam_id": trace_id,
-                "blueprint": blueprint,
-                "distribution_summary": distribution_summary,
-                "questions": questions,
-                "cost_report": cost_report,
-            },
-        })
-
-        await self._emit({
-            "type": "completed",
-            "exam_id": trace_id,
-            "status": "completed",
-        })
-
+        # Graph completed normally
         return {
-            "exam_id": trace_id,
-            "questions": questions,
-            "blueprint": blueprint,
-            "distribution_summary": distribution_summary,
-            "cost_report": cost_report,
-            "status": AgentStatus.SUCCESS if validation_result.status == AgentStatus.SUCCESS else AgentStatus.PARTIAL,
-            "warnings": warnings,
+            "exam_id": result.get("exam_id"),
+            "questions": result.get("questions") or [],
+            "blueprint": result.get("blueprint") or [],
+            "distribution_summary": result.get("distribution_summary") or {},
+            "cost_report": result.get("cost_report") or {},
+            "status": result.get("pipeline_status") == "completed" and AgentStatus.SUCCESS or AgentStatus.PARTIAL,
+            "warnings": result.get("warnings", []),
         }
 
     def _rewrite_requirements(self, exam_config: dict, teacher_prefs: dict) -> dict:
@@ -671,12 +287,15 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         # Quick check: if already approved (e.g. from a previous call), return True
         key = f"hitl:approved:{exam_id}:1"
         val = await self.redis.get(key)
-        if val == "true":
-            logger.info(f"Blueprint already approved for exam {exam_id}")
-            return True
-        if val == "rejected":
-            logger.info(f"Blueprint already rejected for exam {exam_id}")
-            return False
+        if val is not None:
+            normalized = val.decode() if isinstance(val, bytes) else str(val)
+            normalized = normalized.strip().lower()
+            if normalized == "true":
+                logger.info(f"Blueprint already approved for exam {exam_id}")
+                return True
+            if normalized == "rejected":
+                logger.info(f"Blueprint already rejected for exam {exam_id}")
+                return False
 
         # Subscribe to the exam channel and wait for an approval/rejection message
         try:
@@ -709,12 +328,15 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
 
                 # Also check Redis key periodically (belt-and-suspenders)
                 val = await self.redis.get(key)
-                if val == "true":
-                    logger.info(f"Blueprint approved via Redis key for exam {exam_id}")
-                    break
-                if val == "rejected":
-                    logger.info(f"Blueprint rejected via Redis key for exam {exam_id}")
-                    return False
+                if val is not None:
+                    normalized = val.decode() if isinstance(val, bytes) else str(val)
+                    normalized = normalized.strip().lower()
+                    if normalized == "true":
+                        logger.info(f"Blueprint approved via Redis key for exam {exam_id}")
+                        break
+                    if normalized == "rejected":
+                        logger.info(f"Blueprint rejected via Redis key for exam {exam_id}")
+                        return False
 
             await sub.unsubscribe(channel)
             await sub.aclose()
@@ -725,16 +347,23 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             interval = 2.0
             while elapsed < timeout_seconds:
                 val = await self.redis.get(key)
-                if val == "true":
-                    return True
-                if val == "rejected":
-                    return False
+                if val is not None:
+                    normalized = val.decode() if isinstance(val, bytes) else str(val)
+                    normalized = normalized.strip().lower()
+                    if normalized == "true":
+                        return True
+                    if normalized == "rejected":
+                        return False
                 await asyncio.sleep(interval)
                 elapsed += interval
 
         # Check final state
         val = await self.redis.get(key)
-        return val == "true"
+        if val is not None:
+            normalized = val.decode() if isinstance(val, bytes) else str(val)
+            normalized = normalized.strip().lower()
+            return normalized == "true"
+        return False
 
     async def reject_blueprint(
         self,
@@ -817,7 +446,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 extra_instructions=original_config.get("extra_instructions", ""),
             )
         except Exception:
-            pass  # Non-blocking
+            logger.error("Failed to dispatch Celery task for reject_blueprint, exam_id=%s", exam_id)
 
         return {
             "status": "rejected_with_feedback",

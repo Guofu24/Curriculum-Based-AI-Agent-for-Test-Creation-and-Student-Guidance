@@ -202,7 +202,7 @@ class CurriculumTracer:
 
                     # Compute cost
                     from app.observability.cost import calculate_cost
-                    model = kwargs.get("model", settings.LLM_MODEL_STRONG)
+                    model = kwargs.get("model", settings.LLM_MODEL_STRONG_DEFAULT)
                     cost_usd = calculate_cost(
                         model,
                         token_usage_data.get("prompt_tokens", 0),

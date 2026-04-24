@@ -612,7 +612,11 @@ function getWebSocketUrl(examId: string): string {
     return `${wsBaseUrl}/${examId}`
   }
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${window.location.host}/ws/exam/${examId}`
+  const hostname = window.location.hostname
+  // In dev (port 3000/3001/...), always route to backend on port 8000.
+  // In production, use the same host as the page.
+  const backendPort = (hostname === 'localhost' || hostname === '127.0.0.1') ? '8000' : window.location.port
+  return `${protocol}//${hostname}:${backendPort}/ws/exam/${examId}`
 }
 
 export function createExamWebSocket(
@@ -621,7 +625,7 @@ export function createExamWebSocket(
   onError?: (error: Event) => void,
   onClose?: () => void
 ): WebSocket {
-  let ws: WebSocket
+  let ws: WebSocket | undefined
   let reconnectAttempts = 0
   const MAX_RECONNECT_ATTEMPTS = 5
   const BASE_RECONNECT_DELAY = 1000
@@ -662,7 +666,7 @@ export function createExamWebSocket(
   }
 
   connect()
-  return ws
+  return ws!
 }
 
 // ============ PARTIAL REGENERATE API (FIX 10) ============
@@ -677,4 +681,138 @@ export type PartialEditAction =
 export interface PartialRegenerateRequest {
   exam_id: string
   edits: PartialEditAction[]
+}
+
+// ============ DOCUMENT UPLOAD WEBSOCKET HELPERS ============
+
+export type DocumentUploadEventType =
+  | 'upload_progress'
+  | 'processing_step'
+  | 'processing_completed'
+  | 'processing_failed'
+
+export interface DocumentUploadEvent {
+  type: DocumentUploadEventType
+  document_id: string
+  percent?: number
+  step?: string
+  message?: string
+  filename?: string
+  error?: string
+}
+
+function getDocumentWsUrl(documentId: string): string {
+  if (typeof window === 'undefined') {
+    return `ws://localhost:8000/ws/document/${documentId}`
+  }
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const hostname = window.location.hostname
+  const port = (hostname === 'localhost' || hostname === '127.0.0.1') ? '8000' : window.location.port
+  return `${protocol}//${hostname}:${port}/ws/document/${documentId}`
+}
+
+export function createDocumentUploadWebSocket(
+  documentId: string,
+  onEvent: (event: DocumentUploadEvent) => void,
+  onError?: (error: Event) => void,
+  onClose?: () => void
+): WebSocket | null {
+  if (typeof window === 'undefined') return null
+
+  let ws: WebSocket | undefined
+  try {
+    const wsUrl = getDocumentWsUrl(documentId)
+    ws = new WebSocket(wsUrl)
+  } catch {
+    return null
+  }
+
+  ws.onmessage = async (event) => {
+    try {
+      const raw = event.data instanceof Blob
+        ? await event.data.text()
+        : event.data
+      const data = JSON.parse(raw) as DocumentUploadEvent
+      onEvent(data)
+    } catch (e) {
+      console.error('Failed to parse upload WebSocket message:', e)
+    }
+  }
+
+  ws.onerror = (error) => {
+    console.error('Document upload WebSocket error:', error)
+    onError?.(error)
+  }
+
+  ws.onclose = (event) => {
+    onClose?.()
+    if (event.code !== 1000) {
+      console.log('Document upload WebSocket closed unexpectedly:', event.code)
+    }
+  }
+
+  return ws
+}
+
+export interface UploadProgress {
+  documentId: string
+  filename: string
+  uploadPercent: number
+  processingStep: string
+  processingPercent: number
+  message: string
+  status: 'uploading' | 'processing' | 'completed' | 'failed'
+}
+
+export function uploadWithProgress(
+  file: File,
+  onProgress: (uploadPercent: number) => void
+): Promise<Document> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        const percent = Math.round((e.loaded / e.total) * 100)
+        onProgress(percent)
+      }
+    })
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const doc = JSON.parse(xhr.responseText) as Document
+          resolve(doc)
+        } catch {
+          reject(new Error('Invalid response from server'))
+        }
+      } else {
+        try {
+          const err = JSON.parse(xhr.responseText)
+          reject(new Error(err.detail || 'Upload thất bại'))
+        } catch {
+          reject(new Error(`Upload thất bại (status ${xhr.status})`))
+        }
+      }
+    })
+
+    xhr.addEventListener('error', () => {
+      reject(new Error('Upload thất bại — không thể kết nối server'))
+    })
+
+    xhr.addEventListener('abort', () => {
+      reject(new Error('Upload bị hủy'))
+    })
+
+    const formData = new FormData()
+    formData.append('file', file)
+
+    const token = getToken()
+    xhr.open('POST', `${API_BASE_URL}/documents/upload`)
+    if (token) {
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+    }
+
+    xhr.send(formData)
+  })
 }

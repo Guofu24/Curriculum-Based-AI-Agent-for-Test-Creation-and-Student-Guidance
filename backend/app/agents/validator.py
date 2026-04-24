@@ -257,6 +257,12 @@ Output format:
 
         except json.JSONDecodeError as e:
             warnings.append(f"Failed to parse validation result: {e}")
+            # Bug-015 fix: save skill-found issues even when LLM parsing fails
+            if self.short_term and issues:
+                try:
+                    await self.short_term.save_retry_issues(exam_id, issues)
+                except Exception:
+                    pass
             return ValidatorOutput(
                 status=AgentStatus.PARTIAL,
                 agent_name="validator",
@@ -265,7 +271,7 @@ Output format:
                 warnings=warnings,
                 trace_id=trace_id,
                 validation_passed=False,
-                issues=[],
+                issues=issues,
                 bloom_compliance={},
                 scope_violations=[],
                 approved_for_publish=False,
@@ -273,6 +279,12 @@ Output format:
 
         except Exception as e:
             warnings.append(f"Validation failed: {str(e)}")
+            # Bug-015 fix: save skill-found issues even when validation throws unexpected error
+            if self.short_term and issues:
+                try:
+                    await self.short_term.save_retry_issues(exam_id, issues)
+                except Exception:
+                    pass
             return ValidatorOutput(
                 status=AgentStatus.PARTIAL,
                 agent_name="validator",
@@ -281,7 +293,7 @@ Output format:
                 warnings=warnings,
                 trace_id=trace_id,
                 validation_passed=False,
-                issues=[],
+                issues=issues,
                 bloom_compliance={},
                 scope_violations=[],
                 approved_for_publish=False,

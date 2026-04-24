@@ -1,90 +1,565 @@
-"""Document parser: Marker (PDF), python-docx, python-pptx."""
+"""Document parser: Gemini (priority 1, parallel + threading), Marker (priority 2), PyMuPDF (fallback)."""
 
+import asyncio
+import time
 import io
-from typing import Literal
+import logging
+import os
+import re
+import threading
+import random
+import datetime
+from typing import Callable
 
-from fastapi import UploadFile
+import fitz
+
+_log = logging.getLogger("document.parser")
+
+# ─── JobCoordinator — Giống hệt test_api.py ────────────────────────────────
+
+class ParserTaskStatus:
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    FAILED_LLM = "FAILED_LLM"
+    FALLBACK_MARKER = "FALLBACK_MARKER"
+    FALLBACK_PYMUPDF = "FALLBACK_PYMUPDF"
+    SUCCESS = "SUCCESS"
 
 
-class DocumentParseError(Exception):
-    """Raised when document parsing fails."""
+# Giống y hệt test_api.py
+MAX_LLM_RETRIES = 3
+GEMINI_MODEL = "gemma-4-31b-it"
+CHUNK_SIZE = 10
+
+
+class ParserChunkTask:
+    """Đại diện cho một Chunk độc lập, có 'sinh mệnh' riêng."""
+    def __init__(self, index: int, page_start: int, page_end: int, chunk_path: str):
+        self.index = index
+        self.page_start = page_start
+        self.page_end = page_end
+        self.chunk_path = chunk_path
+        self.status = ParserTaskStatus.PENDING
+        self.llm_retries = 0
+        self.content: str | None = None
+        self.error: str | None = None
+
+
+class ParserJobCoordinator:
+    """Quản đốc phân phối công việc và theo dõi State toàn cục — giống JobCoordinator trong test_api.py."""
+    def __init__(self, tasks: list):
+        self.tasks = tasks
+        self.pending_queue = tasks.copy()
+        self.retry_queue: list = []
+        self.lock = threading.Lock()
+        self.completed_count = 0
+        self.total_tasks = len(tasks)
+
+    def is_done(self) -> bool:
+        with self.lock:
+            return self.completed_count >= self.total_tasks
+
+    def get_task(self, is_fallback_key: bool) -> ParserChunkTask | None:
+        with self.lock:
+            if len(self.retry_queue) > 0:
+                task = self.retry_queue.pop(0)
+                task.status = ParserTaskStatus.PROCESSING
+                return task
+
+            if not is_fallback_key and len(self.pending_queue) > 0:
+                task = self.pending_queue.pop(0)
+                task.status = ParserTaskStatus.PROCESSING
+                return task
+
+            return None
+
+    def report_success(self, task: ParserChunkTask, content: str, elapsed_time: float):
+        with self.lock:
+            task.status = ParserTaskStatus.SUCCESS
+            task.content = content
+            self.completed_count += 1
+            _log.info(
+                "  [COORD] ✅ Chunk %d (trang %d-%d) XONG trong %.1fs! (Tổng: %d/%d)",
+                task.index, task.page_start + 1, task.page_end,
+                elapsed_time, self.completed_count, self.total_tasks,
+            )
+
+    def report_fail(self, task: ParserChunkTask) -> bool:
+        with self.lock:
+            task.llm_retries += 1
+            if task.llm_retries < MAX_LLM_RETRIES:
+                task.status = ParserTaskStatus.FAILED_LLM
+                self.retry_queue.append(task)
+                _log.warning(
+                    "  [COORD] ⚠️ Chunk %d fail lần %d — đẩy về queue cứu hộ",
+                    task.index, task.llm_retries,
+                )
+                return True
+            else:
+                _log.error(
+                    "  [COORD] 🚑 Chunk %d HẾT HP — đưa vào Marker/PyMuPDF fallback",
+                    task.index,
+                )
+                self._execute_deep_fallback(task)
+                return False
+
+    def _execute_deep_fallback(self, task: ParserChunkTask):
+        task.status = ParserTaskStatus.FALLBACK_MARKER
+        _log.info("    -> Fallback Marker cho Chunk %d (%d-%d)...",
+                  task.index, task.page_start + 1, task.page_end)
+
+        import httpx
+        try:
+            from app.core.config import get_settings
+            marker_url = get_settings().QWEN_VISION_BASE_URL
+        except Exception:
+            marker_url = None
+
+        marker_success = False
+        if marker_url:
+            try:
+                with httpx.Client(timeout=120.0) as client:
+                    with open(task.chunk_path, "rb") as f:
+                        resp = client.post(
+                            f"{marker_url}/parse-pdf",
+                            files={"file": f},
+                        )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    task.content = data.get("markdown", "")
+                    task.status = ParserTaskStatus.SUCCESS
+                    with self.lock:
+                        self.completed_count += 1
+                    _log.info("    -> Marker thành công cho Chunk %d", task.index)
+                    return
+            except Exception as e:
+                _log.warning("    -> Marker fail cho Chunk %d: %s", task.index, e)
+
+        task.status = ParserTaskStatus.FALLBACK_PYMUPDF
+        _log.info("    -> PyMuPDF fallback cho Chunk %d (%d-%d)...",
+                  task.index, task.page_start + 1, task.page_end)
+        try:
+            doc = fitz.open(task.chunk_path)
+            task.content = "\n".join(page.get_text() for page in doc)
+            doc.close()
+        except Exception as e:
+            task.content = f"PyMuPDF error: {e}"
+            task.error = str(e)
+
+        task.status = ParserTaskStatus.SUCCESS
+        with self.lock:
+            self.completed_count += 1
+
+
+# ─── Gemini API Call — Dùng genai SDK giống test_api.py ────────────────────
+
+class KeyUnavailable(Exception):
+    """Key bị dead (400/403) — không retry bằng key này."""
     pass
 
 
-async def parse_document(file_bytes: bytes, file_type: str) -> dict:
-    """
-    Parse document and extract text with heading structure.
-    Returns dict: {"content": markdown_str, "page_count": int}.
-    """
-    if file_type == "pdf":
-        return await _parse_pdf(file_bytes)
-    elif file_type == "docx":
-        return _parse_docx(file_bytes)
-    elif file_type == "pptx":
-        return _parse_pptx(file_bytes)
-    else:
-        raise DocumentParseError(f"Unsupported file type: {file_type}")
+class QuotaExceeded(Exception):
+    """Key bị quota tạm thời (429) — retry được sau."""
+    def __init__(self, delay: float | None):
+        self.delay = delay
+        super().__init__(f"Quota exceeded, retry after {delay}s" if delay else "Quota exceeded")
 
 
-async def _parse_pdf(file_bytes: bytes) -> dict:
-    """
-    Parse PDF using Marker (GPU-accelerated).
-    Falls back to PyMuPDF (CPU-only) on failure.
-    Returns dict: {"content": markdown_str, "page_count": int}.
-    """
-    import logging
-    _log = logging.getLogger("document.parser")
+def _build_prompt() -> str:
+    return (
+        "Bạn là một chuyên gia số hóa tài liệu (Document Digitization Expert) với nhiệm vụ chuyển đổi PDF thành PURE MARKDOWN. "
+        "Bạn phải tái tạo lại tài liệu một cách hoàn hảo, thông minh và sạch sẽ nhất theo các quy tắc sau:\n\n"
 
-    if not file_bytes:
-        _log.error("PDF bytes are empty or None — cannot parse")
-        raise DocumentParseError("PDF file bytes are empty")
+        "1. LỌC RÁC (NOISE REDUCTION - TỐI QUAN TRỌNG): "
+        "Tuyệt đối KHÔNG trích xuất các thông tin không mang giá trị nội dung như: Số trang, Tiêu đề đầu trang (Header), "
+        "Chân trang (Footer), Watermark, hoặc các ghi chú in ấn lặp lại ở mép giấy.\n\n"
 
-    # Try marker first (requires GPU for best quality)
+        "2. TÁI TẠO CẤU TRÚC (STRUCTURE & TREE): "
+        "Nhận diện chính xác các cấp độ Tiêu đề (Heading) dựa trên kích thước chữ, độ đậm và ngữ cảnh. "
+        "Sử dụng chuẩn Markdown (# cho H1, ## cho H2, ### cho H3...). "
+        "Đảm bảo phân cấp logic của tài liệu (Document Tree) được giữ nguyên vẹn. "
+        "Nếu gặp Mục lục (Table of Contents), hãy format nó thành list có thụt lề chuẩn xác.\n\n"
+
+        "3. VĂN BẢN & CẤU TRÚC: Trích xuất 100% văn bản, không tóm tắt, không giải thích, không bỏ sót trang nào. "
+        "Giữ nguyên ngôn ngữ gốc. Giữ đúng phân cấp tiêu đề Markdown (#, ##, ###).\n"
+
+        "4. NỐI VĂN BẢN ĐỨT GÃY: "
+        "Nếu một câu bị ngắt dòng, ngắt đoạn do xuống dòng hoặc sang trang mới, hãy thông minh tự động NỐI CHÚNG LẠI "
+        "thành một câu liền mạch, tránh việc xuống dòng vô nghĩa giữa một câu.\n\n"
+
+        "5. TOÁN HỌC & BẢNG BIỂU: "
+        "Mọi công thức toán học phải dùng format LaTeX (dùng $$...$$ cho công thức độc lập, $...$ cho công thức trong dòng). "
+        "Bảng biểu (Table) phải được format đúng chuẩn Markdown, tuyệt đối không làm mất cột hay xô lệch dữ liệu.\n\n"
+
+        "6. XỬ LÝ HÌNH ẢNH & BIỂU ĐỒ (TỐI QUAN TRỌNG): Tuyệt đối KHÔNG dùng các từ giữ chỗ như [Hình ảnh] hay ![image.png]. "
+        "Mọi hình ảnh/sơ đồ phải được chuyển thành một đoạn văn mô tả cực kỳ chi tiết đặt trong cú pháp ![Mô tả: ...]. Cụ thể:\n"
+        "   - Nếu là BIỂU ĐỒ (Chart/Graph): Nêu rõ loại biểu đồ, trục X/Y biểu diễn gì, xu hướng chính, và trích xuất các con số/điểm dữ liệu quan trọng nhất trên đó.\n"
+        "   - Nếu là SƠ ĐỒ (Diagram): Mô tả các khối (blocks), mũi tên luồng đi (từ đâu sang đâu), và text ghi chú trên từng khối.\n"
+        "   - Nếu là ẢNH MINH HỌA: Tả rõ chủ thể, bối cảnh và ý nghĩa của bức ảnh.\n\n"
+
+        "7. RÀNG BUỘC ĐẦU RA: Trả về CHỈ VÀ DUY NHẤT mã Markdown. KHÔNG có câu chào hỏi (VD: 'Đây là kết quả...'), "
+        "KHÔNG có Markdown code block (```markdown) bao quanh toàn bộ bài. Bắt đầu ngay bằng nội dung tài liệu."
+    )
+
+
+def _call_gemini_sync(
+    api_key: str,
+    chunk_path: str,
+    model_name: str,
+    chunk_pages: str,
+) -> str:
+    """
+    Gọi Gemini bằng genai SDK — GIỐNG HỆT test_api.py.
+    SDK tự động: upload → poll → generate → cleanup.
+    Tự retry transient errors (429, 500, 503).
+    - Key die (400/403) → raise KeyUnavailable
+    - Quota (429) → raise QuotaExceeded
+    - Polling stuck > 60s → raise Exception (để retry)
+    """
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+    poll_start = time.time()
+    uploaded_file_name: str | None = None
+
     try:
-        from marker.converters.pdf import PdfConverter
-        from marker.models import load_all_models
+        # 1. Upload file (SDK tự retry transient errors)
+        pdf_file = client.files.upload(file=chunk_path)
+        uploaded_file_name = pdf_file.name
 
-        _log.info("Parsing PDF with marker-pdf (%d bytes)", len(file_bytes))
-        models = load_all_models()
-        converter = PdfConverter(artifact_dict=models, batch_idx=0)
-        rendered = converter(file_bytes)
-        content = rendered.markdown
-        page_count = (
-            rendered.page_count
-            if hasattr(rendered, "page_count") and rendered.page_count
-            else _count_pdf_pages(file_bytes)
+        # 2. Poll cho đến khi file ready (max 60s)
+        while pdf_file.state.name == "PROCESSING":
+            if time.time() - poll_start > 60:
+                raise Exception("File polling timed out after 60s (still PROCESSING)")
+            time.sleep(3)
+            pdf_file = client.files.get(name=pdf_file.name)
+
+        # 3. Generate content (SDK tự retry transient errors)
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
+                types.Part.from_uri(
+                    file_uri=pdf_file.uri,
+                    mime_type="application/pdf",
+                ),
+                _build_prompt(),
+            ]
         )
-        _log.info("Marker parsed %d pages, content length=%d", page_count, len(content))
-        return {"content": content, "page_count": page_count}
 
-    except Exception as marker_err:
-        _log.warning("Marker failed (%s), falling back to PyMuPDF", marker_err)
-        # Ensure we pass a FRESH bytes object — not a consumed stream
-        fresh_bytes = bytes(file_bytes)
-        return _parse_pdf_pymupdf(fresh_bytes)
+        # 4. Cleanup file trên server
+        try:
+            client.files.delete(name=pdf_file.name)
+        except Exception:
+            pass
+
+        return response.text or ""
+
+    except Exception as e:
+        err_msg = str(e)
+        err_lower = err_msg.lower()
+
+        # Cleanup file đã upload nếu có
+        if uploaded_file_name:
+            try:
+                client.files.delete(name=uploaded_file_name)
+            except Exception:
+                pass
+
+        # Phân loại lỗi
+        if "429" in err_msg or "quota" in err_lower or "rate limit" in err_lower:
+            raise QuotaExceeded(None) from e
+        if "403" in err_msg or "denied" in err_lower or "permission" in err_lower:
+            raise KeyUnavailable(err_msg) from e
+        if "400" in err_msg or "invalid" in err_lower or "expired" in err_lower:
+            raise KeyUnavailable(err_msg) from e
+
+        # Polling timeout hoặc 500 internal → raise thường để worker retry
+        if "timed out" in err_lower or "500" in err_msg or "internal" in err_lower:
+            raise Exception(err_msg) from e
 
 
-def _parse_pdf_pymupdf(file_bytes: bytes) -> dict:
-    """Fallback PDF parser using PyMuPDF (CPU-only)."""
-    import fitz  # PyMuPDF
+# ─── Thread Worker — mỗi thread = 1 API key cố định ─────────────────────────
 
+
+def _thread_worker(
+    worker_id: str,
+    api_key: str,
+    is_fallback: bool,
+    coordinator: ParserJobCoordinator,
+    model_name: str,
+    progress_callback: Callable | None = None,
+):
+    """
+    Mỗi Worker ôm 1 API Key, liên tục hỏi Coordinator xem có việc không.
+    Giống hệt worker_thread trong test_api.py.
+    Sau mỗi chunk thành công → gọi callback để broadcast live % đến frontend.
+    """
+    role = "FALLBACK" if is_fallback else "PRIMARY"
+    time.sleep(random.uniform(0.5, 5.0))  # Stagger startup
+
+    while not coordinator.is_done():
+        task = coordinator.get_task(is_fallback_key=is_fallback)
+
+        if task is None:
+            time.sleep(2)
+            continue
+
+        chunk_pages = f"{task.page_start + 1}-{task.page_end}"
+        _log.info("[%s KEY %s] Nhận Chunk %d (Trang %s)", role, worker_id, task.index, chunk_pages)
+
+        process_start = time.time()
+        try:
+            content = _call_gemini_sync(api_key, task.chunk_path, model_name, chunk_pages)
+            process_end = time.time()
+            elapsed_time = process_end - process_start
+            coordinator.report_success(task, content, elapsed_time)
+
+            # Broadcast live progress % sau mỗi chunk thành công
+            if progress_callback:
+                completed = coordinator.completed_count
+                total = coordinator.total_tasks
+                percent = min(19, int(19.0 * completed / total))
+                progress_callback("parse", f"Xong chunk {completed}/{total}", percent)
+
+        except KeyUnavailable as e:
+            _log.warning("[%s KEY %s] ❌ Chunk %d: DEAD key — %s",
+                         role, worker_id, task.index, str(e)[:80])
+            coordinator.report_fail(task)
+            time.sleep(15)
+
+        except QuotaExceeded as e:
+            cooldown_time = 45 + (task.llm_retries * 15)
+            _log.warning("[%s KEY %s] ❌ Chunk %d: Quota — nghỉ %.0fs",
+                         role, worker_id, task.index, cooldown_time)
+            coordinator.report_fail(task)
+            time.sleep(cooldown_time)
+
+        except Exception as e:
+            err_msg = str(e)[:80]
+            _log.warning("[%s KEY %s] ❌ Chunk %d lỗi: %s",
+                         role, worker_id, task.index, err_msg)
+            coordinator.report_fail(task)
+
+            if "429" in err_msg or "quota" in err_msg.lower():
+                cooldown_time = 45 + (task.llm_retries * 15)
+            elif "400" in err_msg:
+                cooldown_time = 10
+            else:
+                cooldown_time = 15
+
+            time.sleep(cooldown_time)
+
+
+# ─── Gemini Parallel Executor (THREADING — giống test_api.py) ────────────────
+
+def _parse_pdf_gemini(
+    file_bytes: bytes,
+    progress_callback: Callable | None = None,
+) -> dict | None:
+    """
+    Parallel executor bằng threading — giống hệt test_api.py:
+    - Mỗi key = 1 thread riêng, gọi API song song thực sự (genai SDK)
+    - JobCoordinator quản lý 2 queue (retry + pending)
+    - Adaptive cooldown khi bị rate limit
+    - Marker / PyMuPDF fallback cho chunk fail hoàn toàn
+    - Sau mỗi chunk → callback để broadcast live % đến frontend
+    """
+    from app.core.config import get_settings
+    settings = get_settings()
+    keys = settings.GEMINI_KEYS
+
+    if not keys:
+        _log.info("Gemini parse: no API key, skipping")
+        return None
+
+    # ── Chia tỉ lệ Key (60% Primary, 40% Fallback) ───────────────────────────
+    num_primary = max(1, int(len(keys) * 0.60))
+    primary_keys = keys[:num_primary]
+    fallback_keys = keys[num_primary:]
+
+    _log.info(
+        "🔑 Tổng Keys: %d | 🚜 Primary: %d | 🚑 Fallback: %d",
+        len(keys), len(primary_keys), len(fallback_keys),
+    )
+
+    # ── Cắt PDF tạo Tasks ───────────────────────────────────────────────────
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    total_pages = len(doc)
+
+    tasks: list[ParserChunkTask] = []
+    chunk_defs: list[tuple[int, int]] = []
+
+    for chunk_idx, start in enumerate(range(0, total_pages, CHUNK_SIZE)):
+        end = min(start + CHUNK_SIZE, total_pages)
+        chunk_path = f"/tmp/gemini_chunk_doc_{chunk_idx}_{start}_{end}.pdf"
+
+        sub = fitz.open()
+        sub.insert_pdf(doc, from_page=start, to_page=end - 1)
+        sub.save(chunk_path, deflate=True, garbage=4)
+        sub.close()
+
+        tasks.append(ParserChunkTask(
+            index=chunk_idx,
+            page_start=start,
+            page_end=end,
+            chunk_path=chunk_path,
+        ))
+        chunk_defs.append((start, end))
+
+    doc.close()
+    _log.info("🎯 Đã tạo %d chunks (%d trang).", len(tasks), total_pages)
+
+    # ── Khởi tạo Coordinator và Threads ───────────────────────────────────
+    coordinator = ParserJobCoordinator(tasks)
+    threads: list[threading.Thread] = []
+
+    global_start_time = time.time()
+    _log.info("🚀 KÍCH HOẠT HỆ THỐNG PHÂN TÁN threading...")
+
+    # Primary Workers
+    for i, key in enumerate(primary_keys):
+        t = threading.Thread(
+            target=_thread_worker,
+            args=(f"P{i+1}", key, False, coordinator, GEMINI_MODEL, progress_callback),
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+
+    # Fallback Workers
+    for i, key in enumerate(fallback_keys):
+        t = threading.Thread(
+            target=_thread_worker,
+            args=(f"F{i+1}", key, True, coordinator, GEMINI_MODEL, progress_callback),
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+
+    # Đợi cho đến khi Coordinator báo xong tất cả
+    while not coordinator.is_done():
+        time.sleep(1)
+
+    global_end_time = time.time()
+    total_elapsed = global_end_time - global_start_time
+
+    # ── Gộp kết quả ───────────────────────────────────────────────────────
+    _log.info("🧲 Đang gộp kết quả...")
+    tasks.sort(key=lambda x: x.index)
+
+    successful = [t for t in tasks if t.status == ParserTaskStatus.SUCCESS and t.content]
+    failed = [t for t in tasks if t.status not in (ParserTaskStatus.SUCCESS,)]
+
+    # Dọn dẹp file rác
+    for t in tasks:
+        try:
+            os.remove(t.chunk_path)
+        except Exception:
+            pass
+
+    # Update progress
+    if progress_callback and successful:
+        progress_callback("parse", f"Xong {len(successful)}/{len(tasks)} chunks", 95)
+
+    if not successful:
+        return None
+
+    chunks_data = [
+        {
+            "page_start": t.page_start,
+            "page_end": t.page_end,
+            "content": t.content or "",
+        }
+        for t in sorted(tasks, key=lambda x: x.index)
+        if t.status == ParserTaskStatus.SUCCESS and t.content
+    ]
+
+    total_time_formatted = str(datetime.timedelta(seconds=int(total_elapsed)))
+    _log.info(
+        "🎉 XONG TOÀN BỘ! %d/%d chunks thành công. "
+        "Thời gian: %s (%.1fs), %.2fs/chunk",
+        len(successful), len(tasks),
+        total_time_formatted, total_elapsed,
+        total_elapsed / len(tasks) if tasks else 0,
+    )
+
+    return {
+        "content": "\n\n---\n\n".join(c["content"] for c in chunks_data),
+        "page_count": total_pages,
+        "chunks": chunks_data,
+        "failed_ranges": [
+            (t.page_start, t.page_end)
+            for t in sorted(failed, key=lambda x: x.index)
+        ],
+    }
+
+
+# ─── Marker Remote Server Parser (Priority 2) ────────────────────────────────
+
+async def _parse_pdf_marker_server(
+    file_bytes: bytes,
+    filename: str = "document.pdf",
+) -> dict | None:
+    """Priority 2: Parse PDF via remote Marker server."""
+    from app.core.config import get_settings
+    settings = get_settings()
+    marker_url = settings.QWEN_VISION_BASE_URL
+
+    if not marker_url:
+        _log.info("Marker server: no URL configured, skipping")
+        return None
+
+    try:
+        import httpx
+
+        marker_url = marker_url.rstrip("/")
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{marker_url}/health")
+            if resp.status_code != 200:
+                raise Exception(f"Health check failed: {resp.status_code}")
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{marker_url}/parse-pdf",
+                files={"file": (filename, file_bytes, "application/pdf")},
+            )
+
+        if resp.status_code != 200:
+            raise Exception(f"Server returned {resp.status_code}")
+
+        data = resp.json()
+        _log.info("Marker server parsed %d pages", data.get("page_count", 0))
+        return {
+            "content": data.get("markdown", ""),
+            "page_count": data.get("page_count", 0),
+        }
+
+    except httpx.ConnectError:
+        _log.warning("Marker server unreachable — falling back to PyMuPDF")
+        return None
+    except Exception as e:
+        _log.warning("Marker server call failed (%s) — falling back to PyMuPDF", e)
+        return None
+
+
+# ─── PyMuPDF Parser (Priority 3 — Fallback) ─────────────────────────────────
+
+async def _parse_pdf_pymupdf(file_bytes: bytes) -> dict:
+    """Priority 3: local PyMuPDF (CPU-only)."""
     if not file_bytes:
         raise DocumentParseError("PDF bytes are empty — cannot parse")
 
-    # Wrap in BytesIO to ensure a seekable, stable buffer.
-    # Some PyMuPDF versions behave better with BytesIO than raw bytes.
     try:
         doc = fitz.open(stream=io.BytesIO(file_bytes), filetype="pdf")
     except Exception as e:
         raise DocumentParseError(f"PyMuPDF could not open PDF stream: {e}")
 
     lines: list[str] = []
-    prev_heading_level = 0
+    heading_sizes: dict[float, int] = {}
     page_count = len(doc)
 
-    # Pre-scan first 3 pages for typical heading font sizes
-    # This helps establish baseline for this document
-    heading_sizes: dict[float, int] = {}  # size -> count
     for page_num in range(min(3, page_count)):
         page = doc[page_num]
         blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE).get("blocks", [])
@@ -100,7 +575,6 @@ def _parse_pdf_pymupdf(file_bytes: bytes) -> dict:
                     if size >= 10:
                         heading_sizes[size] = heading_sizes.get(size, 0) + 1
 
-    # Determine dominant large font sizes = likely heading sizes
     sorted_sizes = sorted(heading_sizes.items(), key=lambda x: -x[0])
     h1_size = sorted_sizes[0][0] if sorted_sizes else 0
     h2_size = sorted_sizes[1][0] if len(sorted_sizes) > 1 else 0
@@ -111,7 +585,6 @@ def _parse_pdf_pymupdf(file_bytes: bytes) -> dict:
         text = page.get_text("text")
         page_lines = text.split("\n")
 
-        # Build a lookup: text -> (font_size, is_bold) using dict spans
         span_info: dict[str, list[tuple[float, bool]]] = {}
         try:
             block_dict = page.get_text("dict").get("blocks", [])
@@ -119,7 +592,9 @@ def _parse_pdf_pymupdf(file_bytes: bytes) -> dict:
                 if "lines" not in block:
                     continue
                 for bline in block["lines"]:
-                    line_text = "".join(s["text"] for s in bline.get("spans", [])).strip()
+                    line_text = "".join(
+                        s["text"] for s in bline.get("spans", [])
+                    ).strip()
                     if not line_text:
                         continue
                     for span in bline.get("spans", []):
@@ -138,7 +613,6 @@ def _parse_pdf_pymupdf(file_bytes: bytes) -> dict:
             if not line_stripped:
                 continue
 
-            # Look up formatting info
             font_size: float | None = None
             is_bold = False
             for lt, infos in span_info.items():
@@ -148,12 +622,10 @@ def _parse_pdf_pymupdf(file_bytes: bytes) -> dict:
                             font_size = s
                             is_bold = is_bold or b
 
-            # Use document-specific heading sizes if available, otherwise fall back to defaults
             h1 = max(h1_size, 20)
             h2 = max(h2_size, 16)
             h3 = max(h3_size, 14)
 
-            # Estimate heading level
             level = 0
             if font_size:
                 if font_size >= h1:
@@ -168,44 +640,179 @@ def _parse_pdf_pymupdf(file_bytes: bytes) -> dict:
             if level > 0:
                 heading_mark = "#" * min(level, 6)
                 lines.append(f"{heading_mark} {line_stripped}")
-                prev_heading_level = level
             else:
                 lines.append(line_stripped)
 
         lines.append(f"\n<!-- Page {page_num + 1} -->\n")
 
     doc.close()
+    _log.info(
+        "PyMuPDF parsed %d pages, content length=%d",
+        page_count, len("\n".join(lines)),
+    )
     return {"content": "\n".join(lines), "page_count": page_count}
 
 
-def _count_pdf_pages(file_bytes: bytes) -> int:
-    """Count PDF pages using PyMuPDF."""
+# ─── Public API ────────────────────────────────────────────────────────────────
+
+class DocumentParseError(Exception):
+    """Raised when document parsing fails."""
+    pass
+
+
+async def parse_document(
+    file_bytes: bytes,
+    file_type: str,
+    progress_callback: Callable[[str, str, int], None] | None = None,
+) -> dict:
+    """Parse document: PDF uses 3-level fallback (Gemini → Marker → PyMuPDF)."""
+    if file_type == "pdf":
+        return await _parse_pdf(file_bytes, progress_callback=progress_callback)
+    elif file_type == "docx":
+        return _parse_docx(file_bytes)
+    elif file_type == "pptx":
+        return _parse_pptx(file_bytes)
+    else:
+        raise DocumentParseError(f"Unsupported file type: {file_type}")
+
+
+async def _parse_pdf(
+    file_bytes: bytes,
+    filename: str = "document.pdf",
+    progress_callback: Callable[[str, str, int], None] | None = None,
+) -> dict:
+    """3-level fallback: Gemini (threading + genai SDK) → Marker → PyMuPDF."""
+    if not file_bytes:
+        _log.error("PDF bytes are empty or None — cannot parse")
+        raise DocumentParseError("PDF file bytes are empty")
+
+    _log.info("Parsing PDF: Gemini(threading+SDK) → Marker → PyMuPDF")
+
+    # Gemini: threading executor (chạy sync trong thread pool)
+    result = await asyncio.to_thread(_parse_pdf_gemini, file_bytes, progress_callback)
+
+    if result:
+        chunks = result.get("chunks", [])
+        failed_ranges = result.get("failed_ranges", [])
+
+        if not failed_ranges:
+            result.pop("chunks", None)
+            result.pop("failed_ranges", None)
+            return result
+
+        _log.info(
+            "Gemini: %d/%d chunks failed, filling via Marker/PyMuPDF",
+            len(failed_ranges), len(chunks),
+        )
+
+        fallback_content = await _fill_failed_chunks(
+            file_bytes, failed_ranges, filename,
+        )
+        if fallback_content:
+            merged = _merge_markdown(chunks, fallback_content, failed_ranges)
+            result["content"] = merged
+            result.pop("chunks", None)
+            result.pop("failed_ranges", None)
+            return result
+
+    # Priority 2: Marker
+    result = await _parse_pdf_marker_server(file_bytes, filename)
+    if result:
+        return result
+
+    # Priority 3: PyMuPDF
+    _log.info("Both Gemini and Marker failed — using PyMuPDF fallback")
+    return await _parse_pdf_pymupdf(bytes(file_bytes))
+
+
+async def _fill_failed_chunks(
+    file_bytes: bytes,
+    failed_ranges: list[tuple[int, int]],
+    filename: str,
+) -> str | None:
+    """Xử lý các chunk fail bằng Marker hoặc PyMuPDF."""
     import fitz
+
+    marker_result = await _parse_pdf_marker_server(file_bytes, filename)
+    if marker_result and marker_result.get("content"):
+        return _extract_pages_from_markdown(
+            marker_result["content"],
+            [p for start, end in failed_ranges for p in range(start, end)],
+        )
+
+    _log.info(
+        "Marker failed for failed-chunks, using PyMuPDF for %d pages",
+        sum(e - s for s, e in failed_ranges),
+    )
     try:
-        doc = fitz.open(stream=io.BytesIO(file_bytes), filetype="pdf")
-        count = len(doc)
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        lines: list[str] = []
+
+        for start, end in sorted(failed_ranges):
+            for page_num in range(start, end):
+                page = doc[page_num]
+                text = page.get_text("text")
+                for line in text.split("\n"):
+                    stripped = line.strip()
+                    if stripped:
+                        lines.append(stripped)
+                lines.append(f"\n<!-- Page {page_num + 1} -->\n")
+
         doc.close()
-        return count
-    except Exception:
-        return 0
+        return "\n".join(lines)
+    except Exception as e:
+        _log.warning("PyMuPDF fallback for failed chunks failed: %s", e)
+        return None
 
 
-def _get_font_size(page, line: str) -> float | None:
-    """Get font size of a line in PyMuPDF page."""
-    try:
-        blocks = page.get_text("dict")["blocks"]
-        for block in blocks:
-            if "lines" in block:
-                for bline in block["lines"]:
-                    text = "".join(span["text"] for span in bline["spans"])
-                    if line.strip() in text or text.strip() in line.strip():
-                        for span in bline["spans"]:
-                            if span["text"].strip():
-                                return span["size"]
-    except Exception:
-        pass
-    return None
+def _extract_pages_from_markdown(markdown: str, page_indices: list[int]) -> str:
+    """Trích markdown cho các page indices cụ thể từ output của Marker."""
+    if not page_indices:
+        return ""
 
+    lines = markdown.split("\n")
+    result_lines: list[str] = []
+    current_page = -1
+
+    for line in lines:
+        m = re.match(r"<!-- Page (\d+) -->", line)
+        if m:
+            current_page = int(m.group(1))
+        elif current_page in page_indices:
+            result_lines.append(line)
+
+    return "\n".join(result_lines)
+
+
+def _merge_markdown(
+    chunks: list[dict],
+    fallback_content: str,
+    failed_ranges: list[tuple[int, int]],
+) -> str:
+    """Merge gemini chunks (đã sắp xếp theo page_start) với fallback content."""
+    failed_set = {(s, e) for s, e in failed_ranges}
+    merged_parts: list[str] = []
+
+    for chunk in chunks:
+        if (chunk["page_start"], chunk["page_end"]) in failed_set:
+            fallback_for_chunk = _extract_pages_from_markdown(
+                fallback_content,
+                list(range(chunk["page_start"], chunk["page_end"])),
+            )
+            if fallback_for_chunk:
+                merged_parts.append(fallback_for_chunk)
+            else:
+                _log.warning(
+                    "No fallback content for failed chunk pages %d-%d",
+                    chunk["page_start"], chunk["page_end"],
+                )
+        else:
+            merged_parts.append(chunk["content"])
+
+    return "\n\n---\n\n".join(merged_parts)
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _is_bold(span: dict) -> bool:
     """Check if a span has bold font."""
@@ -216,44 +823,7 @@ def _is_bold(span: dict) -> bool:
         return False
 
 
-def _is_centered(bline: dict) -> bool:
-    """Check if a line is centered on the page."""
-    try:
-        bbox = bline.get("bbox", [])
-        if len(bbox) < 4:
-            return False
-        # Centered lines typically have bbox center near page center
-        return True  # heuristic fallback
-    except Exception:
-        return False
-
-
-def _estimate_heading_level(font_size: float, text: str, is_bold: bool = False) -> int:
-    """Estimate heading level from font size and formatting clues."""
-    # If text is bold and large, it's very likely a heading
-    if text.isupper() and len(text) < 100:
-        # ALL CAPS short text is almost certainly a heading
-        if font_size >= 14:
-            if font_size >= 22:
-                return 1
-            return 2
-    if is_bold:
-        if font_size >= 22:
-            return 1
-        elif font_size >= 18:
-            return 2
-        elif font_size >= 14:
-            return 3
-        return 4
-    # Non-bold but large text
-    if font_size >= 22:
-        return 1
-    elif font_size >= 18:
-        return 2
-    elif font_size >= 14:
-        return 3
-    return 0  # Not a heading
-
+# ─── DOCX / PPTX ─────────────────────────────────────────────────────────────
 
 def _parse_docx(file_bytes: bytes) -> dict:
     """Parse DOCX using python-docx."""
@@ -295,7 +865,6 @@ def _parse_docx(file_bytes: bytes) -> dict:
 def _parse_pptx(file_bytes: bytes) -> dict:
     """Parse PPTX using python-pptx."""
     from pptx import Presentation
-    from pptx.util import Inches, Pt
 
     prs = Presentation(io.BytesIO(file_bytes))
     lines: list[str] = []
@@ -324,7 +893,7 @@ def _get_slide_title(slide) -> str | None:
         if shape.has_text_frame:
             if hasattr(shape, "is_placeholder") and shape.is_placeholder:
                 pp = shape.placeholder_format
-                if pp.type == 1:  # TITLE
+                if pp.type == 1:
                     return shape.text.strip()
     return None
 

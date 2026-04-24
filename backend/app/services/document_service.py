@@ -3,6 +3,7 @@
 import uuid
 import hashlib
 from uuid import UUID
+from typing import Callable
 
 from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,7 @@ from app.rag.structure import detect_heading_tree, flatten_heading_tree
 from app.rag.chunker import semantic_chunk
 from app.rag.embedder import embed_chunks
 from app.rag.vector_store import get_vector_store
+from app.rag.cleaner import clean_markdown
 
 
 class DocumentServiceError(Exception):
@@ -156,32 +158,74 @@ class DocumentService:
         await self.db.commit()
 
     async def delete_document(self, document_id: UUID, user_id: UUID) -> bool:
-        """Delete a document and its vectors."""
+        """Delete a document and its vectors (DB + S3 + Pinecone)."""
+        import logging
+        _log = logging.getLogger("document.delete")
+
         document = await self.get_document(document_id, user_id)
         if not document:
             return False
 
+        doc_id_str = str(document_id)
+
         # Delete from storage backend (MinIO or S3)
         try:
             await get_storage().delete_file(document.s3_key)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("S3 delete failed for %s: %s", doc_id_str, e)
 
-        # Delete from Pinecone — all chapters
-        if document.heading_tree:
-            chapters = [ch["chapter_id"] for ch in document.heading_tree.get("chapters", [])]
-        else:
-            chapters = []
+        # Delete from Pinecone — delete ALL namespaces for this doc (safer than per-chapter)
+        # Also handles ch_unknown and any extra namespaces that aren't in heading_tree
         try:
-            await self.vector_store.delete_document_vectors(str(document_id), chapters)
-        except Exception:
-            pass
+            success = await self.vector_store.delete_all_document_vectors(doc_id_str)
+            if success:
+                _log.info("Deleted all Pinecone vectors for doc %s", doc_id_str)
+            else:
+                # Fallback: try per-chapter delete from heading_tree
+                if document.heading_tree:
+                    chapters = [ch["chapter_id"] for ch in document.heading_tree.get("chapters", [])]
+                else:
+                    chapters = []
+                await self.vector_store.delete_document_vectors(doc_id_str, chapters)
+                _log.warning("delete_all_document_vectors returned False — used per-chapter delete for %s", doc_id_str)
+        except Exception as e:
+            _log.error("Pinecone delete failed for %s: %s — document DB record will still be deleted", doc_id_str, e)
 
         # Delete from DB
         await self.db.delete(document)
         await self.db.commit()
+        _log.info("Deleted document record %s from database", doc_id_str)
 
         return True
+
+    @staticmethod
+    def _make_parse_progress_emit(
+        doc_id: str,
+        mgr,
+    ) -> Callable[[str, str, int], None] | None:
+        """
+        Build a progress callback that emits WebSocket events during document parsing.
+        Each completed Gemini chunk → one processing_step event.
+        Uses ensure_future so it doesn't block the async parse loop.
+        """
+        def emit(step: str, message: str, percent: int) -> None:
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                loop.call_soon(
+                    lambda: asyncio.ensure_future(
+                        mgr.broadcast(doc_id, {
+                            "type": "processing_step",
+                            "document_id": doc_id,
+                            "step": step,
+                            "message": message,
+                            "percent": percent,
+                        })
+                    )
+                )
+            except Exception:
+                pass
+        return emit
 
     async def process_document(self, document_id: UUID) -> dict:
         """Run the full RAG pipeline: parse -> chunk -> (embed+Pinecone optional)."""
@@ -189,6 +233,22 @@ class DocumentService:
         _log = logging.getLogger("document.process")
         try:
             await self.update_status(document_id, "processing")
+            doc_id_str = str(document_id)
+
+            # Emit: processing started
+            try:
+                from app.websocket.manager import get_document_upload_manager
+                mgr = get_document_upload_manager()
+                await mgr.broadcast(doc_id_str, {
+                    "type": "processing_step",
+                    "document_id": doc_id_str,
+                    "step": "download",
+                    "message": "Đang tải tài liệu...",
+                    "percent": 0,
+                })
+            except Exception:
+                pass
+
             result = await self.db.execute(select(Document).where(Document.id == document_id))
             document = result.scalar_one_or_none()
             if not document:
@@ -197,15 +257,80 @@ class DocumentService:
             from app.utils.storage import get_storage
             file_bytes = await get_storage().download_file(document.s3_key)
 
-            parse_result = await parse_document(file_bytes, document.file_type)
+            try:
+                mgr = get_document_upload_manager()
+                await mgr.broadcast(doc_id_str, {
+                    "type": "processing_step",
+                    "document_id": doc_id_str,
+                    "step": "parse",
+                    "message": "Đang phân tích nội dung tài liệu...",
+                    "percent": 20,
+                })
+            except Exception:
+                pass
+
+            parse_result = await parse_document(
+                file_bytes,
+                document.file_type,
+                progress_callback=self._make_parse_progress_emit(doc_id_str, mgr),
+            )
             markdown_content = parse_result["content"]
             total_pages = parse_result.get("page_count", 0)
             _log.info("Parsed %s: %d pages, %d chars", document_id, total_pages, len(markdown_content))
 
+            try:
+                mgr = get_document_upload_manager()
+                await mgr.broadcast(doc_id_str, {
+                    "type": "processing_step",
+                    "document_id": doc_id_str,
+                    "step": "clean",
+                    "message": "Đang làm sạch và chuẩn hóa nội dung...",
+                    "percent": 50,
+                })
+            except Exception:
+                pass
+
+            # Step 2: Clean markdown (normalize headings, remove noise)
+            cleaned_result = clean_markdown(markdown_content)
+            markdown_content = cleaned_result.cleaned
+            _log.info(
+                "Cleaned %s: removed_noise=%d, promoted_parts=%d, fixed_levels=%d, "
+                "removed_duplicates=%d",
+                document_id,
+                cleaned_result.stats["removed_noise"],
+                cleaned_result.stats["promoted_parts"],
+                cleaned_result.stats["fixed_levels"],
+                cleaned_result.stats["removed_duplicates"],
+            )
+
+            try:
+                mgr = get_document_upload_manager()
+                await mgr.broadcast(doc_id_str, {
+                    "type": "processing_step",
+                    "document_id": doc_id_str,
+                    "step": "structure",
+                    "message": "Đang phát hiện cấu trúc chương...",
+                    "percent": 65,
+                })
+            except Exception:
+                pass
+
             heading_tree = detect_heading_tree(markdown_content)
             total_chapters = len(heading_tree.get("chapters", []))
+
+            try:
+                mgr = get_document_upload_manager()
+                await mgr.broadcast(doc_id_str, {
+                    "type": "processing_step",
+                    "document_id": doc_id_str,
+                    "step": "chunk",
+                    "message": f"Đang chia nhỏ nội dung ({total_chapters} chương)...",
+                    "percent": 75,
+                })
+            except Exception:
+                pass
+
             chunks = semantic_chunk(markdown_content, heading_tree)
-            doc_id_str = str(document_id)
             for chunk in chunks:
                 chunk["document_id"] = doc_id_str
             _log.info("Chunked %s: %d chunks, %d chapters", document_id, len(chunks), total_chapters)
@@ -223,6 +348,18 @@ class DocumentService:
             try:
                 from app.core.redis_client import get_redis_client
                 redis = get_redis_client()
+                try:
+                    mgr = get_document_upload_manager()
+                    await mgr.broadcast(doc_id_str, {
+                        "type": "processing_step",
+                        "document_id": doc_id_str,
+                        "step": "embed",
+                        "message": "Đang tạo vector embeddings...",
+                        "percent": 88,
+                    })
+                except Exception:
+                    pass
+
                 enriched = await embed_chunks(chunks, doc_id_str, redis)
                 chapter_groups: dict[str, list[dict]] = {}
                 for chunk in enriched:
@@ -233,10 +370,37 @@ class DocumentService:
                     )
                 await self.update_status(document_id, "indexed")
                 _log.info("Indexed %s: %d vectors", document_id, len(enriched))
+
+                try:
+                    mgr = get_document_upload_manager()
+                    await mgr.broadcast(doc_id_str, {
+                        "type": "processing_step",
+                        "document_id": doc_id_str,
+                        "step": "done",
+                        "message": "Xử lý hoàn tất!",
+                        "percent": 100,
+                    })
+                except Exception:
+                    pass
+
                 return {"document_id": doc_id_str, "chunks_created": len(enriched),
                         "total_pages": total_pages, "processing_status": "indexed"}
             except Exception as embed_err:
-                _log.warning("Embed skipped for %s (parse OK): %s", document_id, embed_err)
+                _log.warning("Embed failed for %s: %s", document_id, embed_err)
+                await self.update_status(document_id, "processed", error_message=str(embed_err))
+
+                try:
+                    mgr = get_document_upload_manager()
+                    await mgr.broadcast(doc_id_str, {
+                        "type": "processing_step",
+                        "document_id": doc_id_str,
+                        "step": "done_no_embed",
+                        "message": "Xử lý xong (không indexing được vector — vẫn dùng được)",
+                        "percent": 100,
+                    })
+                except Exception:
+                    pass
+
                 return {"document_id": doc_id_str, "chunks_created": len(chunks),
                         "total_pages": total_pages, "processing_status": "processed",
                         "embed_error": str(embed_err)}
@@ -244,6 +408,17 @@ class DocumentService:
         except Exception as e:
             _log.exception("process_document failed %s: %s", document_id, e)
             await self.update_status(document_id, "failed", error_message=str(e))
+            try:
+                from app.websocket.manager import get_document_upload_manager
+                doc_id_str = str(document_id)
+                mgr = get_document_upload_manager()
+                await mgr.broadcast(doc_id_str, {
+                    "type": "processing_failed",
+                    "document_id": doc_id_str,
+                    "error": str(e),
+                })
+            except Exception:
+                pass
             return {"document_id": str(document_id), "processing_status": "failed", "error": str(e)}
 
     def get_presigned_url(self, document: Document) -> str:

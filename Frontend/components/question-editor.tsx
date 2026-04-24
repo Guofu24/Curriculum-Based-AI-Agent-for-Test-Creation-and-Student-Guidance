@@ -14,14 +14,14 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
-import { 
-  GripVertical, 
-  Trash2, 
-  Plus, 
+import {
+  GripVertical,
+  Trash2,
+  Plus,
   Check,
   X
 } from "lucide-react"
-import type { Question, QuestionType, BloomLevel, QuestionDifficulty } from "@/lib/api"
+import type { Question, QuestionType, BloomLevel } from "@/lib/api"
 
 interface QuestionEditorProps {
   question: Question
@@ -31,32 +31,25 @@ interface QuestionEditorProps {
   onDuplicate: () => void
 }
 
-const bloomLevelColors: Record<BloomLevel, string> = {
+const bloomLevelColors: Record<string, string> = {
   nhan_biet: "bg-slate-500/20 text-slate-300 border-slate-500/30",
   thong_hieu: "bg-blue-500/20 text-blue-300 border-blue-500/30",
   van_dung: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
   van_dung_cao: "bg-amber-500/20 text-amber-300 border-amber-500/30",
 }
 
-const bloomLevelLabels: Record<BloomLevel, string> = {
+const bloomLevelLabels: Record<string, string> = {
   nhan_biet: "Nhận biết",
   thong_hieu: "Thông hiểu",
   van_dung: "Vận dụng",
   van_dung_cao: "Vận dụng cao",
 }
 
-const difficultyLabels: Record<QuestionDifficulty, string> = {
-  easy: "Dễ",
-  medium: "Trung bình",
-  hard: "Khó",
-}
-
-const questionTypeLabels: Record<QuestionType, string> = {
+const questionTypeLabels: Record<string, string> = {
   mcq: "Trắc nghiệm",
   essay: "Tự luận",
-  // internal-only types for demo — backend không hỗ trợ
   multiple_choice: "Trắc nghiệm",
-  true_false: "Đúng/Sai",
+  true_false: "�úng/Sai",
   fill_blank: "Điền khuyết",
 }
 
@@ -68,7 +61,7 @@ export function QuestionEditor({
   onDuplicate,
 }: QuestionEditorProps) {
   const [isEditing, setIsEditing] = useState(false)
-  const [editedQuestion, setEditedQuestion] = useState(question)
+  const [editedQuestion, setEditedQuestion] = useState<Question>(question)
 
   const handleSave = () => {
     onUpdate(editedQuestion)
@@ -80,42 +73,55 @@ export function QuestionEditor({
     setIsEditing(false)
   }
 
+  const getOptions = (q: Question): Array<{ label: string; text: string }> => {
+    return q.options ?? []
+  }
+
   const updateOption = (optionIndex: number, value: string) => {
-    if (!editedQuestion.options) return
-    const newOptions = [...editedQuestion.options]
-    newOptions[optionIndex] = value
+    const opts = getOptions(editedQuestion)
+    const newOptions = [...opts]
+    newOptions[optionIndex] = { label: opts[optionIndex]?.label ?? String(optionIndex), text: value }
     setEditedQuestion({ ...editedQuestion, options: newOptions })
   }
 
   const toggleCorrectAnswer = (optionIndex: number) => {
-    if (!editedQuestion.options) return
-    const option = editedQuestion.options[optionIndex]
-    const currentCorrect = editedQuestion.correct_answer || []
-    const correctArray = Array.isArray(currentCorrect) ? currentCorrect : [currentCorrect]
-    
-    if (correctArray.includes(option)) {
+    const opts = getOptions(editedQuestion)
+    const option = opts[optionIndex]
+    if (!option) return
+    const currentCorrect = editedQuestion.correct_answer || ''
+    const currentStr = Array.isArray(currentCorrect) ? currentCorrect[0] ?? '' : currentCorrect
+    const optionLabel = option.label
+
+    if (currentStr === optionLabel) {
       setEditedQuestion({
         ...editedQuestion,
-        correct_answer: correctArray.filter(a => a !== option),
+        correct_answer: '',
       })
     } else {
       setEditedQuestion({
         ...editedQuestion,
-        correct_answer: [...correctArray, option],
+        correct_answer: optionLabel,
       })
     }
   }
 
   const addOption = () => {
-    const newOptions = [...(editedQuestion.options || []), ""]
-    setEditedQuestion({ ...editedQuestion, options: newOptions })
+    const opts = getOptions(editedQuestion)
+    const newLabel = String.fromCharCode(65 + opts.length)
+    setEditedQuestion({
+      ...editedQuestion,
+      options: [...opts, { label: newLabel, text: "" }],
+    })
   }
 
   const removeOption = (optionIndex: number) => {
-    if (!editedQuestion.options) return
-    const newOptions = editedQuestion.options.filter((_, i) => i !== optionIndex)
+    const opts = getOptions(editedQuestion)
+    const newOptions = opts.filter((_, i) => i !== optionIndex)
     setEditedQuestion({ ...editedQuestion, options: newOptions })
   }
+
+  const safeBloomLevel = typeof question.bloom_level === 'string' ? question.bloom_level : 'thong_hieu'
+  const safeQuestionType = typeof question.type === 'string' ? question.type : 'mcq'
 
   return (
     <Card className="border-border/50 bg-card/50 backdrop-blur-sm">
@@ -129,18 +135,12 @@ export function QuestionEditor({
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap mb-2">
-              <Badge variant="outline" className={bloomLevelColors[question.bloom_level]}>
-                {bloomLevelLabels[question.bloom_level]}
+              <Badge variant="outline" className={bloomLevelColors[safeBloomLevel] ?? ''}>
+                {bloomLevelLabels[safeBloomLevel] ?? safeBloomLevel}
               </Badge>
               <Badge variant="outline" className="bg-muted/50">
-                {questionTypeLabels[question.type]}
+                {questionTypeLabels[safeQuestionType] ?? safeQuestionType}
               </Badge>
-              <Badge variant="outline" className="bg-muted/50">
-                {difficultyLabels[question.difficulty]}
-              </Badge>
-              <span className="text-sm text-muted-foreground ml-auto">
-                {question.points} điểm
-              </span>
             </div>
             {isEditing ? (
               <Textarea
@@ -158,14 +158,14 @@ export function QuestionEditor({
       </CardHeader>
       <CardContent className="pt-0">
         {/* Options for multiple choice */}
-        {(question.type === "multiple_choice" || question.type === "true_false") && (
+        {(safeQuestionType === 'mcq' || safeQuestionType === 'multiple_choice') && (
           <div className="space-y-2 mb-4">
-            {(isEditing ? editedQuestion.options : question.options)?.map((option, optionIndex) => {
-              const correctArray = Array.isArray(question.correct_answer) 
-                ? question.correct_answer 
-                : [question.correct_answer]
-              const isCorrect = correctArray.includes(option)
-              
+            {(isEditing ? getOptions(editedQuestion) : getOptions(question)).map((option, optionIndex) => {
+              const correctArray = Array.isArray(question.correct_answer)
+                ? question.correct_answer
+                : question.correct_answer ? [question.correct_answer] : []
+              const isCorrect = correctArray.includes(option.label)
+
               return (
                 <div
                   key={optionIndex}
@@ -181,12 +181,12 @@ export function QuestionEditor({
                         checked={(() => {
                           const ca = editedQuestion.correct_answer || []
                           const arr = Array.isArray(ca) ? ca : [ca]
-                          return arr.includes(option)
+                          return arr.includes(option.label)
                         })()}
                         onCheckedChange={() => toggleCorrectAnswer(optionIndex)}
                       />
                       <Input
-                        value={option}
+                        value={option.text}
                         onChange={(e) => updateOption(optionIndex, e.target.value)}
                         className="flex-1 bg-background"
                       />
@@ -202,9 +202,9 @@ export function QuestionEditor({
                   ) : (
                     <>
                       <span className="flex h-6 w-6 items-center justify-center rounded-full border text-xs font-medium">
-                        {String.fromCharCode(65 + optionIndex)}
+                        {option.label}
                       </span>
-                      <span className="flex-1">{option}</span>
+                      <span className="flex-1">{option.text}</span>
                       {isCorrect && (
                         <Check className="h-5 w-5 text-emerald-500" />
                       )}
@@ -213,7 +213,7 @@ export function QuestionEditor({
                 </div>
               )
             })}
-            {isEditing && question.type === "multiple_choice" && (
+            {isEditing && (
               <Button
                 variant="outline"
                 size="sm"
@@ -242,7 +242,7 @@ export function QuestionEditor({
             <div>
               <label className="text-sm text-muted-foreground mb-1 block">Mức Bloom</label>
               <Select
-                value={editedQuestion.bloom_level}
+                value={editedQuestion.bloom_level ?? 'thong_hieu'}
                 onValueChange={(value) => setEditedQuestion({ ...editedQuestion, bloom_level: value as BloomLevel })}
               >
                 <SelectTrigger>
@@ -254,32 +254,6 @@ export function QuestionEditor({
                   ))}
                 </SelectContent>
               </Select>
-            </div>
-            <div>
-              <label className="text-sm text-muted-foreground mb-1 block">Độ khó</label>
-              <Select
-                value={editedQuestion.difficulty}
-                onValueChange={(value) => setEditedQuestion({ ...editedQuestion, difficulty: value as QuestionDifficulty })}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {Object.entries(difficultyLabels).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>{label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <label className="text-sm text-muted-foreground mb-1 block">Điểm</label>
-              <Input
-                type="number"
-                value={editedQuestion.points}
-                onChange={(e) => setEditedQuestion({ ...editedQuestion, points: Number(e.target.value) })}
-                min={0}
-                step={0.5}
-              />
             </div>
           </div>
         )}
@@ -304,9 +278,9 @@ export function QuestionEditor({
               <Button size="sm" variant="outline" onClick={onDuplicate}>
                 Nhân bản
               </Button>
-              <Button 
-                size="sm" 
-                variant="outline" 
+              <Button
+                size="sm"
+                variant="outline"
                 className="text-destructive hover:text-destructive ml-auto"
                 onClick={onDelete}
               >

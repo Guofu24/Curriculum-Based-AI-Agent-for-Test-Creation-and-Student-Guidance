@@ -99,12 +99,21 @@ interface CompletedEvent {
   exam_id: string
 }
 
+interface PipelinePausedEvent {
+  type: "pipeline_paused"
+  checkpoint_id: number
+  message?: string
+  blueprint?: BlueprintSlot[]
+  distribution_summary?: BloomDistribution
+}
+
 type WsMessage =
   | PlanStepEvent
   | QuestionGeneratedEvent
   | HitlCheckpointEvent
   | ValidationResultEvent
   | CompletedEvent
+  | PipelinePausedEvent
   | { type: string; [key: string]: unknown }
 
 // ─── Supporting types ──────────────────────────────────────────────────────────
@@ -199,7 +208,7 @@ export interface GenerationLiveViewerProps {
   examId: string
   wsUrl: string
   examType?: "mcq" | "essay" | "mixed"
-  onApprove: (examId: string, approved: boolean, feedback?: string) => Promise<void>
+  onApprove: (examId: string, approved: boolean, feedback?: string, checkpointId?: number) => Promise<void>
   onComplete: (examId: string) => void
 }
 
@@ -273,6 +282,10 @@ export function GenerationLiveViewer({
 
   // ─── Event handler ───────────────────────────────────────────────────────────
 
+  // bloomDistRef tracks the latest bloomDist to avoid stale closure in handleMessage.
+  const bloomDistRef = useRef<BloomDistribution | null>(null)
+  bloomDistRef.current = bloomDist
+
   const handleMessage = useCallback(
     (raw: string) => {
       let msg: WsMessage
@@ -286,8 +299,6 @@ export function GenerationLiveViewer({
         case "plan_step": {
           const e = msg as PlanStepEvent
           setIsGenerating(true)
-          // When pipeline moves to step 3 (building questions) or beyond, hide the HITL panel
-          // automatically — the user has already approved/rejected the blueprint.
           if (e.step >= 3) {
             setActiveCheckpoint(null)
           }
@@ -305,12 +316,10 @@ export function GenerationLiveViewer({
         case "question_generated": {
           const e = msg as QuestionGeneratedEvent
           const q = e.question
-          // Filter by exam type if specified
           if (examType && examType !== "mixed") {
             const qType = q.type || "mcq"
             if (qType !== examType) return
           }
-          // Deduplicate: skip if question_id already in list (avoids duplicates on WS reconnect)
           setQuestions((prev) => {
             const qId = q.question_id
             if (qId && prev.some((existing) => existing.question_id === qId)) {
@@ -323,9 +332,7 @@ export function GenerationLiveViewer({
 
         case "hitl_checkpoint": {
           const e = msg as HitlCheckpointEvent
-          // Always update activeCheckpoint so the panel shows the latest checkpoint
           setActiveCheckpoint(e.checkpoint_id)
-          // Remember which checkpoint the user is looking at (for reject handling)
           setLastSeenCheckpoint(e.checkpoint_id)
 
           if (e.checkpoint_id === 0) {
@@ -334,8 +341,7 @@ export function GenerationLiveViewer({
           if (e.checkpoint_id === 1) {
             const slots = (e.data as { blueprint?: BlueprintSlot[] }).blueprint || []
             setBlueprintSlots(slots)
-            setHitlApproved(false)  // Reset approval state when a new blueprint arrives
-            // Build distribution from blueprint
+            setHitlApproved(false)
             const dist: BloomDistribution = {}
             for (const slot of slots) {
               const lvl = slot.bloom_level as BloomLevel | undefined
@@ -351,8 +357,7 @@ export function GenerationLiveViewer({
           if (e.checkpoint_id === 3) {
             const d = e.data as HitlCheckpointEvent["data"]
             setCostReport(d.cost_report || null)
-            setBloomDist(d.distribution_summary || bloomDist)
-            // Store blueprint from checkpoint 3 so completion card can display it
+            setBloomDist(d.distribution_summary || bloomDistRef.current)
             if ((d as { blueprint?: BlueprintSlot[] }).blueprint) {
               setCompletionBlueprint((d as { blueprint: BlueprintSlot[] }).blueprint)
             }
@@ -382,11 +387,33 @@ export function GenerationLiveViewer({
           break
         }
 
+        case "pipeline_paused": {
+          const e = msg as PipelinePausedEvent
+          setActiveCheckpoint(e.checkpoint_id)
+          setLastSeenCheckpoint(e.checkpoint_id)
+          setHitlApproved(false)
+          if (e.checkpoint_id === 1) {
+            const slots = e.blueprint || []
+            setBlueprintSlots(slots)
+            const dist: BloomDistribution = {}
+            for (const slot of slots) {
+              const lvl = slot.bloom_level as BloomLevel | undefined
+              if (lvl && lvl in dist) dist[lvl] = (dist[lvl] || 0) + 1
+              else if (lvl) dist[lvl] = 1
+            }
+            setBloomDist(dist)
+          }
+          setSteps((prev) =>
+            prev.map((s) => ({ ...s, active: false }))
+          )
+          break
+        }
+
         default:
           break
       }
     },
-    [reasoningOpen, onComplete, examType, bloomDist]
+    [reasoningOpen, onComplete, examType]
   )
 
   // ─── WebSocket connection ────────────────────────────────────────────────────
@@ -423,7 +450,7 @@ export function GenerationLiveViewer({
       unmountedRef.current = true
       ws.close()
     }
-  }, [resolvedWsUrl, handleMessage]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [resolvedWsUrl, handleMessage])
 
   // ─── HITL approval ──────────────────────────────────────────────────────────
 
@@ -431,9 +458,10 @@ export function GenerationLiveViewer({
   const [lastSeenCheckpoint, setLastSeenCheckpoint] = useState<number | null>(null)
 
   const handleApprove = async () => {
+    const cp = lastSeenCheckpoint ?? activeCheckpoint ?? 1
     setHitlApproving(true)
     try {
-      await onApprove(examId, true)
+      await onApprove(examId, true, undefined, cp)
       setHitlApproved(true)
     } finally {
       setHitlApproving(false)
@@ -441,9 +469,10 @@ export function GenerationLiveViewer({
   }
 
   const handleReject = async (feedback?: string) => {
+    const cp = lastSeenCheckpoint ?? activeCheckpoint ?? 1
     setHitlRejecting(true)
     try {
-      await onApprove(examId, false, feedback)
+      await onApprove(examId, false, feedback, cp)
     } finally {
       setHitlRejecting(false)
     }

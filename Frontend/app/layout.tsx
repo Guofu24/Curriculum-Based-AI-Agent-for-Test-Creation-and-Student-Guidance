@@ -4,6 +4,7 @@ import { Analytics } from '@vercel/analytics/next'
 import { ThemeProvider } from '@/components/theme-provider'
 import { AuthProvider } from '@/components/auth-provider'
 import { Toaster } from '@/components/ui/sonner'
+import { UploadNotificationProvider } from '@/components/upload-notification-provider'
 import './globals.css'
 
 const inter = Inter({ 
@@ -64,7 +65,9 @@ export default function RootLayout({
           disableTransitionOnChange
         >
           <AuthProvider>
-            {children}
+            <UploadNotificationProvider>
+              {children}
+            </UploadNotificationProvider>
             <Toaster richColors position="top-right" />
           </AuthProvider>
         </ThemeProvider>

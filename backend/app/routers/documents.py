@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.redis_client import get_redis_client, RedisClient
 from app.services.document_service import DocumentService, DocumentServiceError
 from app.schemas.document import (
     DocumentUploadResponse,
@@ -226,6 +227,20 @@ async def upload_document(
 
     background_tasks.add_task(_process_in_background, str(document.id))
 
+    # Notify connected WebSocket clients that processing has started
+    try:
+        from app.websocket.manager import get_document_upload_manager
+        mgr = get_document_upload_manager()
+        await mgr.broadcast(str(document.id), {
+            "type": "processing_step",
+            "document_id": str(document.id),
+            "step": "queued",
+            "message": "Đang chờ xử lý...",
+            "percent": 0,
+        })
+    except Exception:
+        pass
+
     return DocumentUploadResponse(
         id=document.id,
         message="Document uploaded. Processing started in background.",
@@ -313,16 +328,33 @@ async def get_document(
 async def get_document_status(
     document_id: UUID,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis_client),
     current_user: User = Depends(get_current_user),
 ):
-    """Get document processing status."""
+    """Get document processing status with Redis-backed throttle (min 1s between DB queries)."""
+    import json
+
+    cache_key = f"doc_status:{document_id}"
+    cached = await redis.get(cache_key)
+    if cached:
+        data = json.loads(cached)
+        return DocumentStatus(
+            id=data["id"],
+            processing_status=data["processing_status"],
+            parse_error_message=data.get("parse_error_message"),
+            total_pages_or_slides=data.get("total_pages_or_slides", 0),
+            total_chunks=data.get("total_chunks", 0),
+            uploaded_at=data.get("uploaded_at"),
+            created_at=data.get("created_at"),
+        )
+
     service = DocumentService(db)
     document = await service.get_document(document_id, current_user.id)
 
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    return DocumentStatus(
+    response = DocumentStatus(
         id=str(document.id),
         processing_status=document.processing_status,
         parse_error_message=document.parse_error_message,
@@ -331,6 +363,22 @@ async def get_document_status(
         uploaded_at=document.uploaded_at,
         created_at=document.uploaded_at,
     )
+
+    await redis.set(
+        cache_key,
+        json.dumps({
+            "id": response.id,
+            "processing_status": response.processing_status,
+            "parse_error_message": response.parse_error_message,
+            "total_pages_or_slides": response.total_pages_or_slides,
+            "total_chunks": response.total_chunks,
+            "uploaded_at": response.uploaded_at.isoformat() if response.uploaded_at else None,
+            "created_at": response.created_at.isoformat() if response.created_at else None,
+        }),
+        ttl=1,
+    )
+
+    return response
 
 
 @router.delete(

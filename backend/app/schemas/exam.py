@@ -1032,3 +1032,23 @@ class ExamReviewResponse(BaseModel):
 
 # Update forward reference
 ExamPartialRegenerateRequest.model_rebuild()
+
+
+class TimelineEntry(BaseModel):
+    date: str = Field(..., description="Date string (YYYY-MM).")
+    quality_score: float = Field(0.0, description="Average quality score for this month.")
+    pass_rate: float = Field(0.0, description="Average verifier pass rate for this month.")
+
+
+class QualitySummaryResponse(BaseModel):
+    """Response matching frontend's QualitySummary interface."""
+
+    total_exams: int = Field(..., description="Total number of exams.")
+    avg_quality_score: float = Field(0.0, description="Average quality score across all exams.")
+    avg_verifier_pass_rate: float = Field(0.0, description="Average verifier pass rate across all exams.")
+    avg_evidence_coverage_rate: float = Field(0.0, description="Average evidence coverage rate across all exams.")
+    warning_count: int = Field(0, description="Total warning count across all exams.")
+    timeline: list[TimelineEntry] = Field(
+        default_factory=list,
+        description="Monthly quality timeline (last 6 months).",
+    )

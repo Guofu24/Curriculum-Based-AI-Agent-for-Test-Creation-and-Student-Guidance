@@ -167,7 +167,7 @@ export default function AuthPage() {
                 )}
 
                 <TabsContent value="login">
-                  <form onSubmit={handleLogin} className="space-y-4">
+                  <form onSubmit={handleLogin} className="space-y-4" suppressHydrationWarning>
                     <FieldGroup>
                       <Field>
                         <FieldLabel htmlFor="login-email">Email</FieldLabel>
@@ -179,6 +179,7 @@ export default function AuthPage() {
                           onChange={(e) => setLoginEmail(e.target.value)}
                           required
                           disabled={isLoading}
+                          suppressHydrationWarning
                         />
                       </Field>
                       <Field>
@@ -191,11 +192,12 @@ export default function AuthPage() {
                           onChange={(e) => setLoginPassword(e.target.value)}
                           required
                           disabled={isLoading}
+                          suppressHydrationWarning
                         />
                       </Field>
                     </FieldGroup>
 
-                    <Button type="submit" className="w-full" disabled={isLoading}>
+                    <Button type="submit" className="w-full" disabled={isLoading} suppressHydrationWarning>
                       {isLoading ? (
                         <>
                           <Spinner className="mr-2" />
@@ -209,7 +211,7 @@ export default function AuthPage() {
                 </TabsContent>
 
                 <TabsContent value="register">
-                  <form onSubmit={handleRegister} className="space-y-4">
+                  <form onSubmit={handleRegister} className="space-y-4" suppressHydrationWarning>
                     <FieldGroup>
                       <Field>
                         <FieldLabel htmlFor="register-name">Họ và tên</FieldLabel>
@@ -220,6 +222,7 @@ export default function AuthPage() {
                           value={registerName}
                           onChange={(e) => setRegisterName(e.target.value)}
                           disabled={isLoading}
+                          suppressHydrationWarning
                         />
                       </Field>
                       <Field>
@@ -232,6 +235,7 @@ export default function AuthPage() {
                           onChange={(e) => setRegisterEmail(e.target.value)}
                           required
                           disabled={isLoading}
+                          suppressHydrationWarning
                         />
                       </Field>
                       <Field>
@@ -245,12 +249,13 @@ export default function AuthPage() {
                           required
                           minLength={8}
                           disabled={isLoading}
+                          suppressHydrationWarning
                         />
                         <FieldError>Mật khẩu phải có ít nhất 8 ký tự</FieldError>
                       </Field>
                     </FieldGroup>
 
-                    <Button type="submit" className="w-full" disabled={isLoading}>
+                    <Button type="submit" className="w-full" disabled={isLoading} suppressHydrationWarning>
                       {isLoading ? (
                         <>
                           <Spinner className="mr-2" />

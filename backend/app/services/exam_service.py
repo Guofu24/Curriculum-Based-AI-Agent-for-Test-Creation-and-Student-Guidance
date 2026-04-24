@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.memory import LongTermMemory
 from app.core.redis_client import RedisClient
 from app.models.exam import Exam, ExamHistory
+from app.schemas.exam import QualitySummaryResponse
 
 
 class ExamServiceError(Exception):
@@ -370,39 +371,28 @@ class ExamService:
         _ = (exam_id, user_id, page, limit)
         return []
 
-    async def get_quality_summary(self, user_id: UUID) -> dict:
-        """Return lightweight quality metrics derived from Exam rows only."""
+    async def get_quality_summary(self, user_id: UUID) -> QualitySummaryResponse:
+        """Return quality metrics matching frontend's QualitySummary interface."""
         exams, total = await self.list_exams(user_id=user_id, page=1, limit=500)
-        question_count = sum(len(exam.questions or []) for exam in exams)
 
-        valid_rates = [
-            rate for exam in exams if (rate := exam.verifier_pass_rate) is not None
-        ]
-        evidence_rates = [
-            rate for exam in exams if (rate := exam.evidence_coverage_rate) is not None
-        ]
+        quality_scores = [exam.quality_score for exam in exams if exam.quality_score is not None]
+        pass_rates = [exam.verifier_pass_rate for exam in exams if exam.verifier_pass_rate is not None]
+        evidence_rates = [exam.evidence_coverage_rate for exam in exams if exam.evidence_coverage_rate is not None]
+        warning_counts = [exam.warning_count for exam in exams]
 
-        return {
-            "documents_active": 0,
-            "exams_generated": total,
-            "question_count": question_count,
-            "verifier_pass_rate": round(sum(valid_rates) / len(valid_rates), 4) if valid_rates else 0.0,
-            "verifier_warning_rate": 0.0,
-            "evidence_coverage_rate": round(sum(evidence_rates) / len(evidence_rates), 4) if evidence_rates else 0.0,
-            "scope_violation_rate": 0.0,
-            "avg_regenerate_count": round(
-                sum(exam.regenerate_count for exam in exams) / len(exams), 4
-            ) if exams else 0.0,
-            "avg_human_edit_count": round(
-                sum(exam.human_edit_count for exam in exams) / len(exams), 4
-            ) if exams else 0.0,
-            "version_churn": round(
-                sum(exam.version_count for exam in exams) / len(exams), 4
-            ) if exams else 0.0,
-            "top_error_categories": [],  # list[ErrorCategoryCount]
-            "recent_warnings": [],        # list[FeedbackEvent]
-            "last_updated_at": datetime.now(timezone.utc),
-        }
+        avg_quality = round(sum(quality_scores) / len(quality_scores), 4) if quality_scores else 0.0
+        avg_pass = round(sum(pass_rates) / len(pass_rates), 4) if pass_rates else 0.0
+        avg_evidence = round(sum(evidence_rates) / len(evidence_rates), 4) if evidence_rates else 0.0
+        total_warnings = sum(warning_counts)
+
+        return QualitySummaryResponse(
+            total_exams=total,
+            avg_quality_score=avg_quality,
+            avg_verifier_pass_rate=avg_pass,
+            avg_evidence_coverage_rate=avg_evidence,
+            warning_count=total_warnings,
+            timeline=[],  # TODO: populate from history if needed
+        )
 
     async def get_feedback_store_summary(self, user_id: UUID) -> dict:
         """Compatibility stub until feedback events are persisted separately."""

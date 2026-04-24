@@ -35,27 +35,105 @@ class Settings(BaseSettings):
             return []
         return [p.strip() for p in self.LLM_FALLBACK_CHAIN.split(",") if p.strip()]
 
-    # Model routing
-    LLM_MODEL_STRONG: str = "llama-3.3-70b-versatile"
-    LLM_MODEL_LIGHT: str = "llama-3.1-8b-instant"
-    LLM_MODEL_VISION: str = "llama-3.2-11b-vision-preview"
+    # ============================================================
+    # PER-ROLE LLM CONFIG
+    # Each role: _PROVIDER, _API_KEY, _MODEL (None/empty = use defaults below)
+    # ============================================================
+    ORCHESTRATOR_PROVIDER: str = "groq"
+    ORCHESTRATOR_API_KEY: str = ""
+    ORCHESTRATOR_MODEL: str = "llama-3.3-70b-versatile"
 
-    # Provider API keys
+    BUILDER_PROVIDER: str = "groq"
+    BUILDER_API_KEY: str = ""
+    BUILDER_MODEL: str = "llama-3.3-70b-versatile"
+
+    VALIDATOR_PROVIDER: str = "groq"
+    VALIDATOR_API_KEY: str = ""
+    VALIDATOR_MODEL: str = "llama-3.3-70b-versatile"
+
+    PLANNER_PROVIDER: str = "groq"
+    PLANNER_API_KEY: str = ""
+    PLANNER_MODEL: str = "llama-3.1-8b-instant"
+
+    RERANKER_PROVIDER: str = "groq"
+    RERANKER_API_KEY: str = ""
+    RERANKER_MODEL: str = "BAAI/bge-reranker-v2-m3"
+
+    OUTLINE_PROVIDER: str = "groq"
+    OUTLINE_API_KEY: str = ""
+    OUTLINE_MODEL: str = "llama-3.1-8b-instant"
+
+    DEDUP_PROVIDER: str = "groq"
+    DEDUP_API_KEY: str = ""
+    DEDUP_MODEL: str = "llama-3.1-8b-instant"
+
+    SKILLS_PROVIDER: str = "groq"
+    SKILLS_API_KEY: str = ""
+    SKILLS_MODEL: str = "llama-3.1-8b-instant"
+
+    CLASSIFIER_PROVIDER: str = "groq"
+    CLASSIFIER_API_KEY: str = ""
+    CLASSIFIER_MODEL: str = "llama-3.1-8b-instant"
+
+    GUARDRAILS_PROVIDER: str = "groq"
+    GUARDRAILS_API_KEY: str = ""
+    GUARDRAILS_MODEL: str = "llama-3.1-8b-instant"
+
+    VISION_PROVIDER: str = "qwen_vision"
+    VISION_API_KEY: str = ""
+    VISION_MODEL: str = "Qwen/Qwen3.5-9B"
+
+    GEMINI_API_KEY: str = ""
+    GEMINI_API_KEYS: str = ""   # comma-separated, overrides GEMINI_API_KEY when set
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+
+    # Computed: load keys from .gemini_keys file (one key per line)
+    # Falls back to GEMINI_API_KEYS / GEMINI_API_KEY env vars
+    def _load_gemini_keys(self) -> list[str]:
+        import os
+        keys: list[str] = []
+        # 1. Try .gemini_keys file next to this config module
+        base = os.path.dirname(os.path.abspath(__file__))
+        key_file = os.path.join(base, "..", "..", ".gemini_keys")
+        if os.path.exists(key_file):
+            with open(key_file, "r") as f:
+                keys = [line.strip() for line in f if line.strip()]
+            if keys:
+                return keys
+        # 2. Fallback: parse from env vars
+        raw = self.GEMINI_API_KEYS or self.GEMINI_API_KEY
+        if raw:
+            keys = [k.strip() for k in raw.split(",") if k.strip()]
+        return keys
+
+    @property
+    def GEMINI_KEYS(self) -> list[str]:
+        """Returns list of Gemini API keys, loaded from .gemini_keys file or env."""
+        return self._load_gemini_keys()
+
+    # Global defaults (used when role field is empty)
+    LLM_PROVIDER_DEFAULT: str = "groq"
+    LLM_MODEL_STRONG_DEFAULT: str = "llama-3.3-70b-versatile"
+    LLM_MODEL_LIGHT_DEFAULT: str = "llama-3.1-8b-instant"
+
+    # Shared provider config
     OPENAI_API_KEY: str = ""
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    BASE_URL: str = "https://api.openai.com/v1"
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_APP_NAME: str = "curriculum-ai-agent"
-    GROQ_API_KEY: str = ""
-    ANTHROPIC_API_KEY: str = ""
-
-    # Ollama
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL_STRONG: str = "llama3.2"
     OLLAMA_MODEL_LIGHT: str = "llama3.2"
+    QWEN_VISION_BASE_URL: str = ""
+    QWEN_VISION_TIMEOUT: float = 120.0
+    GROQ_API_KEY: str = ""
+    ANTHROPIC_API_KEY: str = ""
+    LLM_MODEL_GEMINI: str = "gemini-2.5-flash"
 
-    # Local sentence-transformers embedding (replaces OpenAI)
-    ST_EMBEDDING_MODEL: str = "paraphrase-multilingual-mpnet-base-v2"
-    ST_EMBEDDING_DIM: int = 768
+    # Local sentence-transformers embedding
+    ST_EMBEDDING_MODEL: str = "BAAI/bge-m3"
+    ST_EMBEDDING_DIM: int = 1024
 
     # Pinecone
     PINECONE_API_KEY: str = ""

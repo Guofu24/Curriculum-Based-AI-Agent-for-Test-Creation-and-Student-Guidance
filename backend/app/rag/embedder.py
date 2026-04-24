@@ -21,11 +21,21 @@ _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="st_embed")
 _st_model: Any | None = None
 _st_model_lock = asyncio.Lock()
 
+# Singleton cross-encoder reranker
+_cross_encoder_model: Any | None = None
+_ce_model_lock = asyncio.Lock()
+
 
 def _load_model_sync() -> Any:
     """Load SentenceTransformer model synchronously (called in thread pool)."""
     from sentence_transformers import SentenceTransformer
     return SentenceTransformer(settings.ST_EMBEDDING_MODEL)
+
+
+def _load_cross_encoder_sync() -> Any:
+    """Load CrossEncoder reranker synchronously (called in thread pool)."""
+    from sentence_transformers import CrossEncoder
+    return CrossEncoder(settings.RERANKER_MODEL)
 
 
 class _FallbackModel:
@@ -94,6 +104,28 @@ async def _get_model():
                 )
                 _st_model = _FallbackModel(embedding_dim=settings.ST_EMBEDDING_DIM)
     return _st_model
+
+
+async def _get_cross_encoder():
+    """Get or lazily load the singleton CrossEncoder reranker."""
+    global _cross_encoder_model
+    if _cross_encoder_model is not None:
+        return _cross_encoder_model
+    async with _ce_model_lock:
+        if _cross_encoder_model is None:
+            try:
+                loop = asyncio.get_running_loop()
+                _cross_encoder_model = await loop.run_in_executor(
+                    _executor, _load_cross_encoder_sync
+                )
+            except Exception as err:
+                import logging
+                logging.getLogger("document.embed").warning(
+                    "CrossEncoder reranker unavailable (%s) — reranking will be skipped",
+                    err,
+                )
+                _cross_encoder_model = None
+    return _cross_encoder_model
 
 
 def close_embedding_client() -> None:
@@ -184,6 +216,39 @@ class EmbeddingService:
             ).tolist(),
         )
         return vector
+
+    async def rerank(self, query: str, candidates: list[str], top_k: int = 8) -> list[tuple[int, float]]:
+        """
+        Rerank candidates using local CrossEncoder model.
+
+        Args:
+            query: The search query.
+            candidates: List of candidate text strings.
+            top_k: Number of top results to return.
+
+        Returns:
+            List of (candidate_index, relevance_score) sorted by score descending.
+        """
+        model = await _get_cross_encoder()
+        if model is None:
+            return []
+
+        pairs = [[query, doc] for doc in candidates]
+
+        def _predict():
+            scores = model.predict(pairs)
+            if hasattr(scores, "tolist"):
+                scores = scores.tolist()
+            return scores
+
+        loop = asyncio.get_running_loop()
+        scores = await loop.run_in_executor(_executor, _predict)
+
+        # Pair indices with scores and sort descending
+        indexed = list(enumerate(scores))
+        indexed.sort(key=lambda x: x[1], reverse=True)
+
+        return indexed[:top_k]
 
     async def _call_embedding_batch(self, texts: list[str]) -> list[list[float]]:
         """Run sentence-transformers encode in thread pool (batch)."""

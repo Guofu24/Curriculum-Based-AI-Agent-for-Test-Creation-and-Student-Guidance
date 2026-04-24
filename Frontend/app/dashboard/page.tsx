@@ -21,7 +21,7 @@ import {
   ChartTooltip,
   ChartTooltipContent,
 } from '@/components/ui/chart'
-import { Area, AreaChart, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from 'recharts'
+import { Area, AreaChart, XAxis, YAxis, CartesianGrid } from 'recharts'
 import {
   ClipboardList,
   FileText,
@@ -168,8 +168,7 @@ export default function DashboardPage() {
                   <Skeleton className="h-[300px] w-full" />
                 ) : (
                   <ChartContainer config={chartConfig} className="h-[300px] w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={stats.timeline ?? []}>
+                    <AreaChart data={stats.timeline ?? []}>
                         <defs>
                           <linearGradient id="colorQuality" x1="0" y1="0" x2="0" y2="1">
                             <stop offset="5%" stopColor="var(--color-chart-1)" stopOpacity={0.3} />
@@ -218,7 +217,6 @@ export default function DashboardPage() {
                           strokeWidth={2}
                         />
                       </AreaChart>
-                    </ResponsiveContainer>
                   </ChartContainer>
                 )}
               </CardContent>

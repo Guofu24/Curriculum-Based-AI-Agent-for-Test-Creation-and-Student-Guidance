@@ -4,7 +4,101 @@ import logging
 import time
 import json
 import asyncio
+import re
 from typing import Any
+
+
+# ─────────────────────────────────────────────────────────────
+# LaTeX escape sanitizer
+# ─────────────────────────────────────────────────────────────
+# LLM sometimes outputs LaTeX commands with a bare single backslash inside
+# JSON string values (e.g. "\circ").  json.loads() interprets a leading
+# backslash as a JSON escape sequence and fails because \c is not a valid
+# JSON escape (\n, \t, \", \\, \uXXXX are valid).  This function finds
+# bare LaTeX commands and doubles the backslash so json.loads sees a valid
+# escaped backslash.  JSON escapes (\n, \\, etc.) are left untouched.
+_LATEX_CMDS = sorted([
+    r"\alpha", r"\beta", r"\gamma", r"\delta", r"\epsilon", r"\zeta",
+    r"\eta", r"\theta", r"\iota", r"\kappa", r"\lambda", r"\mu",
+    r"\nu", r"\xi", r"\pi", r"\rho", r"\sigma", r"\tau", r"\upsilon",
+    r"\phi", r"\chi", r"\psi", r"\omega",
+    r"\Gamma", r"\Delta", r"\Theta", r"\Lambda", r"\Xi", r"\Pi",
+    r"\Sigma", r"\Upsilon", r"\Phi", r"\Psi", r"\Omega",
+    r"\rightarrow", r"\leftarrow", r"\Rightarrow", r"\Leftarrow",
+    r"\leftrightarrow", r"\Leftrightarrow", r"\mapsto", r"\to", r"\gets",
+    r"\leq", r"\geq", r"\neq", r"\approx", r"\equiv", r"\sim",
+    r"\ll", r"\gg", r"\perp", r"\parallel", r"\propto",
+    r"\pm", r"\times", r"\div", r"\cdot", r"\star", r"\circ", r"\bullet",
+    r"\oplus", r"\otimes", r"\ominus", r"\oslash",
+    r"\frac", r"\sqrt", r"\root", r"\infty", r"\partial", r"\nabla",
+    r"\sin", r"\cos", r"\tan", r"\cot", r"\sec", r"\csc",
+    r"\log", r"\ln", r"\exp", r"\lim", r"\sum", r"\prod",
+    r"\int", r"\oint", r"\iint", r"\iiiint",
+    r"\text", r"\mathrm", r"\mathbf", r"\mathit", r"\mathsf", r"\mathtt",
+    r"\vec", r"\hat", r"\dot", r"\ddot", r"\bar", r"\tilde", r"\breve",
+    r"\underline", r"\overline", r"\overbrace", r"\underbrace",
+    r"\quad", r"\qquad", r"\space",
+    r"\degree", r"\ang", r"\pu", r"\ldots", r"\cdots",
+    r"\vdots", r"\ddots", r"\forall", r"\exists",
+    r"\in", r"\notin", r"\subset", r"\supset", r"\cup", r"\cap", r"\emptyset",
+    r"\mathbb", r"\mathcal", r"\mathfrak",
+    r"\_", r"\^",
+], key=len, reverse=True)
+
+_LATEX_SANITIZE_RE = re.compile(
+    r"(?<!\\)(" + "|".join(re.escape(c) for c in _LATEX_CMDS) + r")"
+)
+
+
+def _sanitize_latex_escapes(json_str: str) -> str:
+    """Replace bare LaTeX \\cmd with \\\\cmd so json.loads sees a valid escaped backslash.
+
+    Only matches commands NOT preceded by another backslash.
+    Valid JSON escapes (\\n, \\\\, etc.) are untouched.
+    """
+    return _LATEX_SANITIZE_RE.sub(lambda m: "\\" + m.group(0), json_str)
+
+
+def _extract_json_brackets(text: str) -> str | None:
+    """Extract the outermost JSON object or array from text using bracket counting.
+
+    Handles cases where the LLM embeds the JSON inside prose (e.g. markdown fences,
+    explanatory text) by scanning for the first '{' or '[' and counting brackets
+    until a matching close is found.
+    """
+    start = None
+    for i, ch in enumerate(text):
+        if ch in ("{", "["):
+            start = i
+            break
+    if start is None:
+        return None
+
+    opener = text[start]
+    closer = "}" if opener == "{" else "]"
+    depth = 0
+    i = start
+    escaped = False
+
+    while i < len(text):
+        ch = text[i]
+        if escaped:
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\":
+            escaped = True
+            i += 1
+            continue
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+        elif ch == opener:
+            depth += 1
+        i += 1
+
+    return None
 
 from app.agents.base import AgentBaseOutput, AgentStatus, AgentMetrics, TokenUsage, BuilderOutput
 from app.agents.llm import get_llm_client
@@ -350,8 +444,6 @@ Trả về JSON:
                     temperature=0.7,
                 )
 
-                await asyncio.sleep(1)
-
                 if not response or not response.strip():
                     warnings.append(f"Slot {slot_number}: LLM returned empty response (attempt {attempt + 1})")
                     continue
@@ -363,24 +455,21 @@ Trả về JSON:
                     lines = [l for l in lines if not l.strip().startswith("```")]
                     clean = "\n".join(lines).strip()
 
-                # Try to extract JSON array or object
-                import re
-                json_match = re.search(r'\[[\s\S]*\]|\{[\s\S]*\}', clean)
-                if json_match:
-                    clean = json_match.group(0)
-                else:
+                # Try to extract JSON using bracket matching (reliable for LLM output)
+                json_str = _extract_json_brackets(clean)
+                if not json_str:
                     warnings.append(f"Slot {slot_number}: No JSON found in response (attempt {attempt + 1})")
                     continue
 
-                # Fix common LLM escape issues
-                clean = clean.replace("\\\\", "\u0000BS\u0000")
-                clean = clean.replace("\\n", "\n")
-                clean = clean.replace("\\t", "\t")
-                clean = clean.replace("\\r", "\r")
-                clean = clean.replace('\\"', '"')
-                clean = clean.replace("\u0000BS\u0000", "\\\\")
+                # Fix bare LaTeX backslash escapes (e.g. \circ -> \\circ) so json.loads can parse
+                json_str = _sanitize_latex_escapes(json_str)
 
-                data = json.loads(clean)
+                try:
+                    data = json.loads(json_str, strict=False)
+                except json.JSONDecodeError as je:
+                    warnings.append(f"Slot {slot_number}: JSON parse error after sanitize")
+                    logger.warning(f"[DEBUG] Slot {slot_number} JSONDecodeError at char {je.pos}: {je.msg} | snippet: {json_str[max(0,je.pos-20):je.pos+40]!r}")
+                    continue
 
                 # Normalize: data can be {"questions": [...]} or [...]
                 questions_raw: list = []
@@ -491,17 +580,23 @@ Trả về JSON:
 
         Extracts real content from the retrieved context to create a meaningful
         stem and options instead of placeholder text.
+        Bug-020 fix: fall back to chapter name from slot when context is empty.
         """
         q_id = slot.get("question_id", "DEMO_Q")
         q_type = slot.get("type", "mcq")
         bloom = slot.get("bloom_level", "thong_hieu")
         chapter = slot.get("chapter", "Chương không xác định")
         content_type = slot.get("content_type", "text")
+        topic_hint = slot.get("topic_hint", "")
 
         # Extract real content snippets from context for this chapter
         real_snippets = self._extract_snippets_for_chapter(context, chapter)
         snippet = real_snippets[0] if real_snippets else ""
         second_snippet = real_snippets[1] if len(real_snippets) > 1 else ""
+
+        # Bug-020 fix: use chapter + topic_hint from slot as fallback content
+        if not snippet:
+            snippet = f"{topic_hint} ({chapter})" if topic_hint else chapter
 
         demo_q: dict[str, Any] = {
             "question_id": q_id,

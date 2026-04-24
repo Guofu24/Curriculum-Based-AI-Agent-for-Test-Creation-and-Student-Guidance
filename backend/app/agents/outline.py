@@ -385,9 +385,11 @@ Tao blueprint chi tiet:"""
                 blueprint.append(slot)
                 mcq_id += 1
 
+        # MCQ-only: strip essay slots before building essay section
+        if essay_count == 0:
+            return blueprint
+
         for i in range(essay_count):
-            if essay_count == 0:
-                break  # Skip essay slots if exam is MCQ-only
             chapter = chapters[i % len(chapters)]
             slot = {
                 "question_id": f"ESSAY_{essay_id:03d}",

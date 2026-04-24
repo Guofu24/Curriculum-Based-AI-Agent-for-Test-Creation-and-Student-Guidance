@@ -1,6 +1,7 @@
 """Retrieval Agent - queries vector DB for knowledge chunks."""
 
 import asyncio
+import logging
 import time
 import uuid
 from typing import Any
@@ -8,6 +9,8 @@ from uuid import UUID
 
 from app.agents.base import AgentBaseOutput, AgentStatus, AgentMetrics, TokenUsage, RetrievalOutput
 from app.agents.llm import get_llm_client
+
+logger = logging.getLogger("app.agents.retrieval")
 from app.observability.tracer import get_tracer
 from app.rag.vector_store import get_vector_store
 from app.rag.embedder import EmbeddingService
@@ -36,7 +39,7 @@ class RetrievalAgent:
     Flow:
     1. Query expansion: generate 3-5 query variants
     2. Parallel sub-queries per chapter → Pinecone namespace
-    3. LLM reranking: GPT-4o-mini rerank top-20 → top-8
+    3. Reranking: CrossEncoder (BAAI/bge-reranker-v2-m3) rerank top-20 → top-8
     4. Merge & deduplicate
     """
 
@@ -320,7 +323,11 @@ Trả về JSON:
         query_text = " ".join(queries[:3])
         try:
             embedding = await self.embedder.embed_text(query_text)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Embedding failed for chapter=%s doc=%s: %s",
+                chapter, document_id, exc,
+            )
             return []
 
         # Query Pinecone — use query_namespace (doc_id + chapter_id, not document_id + chapter_ids)
@@ -341,31 +348,29 @@ Trả về JSON:
         chunks: list[dict],
         top_k: int = 8,
     ) -> list[dict]:
-        """Rerank chunks using LLM scoring."""
+        """Rerank chunks using local CrossEncoder (BAAI/bge-reranker-v2-m3)."""
         if not chunks:
             return []
 
-        # Prepare candidates
-        candidates = [
-            f"[{i}] {c['metadata'].get('content', '')[:300]}"
-            for i, c in enumerate(chunks)
-        ]
+        # Prepare candidate texts (no [index] prefix needed for cross-encoder)
+        candidates = [c["metadata"].get("content", "") for c in chunks]
 
         try:
-            reranked_indices = await self.llm.rerank(
+            reranked_indices = await self.embedder.rerank(
                 query=query,
                 candidates=candidates,
                 top_k=top_k,
-                role="reranker",
             )
 
             # Reorder chunks based on reranking
             reranked = []
             seen_ids = set()
             for idx, score in reranked_indices:
+                if not isinstance(idx, int) or not (0 <= idx < len(chunks)):
+                    continue
                 chunk = chunks[idx]
                 if chunk["chunk_id"] not in seen_ids:
-                    chunk["score"] = score  # Update score
+                    chunk["score"] = float(score)
                     reranked.append(chunk)
                     seen_ids.add(chunk["chunk_id"])
 

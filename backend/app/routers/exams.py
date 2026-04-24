@@ -1,16 +1,17 @@
 """Exam router: generate, list, detail, edit, export - aligned with frontend API."""
 
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 import uuid
+import time
 from datetime import date
 
 from app.core.database import get_db
 from app.core.redis_client import get_redis_client, RedisClient
 from app.core.config import get_settings
-from app.core.config import get_settings as _get_settings
 from app.services.exam_service import ExamService, ExamServiceError
 from app.schemas.exam import (
     ExamConfigRequest,
@@ -27,6 +28,7 @@ from app.schemas.exam import (
     ExportPreviewResponse,
     ExamReviewRequest,
     ExamReviewResponse,
+    QualitySummaryResponse,
 )
 from app.dependencies import get_current_user
 from app.models.user import User
@@ -35,11 +37,12 @@ from app.utils.export import ExamExporter
 
 import io
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/exams", tags=["Exams"])
 
 
 # ── Rate limit helper (G13) ───────────────────────────────────────────────────
-MAX_GENERATES_PER_DAY = _get_settings().MAX_GENERATES_PER_DAY
+MAX_GENERATES_PER_DAY = get_settings().MAX_GENERATES_PER_DAY
 
 
 async def check_generate_rate_limit(redis: RedisClient, user_id: str) -> None:
@@ -378,6 +381,92 @@ async def list_exams(
 
 
 @router.get(
+    "/quality-summary",
+    summary="Get quality metrics summary",
+    description="Returns aggregated quality metrics across all user's exams: "
+                 "verifier pass rate, evidence coverage rate, top error categories, "
+                 "and recent warnings. Useful for dashboard analytics.",
+    responses={
+        200: {"description": "Quality metrics summary (QualitySummary)"},
+        401: {"description": "Authentication required"},
+    },
+    tags=["Exams"],
+)
+async def get_quality_summary(
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis_client),
+    current_user: User = Depends(get_current_user),
+) -> QualitySummaryResponse:
+    """Get quality metrics summary. Returns dict matching frontend's QualitySummary."""
+    _log = logging.getLogger("exam.router")
+    service = ExamService(db, redis)
+    result = await service.get_quality_summary(current_user.id)
+    _log.debug("quality-summary returned: %s", result)
+    return result
+
+
+@router.get(
+    "/feedback-summary",
+    summary="Get feedback store summary",
+    description="Returns aggregated feedback store metrics: total events, "
+                 "reviewed/accepted/rejected/corrected counts, top signal types, "
+                 "top error categories, and recent events.",
+    responses={
+        200: {"description": "Feedback store summary (FeedbackStoreSummary)"},
+        401: {"description": "Authentication required"},
+    },
+    tags=["Exams"],
+)
+async def get_feedback_summary(
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis_client),
+    current_user: User = Depends(get_current_user),
+):
+    """Get feedback store summary. Returns dict matching frontend's FeedbackStoreSummary."""
+    service = ExamService(db, redis)
+    return await service.get_feedback_store_summary(current_user.id)
+
+
+@router.get(
+    "/feedback-store",
+    summary="Get filtered feedback store across all user exams",
+    description="Returns paginated feedback events across all user exams with optional "
+                 "filters by severity and review_status.",
+    responses={
+        200: {"description": "Paginated feedback events with total count"},
+        401: {"description": "Authentication required"},
+    },
+    tags=["Exams"],
+)
+async def get_feedback_store(
+    page: int = 1,
+    limit: int = 50,
+    severity: str | None = None,
+    review_status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis_client),
+    current_user: User = Depends(get_current_user),
+):
+    """Get filtered feedback events. Returns list matching frontend's FeedbackEvent[]."""
+    service = ExamService(db, redis)
+    events, total = await service.get_feedback_store(
+        user_id=current_user.id,
+        page=page,
+        limit=limit,
+        severity=severity,
+        review_status=review_status,
+    )
+    return {
+        "items": [_feedback_to_dict(f) for f in events],
+        "total": total,
+        "page": page,
+        "limit": limit,
+    }
+
+
+# ── Per-exam endpoints (path params must come AFTER global endpoints) ─────────────
+
+@router.get(
     "/{exam_id}",
     response_model=dict,
     summary="Get exam details",
@@ -529,89 +618,6 @@ async def delete_exam(
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
     return {"message": "Exam deleted successfully"}
-
-
-# ── Global quality & feedback endpoints ───────────────────────────────────────
-
-@router.get(
-    "/quality-summary",
-    summary="Get quality metrics summary",
-    description="Returns aggregated quality metrics across all user's exams: "
-                 "verifier pass rate, evidence coverage rate, top error categories, "
-                 "and recent warnings. Useful for dashboard analytics.",
-    responses={
-        200: {"description": "Quality metrics summary (QualitySummary)"},
-        401: {"description": "Authentication required"},
-    },
-    tags=["Exams"],
-)
-async def get_quality_summary(
-    db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis_client),
-    current_user: User = Depends(get_current_user),
-):
-    """Get quality metrics summary. Returns dict matching frontend's QualitySummary."""
-    service = ExamService(db, redis)
-    return await service.get_quality_summary(current_user.id)
-
-
-@router.get(
-    "/feedback-summary",
-    summary="Get feedback store summary",
-    description="Returns aggregated feedback store metrics: total events, "
-                 "reviewed/accepted/rejected/corrected counts, top signal types, "
-                 "top error categories, and recent events.",
-    responses={
-        200: {"description": "Feedback store summary (FeedbackStoreSummary)"},
-        401: {"description": "Authentication required"},
-    },
-    tags=["Exams"],
-)
-async def get_feedback_summary(
-    db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis_client),
-    current_user: User = Depends(get_current_user),
-):
-    """Get feedback store summary. Returns dict matching frontend's FeedbackStoreSummary."""
-    service = ExamService(db, redis)
-    return await service.get_feedback_store_summary(current_user.id)
-
-
-@router.get(
-    "/feedback-store",
-    summary="Get filtered feedback store across all user exams",
-    description="Returns paginated feedback events across all user exams with optional "
-                 "filters by severity and review_status.",
-    responses={
-        200: {"description": "Paginated feedback events with total count"},
-        401: {"description": "Authentication required"},
-    },
-    tags=["Exams"],
-)
-async def get_feedback_store(
-    page: int = 1,
-    limit: int = 50,
-    severity: str | None = None,
-    review_status: str | None = None,
-    db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis_client),
-    current_user: User = Depends(get_current_user),
-):
-    """Get filtered feedback events. Returns list matching frontend's FeedbackEvent[]."""
-    service = ExamService(db, redis)
-    events, total = await service.get_feedback_store(
-        user_id=current_user.id,
-        page=page,
-        limit=limit,
-        severity=severity,
-        review_status=review_status,
-    )
-    return {
-        "items": [_feedback_to_dict(f) for f in events],
-        "total": total,
-        "page": page,
-        "limit": limit,
-    }
 
 
 # ── Existing endpoints (kept for compatibility) ─────────────────────────────────
@@ -904,8 +910,6 @@ async def restore_snapshot(
 
 # ── HITL Checkpoint Endpoints ───────────────────────────────────────────────────
 
-from app.schemas.exam import BlueprintApprovalRequest
-
 
 @router.post(
     "/{exam_id}/approve-blueprint",
@@ -936,7 +940,9 @@ async def approve_blueprint(
 ):
     """
     HITL Checkpoint 1: Blueprint approval.
-    Saves Redis key hitl:approved:{exam_id}:1 to unblock the pipeline.
+    Saves approval state in Redis key and in-memory fallback (for when Redis is down).
+    Updates the shared graph state so the paused graph can resume.
+    Emits approval event via WebSocket for the frontend.
     """
     service = ExamService(db, redis)
 
@@ -951,8 +957,8 @@ async def approve_blueprint(
         exam_id=str(exam_id),
         user_id=str(current_user.id),
     )
+
     # Also publish to Redis channel so the orchestrator's pub/sub listener unblocks immediately
-    # Use the already-injected redis dependency (async client)
     try:
         await redis.publish(f"exam:{exam_id}", {
             "type": "blueprint_approved",
@@ -961,7 +967,43 @@ async def approve_blueprint(
             "timestamp": time.time(),
         })
     except Exception:
-        pass  # Non-blocking — Redis key is already set as fallback
+        pass  # Non-critical — Redis key is already set as fallback
+
+    # Set in-memory fallback approval (used when Redis is unavailable)
+    from app.tasks.exam_task import set_fallback_approval
+    set_fallback_approval(str(exam_id), "approved")
+
+    # Emit approval event via WebSocket so the frontend updates its state
+    try:
+        from app.websocket.manager import get_connection_manager
+        manager = get_connection_manager()
+        await manager.emit(str(exam_id), {
+            "type": "blueprint_approved_received",
+            "exam_id": str(exam_id),
+        })
+    except Exception:
+        pass  # Non-critical
+
+    # Update the shared graph state so the paused graph picks up the approval
+    # and continues to build_questions.
+    try:
+        from app.agents.graph.state import HITLCheckpointStatus
+        from app.agents.graph.builder import build_exam_graph
+        graph = build_exam_graph()
+        config = {"configurable": {"thread_id": str(exam_id)}}
+        await graph.aupdate_state(config, {
+            "checkpoint_1_approved": True,
+            "checkpoint_1_status": HITLCheckpointStatus.APPROVED,
+            "pipeline_status": "running",
+        })
+        # Resume the graph from the paused state
+        try:
+            await graph.ainvoke(None, config)
+        except Exception as e:
+            logger.debug(f"Graph resume after approval for exam {exam_id}: {e}")
+    except Exception as e:
+        logger.warning(f"Could not update graph state for exam {exam_id}: {e}")
+
     return {"status": "approved", "message": "Blueprint đã được phê duyệt. Bắt đầu sinh câu hỏi."}
 
 
