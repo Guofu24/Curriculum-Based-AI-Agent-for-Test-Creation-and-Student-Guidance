@@ -141,3 +141,4 @@ compose.override.yml
 *.orig
 *.rej
 .gemini_keys
+backend/.gemini_keys
