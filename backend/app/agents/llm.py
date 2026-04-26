@@ -91,13 +91,13 @@ class OpenAIProvider(BaseLLMProvider):
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs) -> str:  # noqa: ARG002
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        async with AsyncOpenAI(api_key=self._api_key, base_url=self._base_url) as client:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         return resp.choices[0].message.content or ""
 
     async def chat_structured(
@@ -112,15 +112,15 @@ class OpenAIProvider(BaseLLMProvider):
         import instructor
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
-        inst = instructor.from_openai(client)
-        return await inst.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_model=response_model,
-            temperature=temperature,
-            max_retries=max_retries,
-        )
+        async with AsyncOpenAI(api_key=self._api_key, base_url=self._base_url) as client:
+            inst = instructor.from_openai(client)
+            return await inst.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_model=response_model,
+                temperature=temperature,
+                max_retries=max_retries,
+            )
 
     def supports_vision(self) -> bool:
         return True
@@ -142,20 +142,20 @@ class OpenRouterProvider(BaseLLMProvider):
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(
+        async with AsyncOpenAI(
             api_key=self._api_key,
             base_url=self.BASE_URL,
             default_headers={
                 "HTTP-Referer": "https://github.com/curriculum-ai",
                 "X-Title": self._app_name,
             },
-        )
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        ) as client:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         return resp.choices[0].message.content or ""
 
     async def chat_structured(
@@ -170,22 +170,22 @@ class OpenRouterProvider(BaseLLMProvider):
         import instructor
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(
+        async with AsyncOpenAI(
             api_key=self._api_key,
             base_url=self.BASE_URL,
             default_headers={
                 "HTTP-Referer": "https://github.com/curriculum-ai",
                 "X-Title": self._app_name,
             },
-        )
-        inst = instructor.from_openai(client)
-        return await inst.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_model=response_model,
-            temperature=temperature,
-            max_retries=max_retries,
-        )
+        ) as client:
+            inst = instructor.from_openai(client)
+            return await inst.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_model=response_model,
+                temperature=temperature,
+                max_retries=max_retries,
+            )
 
     def supports_vision(self) -> bool:
         return True
@@ -204,13 +204,13 @@ class GroqProvider(BaseLLMProvider):
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         from groq import AsyncGroq
 
-        client = AsyncGroq(api_key=self._api_key)
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        async with AsyncGroq(api_key=self._api_key) as client:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         return resp.choices[0].message.content or ""
 
     async def chat_structured(
@@ -225,15 +225,15 @@ class GroqProvider(BaseLLMProvider):
         import instructor
         from groq import AsyncGroq
 
-        client = AsyncGroq(api_key=self._api_key)
-        inst = instructor.from_groq(client, mode=instructor.Mode.JSON)
-        return await inst.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_model=response_model,
-            temperature=temperature,
-            max_retries=max_retries,
-        )
+        async with AsyncGroq(api_key=self._api_key) as client:
+            inst = instructor.from_groq(client, mode=instructor.Mode.JSON)
+            return await inst.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_model=response_model,
+                temperature=temperature,
+                max_retries=max_retries,
+            )
 
     def supports_vision(self) -> bool:
         return True
@@ -252,23 +252,22 @@ class AnthropicProvider(BaseLLMProvider):
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         import anthropic
 
-        client = anthropic.AsyncAnthropic(api_key=self._api_key)
+        async with anthropic.AsyncAnthropic(api_key=self._api_key) as client:
+            system = ""
+            filtered = []
+            for m in messages:
+                if m["role"] == "system":
+                    system = m["content"]
+                else:
+                    filtered.append(m)
 
-        system = ""
-        filtered = []
-        for m in messages:
-            if m["role"] == "system":
-                system = m["content"]
-            else:
-                filtered.append(m)
-
-        resp = await client.messages.create(
-            model=model,
-            messages=filtered,
-            system=system,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+            resp = await client.messages.create(
+                model=model,
+                messages=filtered,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
         return resp.content[0].text
 
     async def chat_structured(
@@ -283,26 +282,25 @@ class AnthropicProvider(BaseLLMProvider):
         import anthropic
         import instructor
 
-        client = anthropic.AsyncAnthropic(api_key=self._api_key)
+        async with anthropic.AsyncAnthropic(api_key=self._api_key) as client:
+            system = ""
+            filtered = []
+            for m in messages:
+                if m["role"] == "system":
+                    system = m["content"]
+                else:
+                    filtered.append(m)
 
-        system = ""
-        filtered = []
-        for m in messages:
-            if m["role"] == "system":
-                system = m["content"]
-            else:
-                filtered.append(m)
-
-        inst = instructor.from_anthropic(client)
-        return await inst.messages.create(
-            model=model,
-            messages=filtered,
-            system=system,
-            response_model=response_model,
-            max_tokens=4096,
-            temperature=temperature,
-            max_retries=max_retries,
-        )
+            inst = instructor.from_anthropic(client)
+            return await inst.messages.create(
+                model=model,
+                messages=filtered,
+                system=system,
+                response_model=response_model,
+                max_tokens=4096,
+                temperature=temperature,
+                max_retries=max_retries,
+            )
 
     def supports_vision(self) -> bool:
         return True
@@ -321,15 +319,15 @@ class OllamaProvider(BaseLLMProvider):
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(
+        async with AsyncOpenAI(
             base_url=f"{self._base_url}/v1",
             api_key="ollama",
-        )
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-        )
+        ) as client:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
         return resp.choices[0].message.content or ""
 
     async def chat_structured(
@@ -344,31 +342,31 @@ class OllamaProvider(BaseLLMProvider):
         import instructor
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(
+        async with AsyncOpenAI(
             base_url=f"{self._base_url}/v1",
             api_key="ollama",
-        )
-        inst = instructor.from_openai(client, mode=instructor.Mode.JSON)
+        ) as client:
+            inst = instructor.from_openai(client, mode=instructor.Mode.JSON)
 
-        try:
-            return await inst.chat.completions.create(
-                model=model,
-                messages=messages,
-                response_model=response_model,
-                temperature=temperature,
-                max_retries=max_retries,
-            )
-        except Exception:
-            schema = response_model.model_json_schema()
-            augmented_messages = messages + [{
-                "role": "user",
-                "content": f"Respond with ONLY valid JSON matching this schema (no markdown, no explanation): {json.dumps(schema, ensure_ascii=False)}",
-            }]
-            raw = await self.chat(augmented_messages, model, temperature=0)
-            json_match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if json_match:
-                return response_model.model_validate_json(json_match.group())
-            raise ValueError(f"Cannot parse JSON from Ollama response: {raw[:200]}")
+            try:
+                return await inst.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    response_model=response_model,
+                    temperature=temperature,
+                    max_retries=max_retries,
+                )
+            except Exception:
+                schema = response_model.model_json_schema()
+                augmented_messages = messages + [{
+                    "role": "user",
+                    "content": f"Respond with ONLY valid JSON matching this schema (no markdown, no explanation): {json.dumps(schema, ensure_ascii=False)}",
+                }]
+                raw = await self.chat(augmented_messages, model, temperature=0)
+                json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+                if json_match:
+                    return response_model.model_validate_json(json_match.group())
+                raise ValueError(f"Cannot parse JSON from Ollama response: {raw[:200]}")
 
     def supports_vision(self) -> bool:
         return False
@@ -388,11 +386,8 @@ class G4FProvider(BaseLLMProvider):
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         import g4f
 
-        # g4f has its own model pool — don't pass Groq/OpenAI model names.
-        # Use g4f's auto-selection (picks best available).
         g4f_model = getattr(g4f.models, "gpt_4o_mini", None) or getattr(g4f.models, "gpt_4o", None)
         if g4f_model is None:
-            # Last-resort fallback
             g4f_model = "gpt-4o-mini"
 
         response = await g4f.ChatCompletion.create_async(
@@ -461,13 +456,13 @@ class QwenVisionProvider(BaseLLMProvider):
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs: Any) -> str:  # noqa: ARG002
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key="not-needed", base_url=self._base_url)
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        async with AsyncOpenAI(api_key="not-needed", base_url=self._base_url) as client:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         return resp.choices[0].message.content or ""
 
     async def chat_structured(
@@ -482,15 +477,15 @@ class QwenVisionProvider(BaseLLMProvider):
         import instructor
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key="not-needed", base_url=self._base_url)
-        inst = instructor.from_openai(client)
-        return await inst.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_model=response_model,
-            temperature=temperature,
-            max_retries=max_retries,
-        )
+        async with AsyncOpenAI(api_key="not-needed", base_url=self._base_url) as client:
+            inst = instructor.from_openai(client)
+            return await inst.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_model=response_model,
+                temperature=temperature,
+                max_retries=max_retries,
+            )
 
     def supports_vision(self) -> bool:
         return True

@@ -3,7 +3,7 @@
 import logging
 
 from app.agents.graph.state import ExamGraphState, HITLCheckpointStatus
-from app.agents.graph.nodes._emit import _emit
+from app.agents.graph.nodes._emit import _emit_async
 
 logger = logging.getLogger("app.agents.graph")
 
@@ -13,7 +13,9 @@ async def emit_checkpoint_1(state: ExamGraphState) -> ExamGraphState:
     Emit HITL Checkpoint 1: Blueprint Review event.
 
     Sends the blueprint and distribution_summary to the frontend via WebSocket.
-    The graph then transitions to wait_for_blueprint_approval.
+    Events are awaited so they reach the frontend before the graph continues
+    to wait_for_blueprint_approval. The graph then transitions to
+    wait_for_blueprint_approval where execution pauses via interrupt().
 
     Args:
         state: Must contain blueprint, distribution_summary.
@@ -21,12 +23,18 @@ async def emit_checkpoint_1(state: ExamGraphState) -> ExamGraphState:
     Returns:
         Updated state with checkpoint_1_status = PENDING.
     """
+    from app.websocket.manager import get_connection_manager
+
     blueprint = state.get("blueprint", [])
     distribution_summary = state.get("distribution_summary", {})
     exam_id = state.get("exam_id", "")
     warnings = list(state.get("warnings", []))
 
-    _emit(state, {
+    logger.info(f"[emit_checkpoint_1] exam_id={exam_id}, blueprint_slots={len(blueprint)}, emitting hitl_checkpoint...")
+    print(f"[emit_checkpoint_1] exam_id={exam_id}, blueprint_slots={len(blueprint)}, emitting hitl_checkpoint NOW!", flush=True)
+
+    manager = get_connection_manager()
+    await _emit_async(manager, exam_id, {
         "type": "hitl_checkpoint",
         "checkpoint_id": 1,
         "data": {
@@ -34,13 +42,14 @@ async def emit_checkpoint_1(state: ExamGraphState) -> ExamGraphState:
             "distribution_summary": distribution_summary,
         },
     })
-
-    _emit(state, {
+    await _emit_async(manager, exam_id, {
         "type": "plan_step",
         "message": "Đang chờ phê duyệt blueprint...",
         "step": 2,
         "total_steps": 5,
     })
+
+    logger.info(f"[emit_checkpoint_1] exam_id={exam_id}, events emitted successfully")
 
     return {
         **state,

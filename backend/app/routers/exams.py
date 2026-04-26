@@ -940,9 +940,10 @@ async def approve_blueprint(
 ):
     """
     HITL Checkpoint 1: Blueprint approval.
-    Saves approval state in Redis key and in-memory fallback (for when Redis is down).
-    Updates the shared graph state so the paused graph can resume.
-    Emits approval event via WebSocket for the frontend.
+
+    Saves approval state in Redis key, then resumes the paused LangGraph via
+    Command(resume={...}) so the pipeline continues to build_questions.
+    The graph was paused at wait_for_blueprint_approval via interrupt().
     """
     service = ExamService(db, redis)
 
@@ -950,59 +951,30 @@ async def approve_blueprint(
     if not exam:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
 
-    from app.agents.orchestrator import OrchestratorAgent
-    orchestrator = OrchestratorAgent(redis=redis, db_session=db)
-
-    await orchestrator.approve_blueprint(
-        exam_id=str(exam_id),
-        user_id=str(current_user.id),
-    )
-
-    # Also publish to Redis channel so the orchestrator's pub/sub listener unblocks immediately
+    # Save approval in Redis (belt-and-suspenders for crash recovery)
+    key = f"hitl:approved:{exam_id}:1"
     try:
-        await redis.publish(f"exam:{exam_id}", {
-            "type": "blueprint_approved",
-            "exam_id": str(exam_id),
-            "user_id": str(current_user.id),
-            "timestamp": time.time(),
-        })
+        await redis.set(key, "true", ttl=3600)
     except Exception:
-        pass  # Non-critical — Redis key is already set as fallback
+        pass
 
-    # Set in-memory fallback approval (used when Redis is unavailable)
-    from app.tasks.exam_task import set_fallback_approval
-    set_fallback_approval(str(exam_id), "approved")
-
-    # Emit approval event via WebSocket so the frontend updates its state
+    # Resume the interrupted graph via Command(resume=...)
+    # If no interrupt is found (graph already completed), this logs a warning but doesn't fail.
     try:
-        from app.websocket.manager import get_connection_manager
-        manager = get_connection_manager()
-        await manager.emit(str(exam_id), {
-            "type": "blueprint_approved_received",
-            "exam_id": str(exam_id),
-        })
-    except Exception:
-        pass  # Non-critical
-
-    # Update the shared graph state so the paused graph picks up the approval
-    # and continues to build_questions.
-    try:
-        from app.agents.graph.state import HITLCheckpointStatus
+        from langgraph.types import Command
         from app.agents.graph.builder import build_exam_graph
         graph = build_exam_graph()
-        config = {"configurable": {"thread_id": str(exam_id)}}
-        await graph.aupdate_state(config, {
-            "checkpoint_1_approved": True,
-            "checkpoint_1_status": HITLCheckpointStatus.APPROVED,
-            "pipeline_status": "running",
-        })
-        # Resume the graph from the paused state
-        try:
-            await graph.ainvoke(None, config)
-        except Exception as e:
-            logger.debug(f"Graph resume after approval for exam {exam_id}: {e}")
+        config = {"configurable": {"thread_id": str(exam_id), "recursion_limit": 500}}
+        logger.info(f"Resuming graph for exam {exam_id} with Command(resume={{approved: True}})")
+        await graph.ainvoke(
+            Command(resume={"approved": True}),
+            config=config,
+        )
     except Exception as e:
-        logger.warning(f"Could not update graph state for exam {exam_id}: {e}")
+        if "interrupt" in str(e).lower() or "nothing to resume" in str(e).lower():
+            logger.info(f"No interrupt to resume for exam {exam_id}: {e}")
+        else:
+            logger.warning(f"Could not resume graph for exam {exam_id}: {e}")
 
     return {"status": "approved", "message": "Blueprint đã được phê duyệt. Bắt đầu sinh câu hỏi."}
 
@@ -1036,9 +1008,10 @@ async def reject_blueprint(
     current_user: User = Depends(get_current_user),
 ):
     """
-    G8: Re-generate outline with HITL feedback.
-    Passes feedback down to Orchestrator which calls OutlineAgent with the feedback
-    as additional instruction, then emits a new HITL checkpoint 1.
+    G8: Reject blueprint with feedback and resume graph.
+    Stores rejection + feedback in Redis, then resumes the interrupted graph
+    via Command(resume={...}). The graph's wait_for_blueprint_approval node
+    receives approved=False and routes to create_outline with the feedback.
     """
     service = ExamService(db, redis)
 
@@ -1046,15 +1019,55 @@ async def reject_blueprint(
     if not exam:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
 
-    from app.agents.orchestrator import OrchestratorAgent
-    orchestrator = OrchestratorAgent(redis=redis, db_session=db)
+    # Store rejection + feedback in Redis so the graph node can retrieve it
+    import json
+    rejection_key = f"hitl:rejected:{exam_id}:1"
+    try:
+        await redis.set(rejection_key, json.dumps({
+            "feedback": request.feedback,
+            "user_id": str(current_user.id),
+            "timestamp": time.time(),
+        }), ttl=3600)
+    except Exception:
+        pass
 
-    result = await orchestrator.reject_blueprint(
-        exam_id=str(exam_id),
-        user_id=str(current_user.id),
-        feedback=request.feedback,
-    )
-    return result
+    # Resume the interrupted graph with rejection signal
+    try:
+        from langgraph.types import Command
+        from app.agents.graph.builder import build_exam_graph
+        graph = build_exam_graph()
+        config = {"configurable": {"thread_id": str(exam_id), "recursion_limit": 500}}
+        logger.info(f"Resuming graph for exam {exam_id} with Command(resume={{approved: False}})")
+        await graph.ainvoke(
+            Command(resume={"approved": False}),
+            config=config,
+        )
+    except Exception as e:
+        if "interrupt" in str(e).lower() or "nothing to resume" in str(e).lower():
+            logger.info(f"No interrupt to resume for exam {exam_id}: {e}")
+            # Fallback: dispatch Celery task to re-run the pipeline from scratch
+            from app.tasks.exam_task import generate_exam_task
+            session_key = f"session:{exam_id}:{current_user.id}"
+            try:
+                session = await redis.get_json(session_key)
+            except Exception:
+                session = None
+            generate_exam_task.delay(
+                exam_id=str(exam_id),
+                user_id=str(current_user.id),
+                document_id=session.get("document_id") if session else None,
+                scope=session.get("scope", []) if session else [],
+                exam_config={**(session.get("exam_config_original", {}) if session else {}), "outline_feedback": request.feedback},
+                user_prompt=session.get("exam_config_original", {}).get("user_prompt", "") if session else "",
+                extra_instructions=request.feedback,
+            )
+        else:
+            logger.warning(f"Could not resume graph for exam {exam_id}: {e}")
+
+    return {
+        "status": "rejected_with_feedback",
+        "message": f"Đã ghi nhận phản hồi. Blueprint sẽ được điều chỉnh: {request.feedback[:50]}...",
+    }
 
 
 @router.get(

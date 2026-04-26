@@ -175,7 +175,10 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             from app.agents.graph.builder import build_exam_graph
             self.graph = build_exam_graph()
 
-        config = {"configurable": {"thread_id": exam_id}}
+        config = {"configurable": {"thread_id": exam_id, "recursion_limit": 500}}
+        logger.info("Starting graph with recursion_limit=500 for exam_id=%s", exam_id)
+
+        initial_state = {
 
         initial_state = {
             "exam_id": exam_id,
@@ -196,20 +199,42 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         """
         Run the LangGraph and handle interrupts.
 
-        For non-interrupt nodes, this is a single ainvoke() call.
-        For interrupt nodes (HITL checkpoints), this loops:
-          1. Run until interrupt or completion
-          2. If interrupt: emit pipeline_paused event and return pause info
-          3. Caller (Celery task / HTTP endpoint) resumes via approve/reject API
+        Runs graph.ainvoke() until completion or interrupt.
+        - Newer LangGraph (>=0.4): ainvoke() returns {"__interrupt__": [...]} on interrupt.
+        - Older LangGraph (<0.4): ainvoke() raises GraphInterrupt(BaseException).
+        Both cases mean the graph paused — Celery task returns, HTTP endpoint resumes.
         """
         from langgraph.types import Command
         import time
 
-        result = await self.graph.ainvoke(initial_state, config)
+        try:
+            result = await self.graph.ainvoke(initial_state, config)
+        except BaseException as e:
+            # Handle GraphInterrupt (raised by older LangGraph when interrupt() is called).
+            # The graph state is saved in the checkpointer; HTTP endpoint resumes it.
+            try:
+                from langgraph.types import GraphInterrupt as _GI
+                is_interrupt = isinstance(e, _GI)
+            except ImportError:
+                is_interrupt = False
 
-        # If the graph hit an interrupt, it pauses there
+            if is_interrupt:
+                return {
+                    "exam_id": initial_state.get("exam_id"),
+                    "questions": [],
+                    "blueprint": initial_state.get("blueprint") or [],
+                    "distribution_summary": initial_state.get("distribution_summary") or {},
+                    "cost_report": {},
+                    "status": AgentStatus.RETRY_NEEDED,
+                    "warnings": initial_state.get("warnings", []) + ["Pipeline paused at checkpoint 1"],
+                    "pipeline_paused": True,
+                    "interrupt_type": "checkpoint_1",
+                }
+            raise
+
+        # Handle interrupt in newer LangGraph (returns dict with __interrupt__ key)
         if result.get("__interrupt__"):
-            interrupt_type = result.get("__interrupt__", {}).get("interrupt_type", "")
+            interrupt_type = result.get("__interrupt__", [{}])[0].get("interrupt_type", "")
             checkpoint_id = 1 if "checkpoint_1" in str(interrupt_type) else 2
             return {
                 "exam_id": result.get("exam_id"),

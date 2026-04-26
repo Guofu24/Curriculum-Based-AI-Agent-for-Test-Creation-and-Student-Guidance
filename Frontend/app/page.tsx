@@ -271,11 +271,11 @@ export default function AuthPage() {
 
               <p className="mt-6 text-center text-sm text-muted-foreground">
                 Bằng việc tiếp tục, bạn đồng ý với{' '}
-                <a href="#" className="text-primary hover:underline">
+                <a href="/terms" className="text-primary hover:underline">
                   Điều khoản sử dụng
                 </a>{' '}
                 và{' '}
-                <a href="#" className="text-primary hover:underline">
+                <a href="/privacy" className="text-primary hover:underline">
                   Chính sách bảo mật
                 </a>
               </p>

@@ -183,11 +183,16 @@ async def _run_generation_inline(
 
         generated_questions = result.get("questions", [])
         status_val = result.get("status")
-        is_success = (
-            status_val == "success"
-            or (hasattr(status_val, "value") and status_val.value == "success")
-            or status_val == "partial"  # PARTIAL means questions were generated (with warnings)
-        )
+        is_paused = result.get("pipeline_paused")
+        is_success = str(status_val) in ("success", "partial")
+
+        # Pipeline paused at HITL checkpoint — interrupt fired, checkpoint events were
+        # already emitted by the graph. Just return; frontend shows the approval UI.
+        if is_paused:
+            return {
+                "exam_id": exam_id,
+                "status": str(status_val or "unknown"),
+            }
 
         if not generated_questions:
             await manager.emit(
@@ -218,19 +223,6 @@ async def _run_generation_inline(
                         exam_id,
                         total_cost_usd=result.get("cost_report", {}).get("total_cost_usd"),
                     ),
-                )
-            elif result.get("pipeline_paused"):
-                # Pipeline paused at HITL checkpoint — emit a pause event so the
-                # frontend knows to show the approval UI and wait for user input.
-                await manager.emit(
-                    exam_id,
-                    {
-                        "type": "pipeline_paused",
-                        "checkpoint_id": 1,
-                        "message": "Chờ phê duyệt blueprint...",
-                        "blueprint": result.get("blueprint", []),
-                        "distribution_summary": result.get("distribution_summary", {}),
-                    },
                 )
             else:
                 await manager.emit(
@@ -419,9 +411,17 @@ async def generate_exam_fe(
     async def _background_generation():
         """Run generation in background — emits events via WebSocket as it progresses."""
         import logging as _bg_log
+        import sys as _sys
         from app.websocket.manager import get_connection_manager
         from langgraph.errors import GraphInterrupt
         _bg = _bg_log.getLogger("generate.background")
+        _bg.setLevel(_bg_log.DEBUG)
+        _bg.handlers.clear()
+        _bg.addHandler(_bg_log.StreamHandler(_sys.stdout))
+        _bg.propagate = False
+        _bg.debug(">>> _background_generation STARTED for exam_id=%s", exam_uuid)
+        _sys.stdout.flush()
+        print(f"[DEBUG] _background_generation STARTED for exam_id={exam_uuid}", flush=True)
         try:
             result = await _run_generation_inline(
                 exam_id=exam_uuid,
@@ -454,7 +454,9 @@ async def generate_exam_fe(
             })
 
     # Start background task — shares the request's async event loop (no new loop needed)
+    print(f"[DEBUG] About to create_task for exam_id={exam_uuid}", flush=True)
     asyncio.create_task(_background_generation())
+    print(f"[DEBUG] create_task returned for exam_id={exam_uuid}", flush=True)
 
     _log.info("Response returned immediately for exam_id=%s, background task started", exam_uuid)
     return response

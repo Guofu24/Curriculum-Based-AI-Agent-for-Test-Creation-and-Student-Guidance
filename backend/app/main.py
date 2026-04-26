@@ -20,8 +20,48 @@ from app.routers.playbook import router as playbook_router
 
 settings = get_settings()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging — must propagate to root so named app loggers show in terminal
+_root_logger = logging.getLogger()
+if not _root_logger.handlers:
+    _root_logger.addHandler(logging.StreamHandler())
+_root_logger.setLevel(logging.INFO)
+
+# Ensure all app loggers use the same format as uvicorn
+_log_format = "%(asctime)s | %(name)-30s | %(levelname)-8s | %(message)s"
+_handler = logging.StreamHandler()
+_handler.setFormatter(logging.Formatter(_log_format, datefmt="%H:%M:%S"))
+
+# Configure all app loggers to use the handler
+_app_loggers = [
+    "generate.exam",
+    "generate.background",
+    "generate.inline",
+    "exam.router",
+    "app.agents.orchestrator",
+    "app.agents.graph",
+    "app.agents.builder",
+    "app.agents.retrieval",
+    "app.agents.outline",
+    "app.agents.llm",
+    "app.rag.vector_store",
+    "app.rag.embedder",
+    "app.rag.structure",
+    "app.rag.parser",
+    "document.process",
+    "document.delete",
+    "document.background",
+    "document.rescan",
+    "document.reprocess",
+    "rag.structure",
+    "ws.manager",
+]
+for _name in _app_loggers:
+    _logger = logging.getLogger(_name)
+    _logger.handlers.clear()
+    _logger.addHandler(_handler)
+    _logger.setLevel(logging.INFO)
+    _logger.propagate = False
+
 # Reduce SQLAlchemy noise — only show warnings/errors, not every query
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)

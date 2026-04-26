@@ -2,6 +2,7 @@
 
 import asyncio
 import uuid
+import logging
 from typing import Any
 
 from celery import Task
@@ -13,6 +14,7 @@ from app.services.exam_service import ExamService
 from app.tasks.celery_app import celery_app
 from app.websocket.manager import get_connection_manager, SSEvent
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # In-memory fallback for HITL approvals and graph state when Redis is unavailable.
@@ -340,19 +342,49 @@ def _run_async_task(
         finally:
             loop.close()
             asyncio.set_event_loop(None)
-    except Exception as e:
+    except BaseException as e:
+        # Handle GraphInterrupt — expected when HITL checkpoint pauses the graph.
+        # The graph state is saved in the checkpointer; HTTP endpoint resumes it.
+        try:
+            from langgraph.types import GraphInterrupt as _GI
+            is_interrupt = isinstance(e, _GI)
+        except ImportError:
+            is_interrupt = False
+
+        if is_interrupt:
+            if exam_id:
+                try:
+                    err_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(err_loop)
+                    try:
+                        manager = get_connection_manager()
+                        err_loop.run_until_complete(
+                            manager.emit(exam_id, {
+                                "type": "pipeline_paused",
+                                "checkpoint_id": 1,
+                                "message": "Đang chờ phê duyệt blueprint...",
+                            }),
+                        )
+                    finally:
+                        err_loop.close()
+                        asyncio.set_event_loop(None)
+                except Exception:
+                    pass
+            return {
+                "exam_id": exam_id,
+                "status": "paused_at_checkpoint",
+                "message": "Pipeline paused at HITL checkpoint, waiting for approval.",
+                "trace_id": trace_id,
+            }
+
         if exam_id:
             try:
-                # Best-effort fallback event so the frontend is not left hanging.
                 err_loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(err_loop)
                 try:
                     manager = get_connection_manager()
                     err_loop.run_until_complete(
-                        manager.emit(
-                            exam_id,
-                            SSEvent.error(str(e), "orchestrator"),
-                        )
+                        manager.emit(exam_id, SSEvent.error(str(e), "orchestrator")),
                     )
                 finally:
                     err_loop.close()

@@ -41,6 +41,7 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
             exam_config["outline_feedback"] = last_feedback
             warnings.append("Injecting blueprint rejection feedback for regeneration")
 
+    print(f"[create_outline] exam_id={exam_id}, retrieved_context_chunks={len(retrieved_context)}, calling OutlineAgent...", flush=True)
     outline_result = await outline_agent.create_outline(
         retrieved_context=retrieved_context,
         exam_config=exam_config,
@@ -49,6 +50,7 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
 
     blueprint = list(getattr(outline_result, "blueprint", []))
     distribution_summary = dict(getattr(outline_result, "distribution_summary", {}))
+    print(f"[create_outline] exam_id={exam_id}, blueprint_slots={len(blueprint)}, distribution={distribution_summary}", flush=True)
 
     if outline_result.status != AgentStatus.SUCCESS:
         warnings.append(f"Outline creation had issues: {outline_result.status.value}")
@@ -78,4 +80,3 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
         "warnings": warnings,
         "updated_at": state.get("updated_at"),
     }
-

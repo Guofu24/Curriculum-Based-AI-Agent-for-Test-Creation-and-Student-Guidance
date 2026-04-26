@@ -256,6 +256,14 @@ export function GenerationLiveViewer({
   const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
   const [costReport, setCostReport] = useState<CostReport | null>(null)
 
+  // Debug: log state changes
+  useEffect(() => {
+    console.log("[DEBUG STATE] blueprintSlots:", blueprintSlots.length, blueprintSlots)
+  })
+  useEffect(() => {
+    console.log("[DEBUG STATE] activeCheckpoint:", activeCheckpoint)
+  })
+
   // Connection
   const wsRef = useRef<WebSocket | null>(null)
   const unmountedRef = useRef(false)
@@ -294,6 +302,8 @@ export function GenerationLiveViewer({
       } catch {
         return
       }
+      console.log("[WS] Received:", msg.type, msg)
+      console.log("[WS DEBUG] activeCheckpoint=", null, "blueprintSlots=", "[]", "this fn's activeCheckpoint=", activeCheckpoint)
 
       switch (msg.type) {
         case "plan_step": {
@@ -332,6 +342,7 @@ export function GenerationLiveViewer({
 
         case "hitl_checkpoint": {
           const e = msg as HitlCheckpointEvent
+          console.log("[WS DEBUG hitl_checkpoint] checkpoint_id=", e.checkpoint_id, "data=", e.data)
           setActiveCheckpoint(e.checkpoint_id)
           setLastSeenCheckpoint(e.checkpoint_id)
 
@@ -340,6 +351,7 @@ export function GenerationLiveViewer({
           }
           if (e.checkpoint_id === 1) {
             const slots = (e.data as { blueprint?: BlueprintSlot[] }).blueprint || []
+            console.log("[WS DEBUG hitl_checkpoint] setting blueprintSlots:", slots.length, slots)
             setBlueprintSlots(slots)
             setHitlApproved(false)
             const dist: BloomDistribution = {}
@@ -393,15 +405,17 @@ export function GenerationLiveViewer({
           setLastSeenCheckpoint(e.checkpoint_id)
           setHitlApproved(false)
           if (e.checkpoint_id === 1) {
-            const slots = e.blueprint || []
-            setBlueprintSlots(slots)
-            const dist: BloomDistribution = {}
-            for (const slot of slots) {
-              const lvl = slot.bloom_level as BloomLevel | undefined
-              if (lvl && lvl in dist) dist[lvl] = (dist[lvl] || 0) + 1
-              else if (lvl) dist[lvl] = 1
+            // Only set blueprint from pipeline_paused if hitl_checkpoint hasn't already set it
+            if (e.blueprint && e.blueprint.length > 0) {
+              setBlueprintSlots(e.blueprint)
+              const dist: BloomDistribution = {}
+              for (const slot of e.blueprint) {
+                const lvl = slot.bloom_level as BloomLevel | undefined
+                if (lvl && lvl in dist) dist[lvl] = (dist[lvl] || 0) + 1
+                else if (lvl) dist[lvl] = 1
+              }
+              setBloomDist(dist)
             }
-            setBloomDist(dist)
           }
           setSteps((prev) =>
             prev.map((s) => ({ ...s, active: false }))

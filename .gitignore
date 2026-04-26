@@ -1,4 +1,4 @@
-# ExamAI monorepo aggregate gitignore
+# ExamAI monorepo
 
 # OS and editor files
 .DS_Store
@@ -8,6 +8,7 @@ Desktop.ini
 
 .vscode/
 .idea/
+*.iml
 *.swp
 *.swo
 *~
@@ -25,7 +26,11 @@ Desktop.ini
 .env.*
 .env.*.local
 .envrc
+!.env.example
 !**/.env.example
+!**/.env.sample
+.gemini_keys
+backend/.gemini_keys
 
 # Python
 __pycache__/
@@ -55,6 +60,7 @@ ENV/
 .coverage.*
 coverage.xml
 htmlcov/
+*.cover
 *.py,cover
 .ipynb_checkpoints/
 build/
@@ -111,16 +117,15 @@ backend/data/uploads/
 backend/uploads/
 backend/temp/
 backend/evals/output/
-.langfuse/
+backend/.langfuse/
 
-# Local project folders
-/kaggle_marker_server/
-/chunking_demo/
-/Chunking/
-/docs/
-/Data sách/
+# Generated docs and local scratch workspaces
+docs/File markdown/
+docs/chunks.md
+Chunking/
+chunking_demo/
 
-# Local reference/source assets
+# Local reference/source drops
 Data sách/*.pdf
 Data sách/*.doc
 Data sách/*.docx
@@ -140,5 +145,3 @@ compose.override.yml
 *.temp
 *.orig
 *.rej
-.gemini_keys
-backend/.gemini_keys
