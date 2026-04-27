@@ -72,20 +72,28 @@ async def _run_generation_inline(
                 )
                 doc = result.scalar_one_or_none()
                 if doc and doc.heading_tree:
-                    # Build title→chapter_id lookup (case-insensitive)
+                    # Build title→chapter_id lookup (case-insensitive, diacritic-insensitive)
                     from app.rag.structure import flatten_heading_tree
+                    import unicodedata
                     flat = flatten_heading_tree(doc.heading_tree)
-                    title_to_id = {}
+                    title_to_id: dict[str, str] = {}
                     for node in flat:
-                        t = node.get("title", "").strip().lower()
-                        if t and node.get("chapter_id"):
-                            title_to_id[t] = node["chapter_id"]
+                        raw_title = node.get("title", "").strip()
+                        if not raw_title or not node.get("chapter_id"):
+                            continue
+                        # Normalize: lowercase + strip diacritics for reliable matching
+                        norm = unicodedata.normalize("NFD", raw_title.lower())
+                        ascii_key = "".join(c for c in norm if unicodedata.category(c) != "Mn")
+                        title_to_id[ascii_key] = node["chapter_id"]
+
                     for s in scope:
                         if not s:
                             continue
-                        key = s.strip().lower()
-                        if key in title_to_id:
-                            normalized_scope.append(title_to_id[key])
+                        # Normalize input the same way
+                        norm_s = unicodedata.normalize("NFD", s.strip().lower())
+                        ascii_key = "".join(c for c in norm_s if unicodedata.category(c) != "Mn")
+                        if ascii_key in title_to_id:
+                            normalized_scope.append(title_to_id[ascii_key])
                         else:
                             # Try normalize_chapter_id as fallback
                             resolved = normalize_chapter_id(s)

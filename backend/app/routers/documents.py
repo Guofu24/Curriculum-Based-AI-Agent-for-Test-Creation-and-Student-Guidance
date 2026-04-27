@@ -637,16 +637,20 @@ async def reprocess_document(
         parse_result = await parse_document(file_bytes, document.file_type)
         markdown_content = parse_result["content"]
 
-        # 4. Re-chunk (uses fixed _simple_chunk with canonical chapter_id from heading_tree)
+        # 4. Re-detect heading tree from markdown (uses latest patterns including Roman numerals)
+        from app.rag.structure import detect_heading_tree
+        heading_tree = detect_heading_tree(markdown_content)
+        _log.info("Re-detected heading tree: %d chapters", len(heading_tree.get("chapters", [])))
+
+        # 5. Re-chunk using the new heading tree
         from app.rag.chunker import semantic_chunk
-        heading_tree = document.heading_tree or {}
         chunks = semantic_chunk(
             markdown=markdown_content,
             heading_tree=heading_tree,
         )
         _log.info("Re-chunked into %d chunks", len(chunks))
 
-        # 5. Embed chunks (required before upserting to Pinecone)
+        # 6. Embed chunks (required before upserting to Pinecone)
         if chunks:
             from app.core.redis_client import get_redis_client
             from app.rag.embedder import embed_chunks
@@ -654,33 +658,32 @@ async def reprocess_document(
             chunks = await embed_chunks(chunks, str(document_id), redis)
             _log.info("Embedded %d chunks", len(chunks))
 
-        # 6. Re-upsert to Pinecone
-        if chunks and heading_tree:
-            vs = VectorStore()
-
-            # Group chunks by chapter_id
-            chapter_chunks: dict[str, list[dict]] = {}
-            for chunk in chunks:
-                ch_id = chunk.get("chapter_id", "ch_unknown")
-                chapter_chunks.setdefault(ch_id, []).append(chunk)
-
-            for chapter in heading_tree.get("chapters", []):
-                ch_id = chapter.get("chapter_id", "")
-                chunks_for_ch = chapter_chunks.get(ch_id, [])
-                if chunks_for_ch:
-                    await vs.upsert_chunks(str(document_id), ch_id, chunks_for_ch)
-                    _log.info("Upserted %d chunks to namespace %s_%s", len(chunks_for_ch), document_id, ch_id)
-                else:
-                    _log.info("No chunks for chapter %s (%s)", chapter.get("title", ""), ch_id)
-
-        # 7. Update chunk count in DB
-        from sqlalchemy import update
+        # 7. Update heading_tree and total_chunks in DB
+        from sqlalchemy import update as _sql_update
         await db.execute(
-            update(Document)
+            _sql_update(Document)
             .where(Document.id == document_id)
-            .values(total_chunks=len(chunks))
+            .values(heading_tree=heading_tree, total_chunks=len(chunks))
         )
         await db.commit()
+
+        # 8. Re-upsert to Pinecone (after DB commit so heading_tree is persisted)
+        vs = VectorStore()
+
+        # Group chunks by chapter_id
+        chapter_chunks: dict[str, list[dict]] = {}
+        for chunk in chunks:
+            ch_id = chunk.get("chapter_id", "ch_unknown")
+            chapter_chunks.setdefault(ch_id, []).append(chunk)
+
+        for chapter in heading_tree.get("chapters", []):
+            ch_id = chapter.get("chapter_id", "")
+            chunks_for_ch = chapter_chunks.get(ch_id, [])
+            if chunks_for_ch:
+                await vs.upsert_chunks(str(document_id), ch_id, chunks_for_ch)
+                _log.info("Upserted %d chunks to namespace %s_%s", len(chunks_for_ch), document_id, ch_id)
+            else:
+                _log.info("No chunks for chapter %s (%s)", chapter.get("title", ""), ch_id)
 
         updated = await service.get_document(document_id, current_user.id)
         _log.info("Re-process complete for %s: %d chunks", document_id, len(chunks))

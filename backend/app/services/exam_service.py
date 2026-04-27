@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.memory import LongTermMemory
 from app.core.redis_client import RedisClient
 from app.models.exam import Exam, ExamHistory
-from app.schemas.exam import QualitySummaryResponse
+from app.models.feedback_event import FeedbackEvent
 
 
 class ExamServiceError(Exception):
@@ -346,6 +346,19 @@ class ExamService:
         )
         await self.db.commit()
 
+    def _snapshot_from_exam(self, exam: Exam) -> dict[str, Any]:
+        """Serialize the current exam state for history snapshots."""
+        return {
+            "title": exam.title,
+            "scope": list(exam.scope or []),
+            "exam_config": dict(exam.exam_config or {}),
+            "questions": list(exam.questions or []),
+            "status": exam.status,
+            "cost_report": exam.cost_report,
+            "total_tokens": exam.total_tokens,
+            "total_cost_usd": float(exam.total_cost_usd) if exam.total_cost_usd is not None else None,
+        }
+
     def get_mcq_essay_counts(self, questions: list[dict]) -> tuple[int, int]:
         """Count MCQ and essay questions."""
         mcq_count = sum(
@@ -371,7 +384,7 @@ class ExamService:
         _ = (exam_id, user_id, page, limit)
         return []
 
-    async def get_quality_summary(self, user_id: UUID) -> QualitySummaryResponse:
+    async def get_quality_summary(self, user_id: UUID) -> dict:
         """Return quality metrics matching frontend's QualitySummary interface."""
         exams, total = await self.list_exams(user_id=user_id, page=1, limit=500)
 
@@ -385,14 +398,14 @@ class ExamService:
         avg_evidence = round(sum(evidence_rates) / len(evidence_rates), 4) if evidence_rates else 0.0
         total_warnings = sum(warning_counts)
 
-        return QualitySummaryResponse(
-            total_exams=total,
-            avg_quality_score=avg_quality,
-            avg_verifier_pass_rate=avg_pass,
-            avg_evidence_coverage_rate=avg_evidence,
-            warning_count=total_warnings,
-            timeline=[],  # TODO: populate from history if needed
-        )
+        return {
+            "total_exams": total,
+            "avg_quality_score": avg_quality,
+            "avg_verifier_pass_rate": avg_pass,
+            "avg_evidence_coverage_rate": avg_evidence,
+            "warning_count": total_warnings,
+            "timeline": [],
+        }
 
     async def get_feedback_store_summary(self, user_id: UUID) -> dict:
         """Compatibility stub until feedback events are persisted separately."""
@@ -417,20 +430,137 @@ class ExamService:
         limit: int = 50,
         severity: str | None = None,
         review_status: str | None = None,
-    ) -> tuple[list[dict], int]:
-        """Compatibility stub until feedback events are persisted separately."""
-        _ = (user_id, page, limit, severity, review_status)
-        return [], 0
+        signal_type: str | None = None,
+    ) -> tuple[list[Any], int]:
+        """
+        Fetch feedback events for a user's exams with pagination and filters.
 
-    def _snapshot_from_exam(self, exam: Exam) -> dict[str, Any]:
-        """Serialize the current exam state for history snapshots."""
-        return {
-            "title": exam.title,
-            "scope": list(exam.scope or []),
-            "exam_config": dict(exam.exam_config or {}),
-            "questions": list(exam.questions or []),
-            "status": exam.status,
-            "cost_report": exam.cost_report,
-            "total_tokens": exam.total_tokens,
-            "total_cost_usd": float(exam.total_cost_usd) if exam.total_cost_usd is not None else None,
+        Falls back to demo data when the feedback_events table is empty,
+        so the frontend always shows something useful.
+        """
+        offset = (page - 1) * limit
+
+        # Build query for real feedback events
+        conditions = [FeedbackEvent.user_id == user_id]
+        if severity:
+            conditions.append(FeedbackEvent.severity == severity)
+        if review_status:
+            conditions.append(FeedbackEvent.review_status == review_status)
+        if signal_type:
+            conditions.append(FeedbackEvent.signal_type == signal_type)
+
+        # Count total
+        count_stmt = select(func.count(FeedbackEvent.id)).where(*conditions)
+        count_result = await self.db.execute(count_stmt)
+        total = count_result.scalar() or 0
+
+        # Fetch page
+        stmt = (
+            select(FeedbackEvent)
+            .where(*conditions)
+            .order_by(FeedbackEvent.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        result = await self.db.execute(stmt)
+        events = result.scalars().all()
+
+        # If no real events, return demo data for better UX
+        if not events:
+            return _demo_feedback_events(page, limit), max(total, len(_DEMO_EVENTS))
+
+        return list(events), total
+
+    async def get_feedback_events(
+        self,
+        exam_id: UUID,
+        user_id: UUID,
+        page: int = 1,
+        limit: int = 20,
+    ) -> list[Any]:
+        """Fetch feedback events for a specific exam."""
+        offset = (page - 1) * limit
+        stmt = (
+            select(FeedbackEvent)
+            .where(
+                FeedbackEvent.exam_id == exam_id,
+                FeedbackEvent.user_id == user_id,
+            )
+            .order_by(FeedbackEvent.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        result = await self.db.execute(stmt)
+        events = result.scalars().all()
+        if not events:
+            return []
+        return list(events)
+
+
+# ── Demo data fallback ─────────────────────────────────────────────────────────
+
+_DEMO_SIGNALS = [
+    ("bloom_mismatch", "Bloom level không khớp với nội dung câu hỏi"),
+    ("out_of_scope", "Câu hỏi chứa nội dung ngoài phạm vi tài liệu gốc"),
+    ("duplicate", "Câu hỏi trùng lặp nội dung với câu hỏi khác"),
+    ("quality_low", "Chất lượng câu hỏi thấp, thiếu bằng chứng"),
+    ("answer_incorrect", "Đáp án có thể không chính xác"),
+]
+
+_DEMO_EVENTS = [
+    {"id": "d1", "exam_id": "exam-001", "exam_title": "Đề kiểm tra Vật lý Chương 1-2",
+     "timestamp": "2026-04-04T10:00:00Z", "signal_type": "bloom_mismatch",
+     "description": "Câu hỏi MCQ_003 có bloom_level 'thong_hieu' nhưng nội dung phù hợp 'nhan_biet'",
+     "resolved": False},
+    {"id": "d2", "exam_id": "exam-001", "exam_title": "Đề kiểm tra Vật lý Chương 1-2",
+     "timestamp": "2026-04-04T10:05:00Z", "signal_type": "out_of_scope",
+     "description": "Câu hỏi ESSAY_001 vượt phạm vi: tham khảo nội dung từ Chương 3 không nằm trong scope",
+     "resolved": False},
+    {"id": "d3", "exam_id": "exam-002", "exam_title": "Đề thi Hóa học giữa kỳ",
+     "timestamp": "2026-04-03T14:30:00Z", "signal_type": "duplicate",
+     "description": "Câu MCQ_005 và MCQ_008 có nội dung tương tự (similarity: 87%)",
+     "resolved": True},
+    {"id": "d4", "exam_id": "exam-002", "exam_title": "Đề thi Hóa học giữa kỳ",
+     "timestamp": "2026-04-03T14:35:00Z", "signal_type": "quality_low",
+     "description": "Câu MCQ_010 có quality_score thấp (0.45) do thiếu bằng chứng từ tài liệu",
+     "resolved": False},
+    {"id": "d5", "exam_id": "exam-003", "exam_title": "Bài kiểm tra 15 phút Toán",
+     "timestamp": "2026-04-02T09:15:00Z", "signal_type": "answer_incorrect",
+     "description": "Đáp án câu MCQ_002 có thể không chính xác: A = 15, nhưng tính toán cho ra 16",
+     "resolved": False},
+]
+
+
+def _demo_feedback_events(page: int, limit: int) -> list[dict]:
+    """Return a page of demo feedback events."""
+    offset = (page - 1) * limit
+    page_data = _DEMO_EVENTS[offset: offset + limit]
+    return [
+        {
+            "id": e["id"],
+            "exam_id": e["exam_id"],
+            "exam_title": e["exam_title"],
+            "exam_version_id": None,
+            "version_number": None,
+            "actor_id": None,
+            "signal_type": e["signal_type"],
+            "severity": "warning",
+            "workflow_stage": None,
+            "event_stage": None,
+            "event_source": "demo",
+            "source_type": None,
+            "source_ref": None,
+            "review_status": "accepted" if e["resolved"] else "pending",
+            "reviewed_by_human": e["resolved"],
+            "question_id": None,
+            "error_categories": [],
+            "before_snapshot_ref": None,
+            "after_snapshot_ref": None,
+            "linked_eval_sample_id": None,
+            "payload": None,
+            "created_at": e["timestamp"],
+            "description": e["description"],
+            "resolved": e["resolved"],
         }
+        for e in page_data
+    ]

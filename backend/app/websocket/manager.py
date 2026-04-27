@@ -127,14 +127,25 @@ class ConnectionManager:
         """
         G19: Save event to Redis LIST ws_events:{exam_id} with TTL 3600s.
         This list is the source of truth for replay on reconnect.
+
+        G19 also caps the list at 1000 events to prevent unbounded growth
+        (LTRIM keeps only the last 1000 entries).
         """
         if self._redis is None:
             return
 
         key = f"ws_events:{exam_id}"
         try:
-            await self._redis.client.rpush(key, json.dumps(event, ensure_ascii=False))
-            await self._redis.client.expire(key, self._EVENT_LIST_TTL)
+            # Only store if client is available (not in fallback mode)
+            if self._redis.client is None:
+                return
+            MAX_EVENTS = 1000
+            serialized = json.dumps(event, ensure_ascii=False)
+            pipe = self._redis.client.pipeline()
+            pipe.rpush(key, serialized)
+            pipe.expire(key, self._EVENT_LIST_TTL)
+            pipe.ltrim(key, -MAX_EVENTS, -1)
+            await pipe.execute()
         except Exception as e:
             logger.warning(f"Failed to store event in Redis: {e}")
 

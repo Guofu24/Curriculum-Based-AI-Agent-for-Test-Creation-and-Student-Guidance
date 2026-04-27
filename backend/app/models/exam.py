@@ -4,8 +4,9 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Optional, List, TYPE_CHECKING
+from enum import Enum
 
-from sqlalchemy import String, Integer, ForeignKey, Numeric, DateTime, Text, func
+from sqlalchemy import String, Integer, ForeignKey, Numeric, DateTime, Text, func, Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,6 +15,21 @@ from app.core.database import Base
 if TYPE_CHECKING:
     from app.models.user import User
     from app.models.document import Document
+
+
+class ExamStatusEnum(str, Enum):
+    """Exam status enum matching SPEC section 5.3."""
+    DRAFT = "draft"
+    GENERATING = "generating"
+    HITL_PENDING_1 = "hitl_pending_1"
+    HITL_PENDING_2 = "hitl_pending_2"
+    HITL_PENDING_3 = "hitl_pending_3"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    PUBLISHED = "published"
+    REGENERATING = "regenerating"
+    READY_FOR_REVIEW = "ready_for_review"
 
 
 class Exam(Base):
@@ -34,10 +50,17 @@ class Exam(Base):
     scope: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     exam_config: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     questions: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    status: Mapped[str] = mapped_column(String(50), default="draft")  # draft, published
+    status: Mapped[str] = mapped_column(
+        String(50), default=ExamStatusEnum.DRAFT.value, index=True
+    )
     cost_report: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     total_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     total_cost_usd: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    # SPEC fields
+    blueprint: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    checkpoint_state: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    generation_metadata: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    quality_metrics: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -49,6 +72,9 @@ class Exam(Base):
     document: Mapped[Optional["Document"]] = relationship("Document", back_populates="exams")
     history: Mapped[List["ExamHistory"]] = relationship(
         "ExamHistory", back_populates="exam", cascade="all, delete-orphan"
+    )
+    feedback_events: Mapped[List["FeedbackEvent"]] = relationship(
+        "FeedbackEvent", back_populates="exam", cascade="all, delete-orphan"
     )
 
     @property
@@ -139,7 +165,8 @@ class Exam(Base):
         return dict(self.exam_config or {})
 
     @property
-    def blueprint(self) -> dict:
+    def blueprint_data(self) -> dict:
+        """Return blueprint stored in exam_config. Use the 'blueprint' column for direct storage."""
         return (self.exam_config or {}).get("blueprint") or {}
 
     @property

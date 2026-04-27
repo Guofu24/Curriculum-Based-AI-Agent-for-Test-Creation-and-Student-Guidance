@@ -179,8 +179,6 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         logger.info("Starting graph with recursion_limit=500 for exam_id=%s", exam_id)
 
         initial_state = {
-
-        initial_state = {
             "exam_id": exam_id,
             "user_id": user_id,
             "document_id": document_id,

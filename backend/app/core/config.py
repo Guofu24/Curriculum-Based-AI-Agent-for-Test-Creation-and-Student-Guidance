@@ -198,6 +198,25 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """
+        Parse CORS_ORIGINS from either a JSON array string or comma-separated string.
+        Both formats are accepted for developer convenience.
+        """
+        if not self.CORS_ORIGINS:
+            return []
+        val = self.CORS_ORIGINS.strip()
+        # Try JSON array first
+        if val.startswith("["):
+            import json
+            try:
+                return json.loads(val)
+            except json.JSONDecodeError:
+                pass
+        # Fall back to comma-separated
+        return [o.strip() for o in val.split(",") if o.strip()]
+
     # Agent settings
     AGENT_MAX_RETRIES: int = 3
     AGENT_TIMEOUT_RETRIEVAL: int = 30

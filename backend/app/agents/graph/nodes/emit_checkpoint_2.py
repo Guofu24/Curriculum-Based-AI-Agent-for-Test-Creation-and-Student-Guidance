@@ -3,7 +3,7 @@
 import logging
 
 from app.agents.graph.state import ExamGraphState, HITLCheckpointStatus
-from app.agents.graph.nodes._emit import _emit
+from app.agents.graph.nodes._emit import _emit_async
 
 logger = logging.getLogger("app.agents.graph")
 
@@ -21,11 +21,15 @@ async def emit_checkpoint_2(state: ExamGraphState) -> ExamGraphState:
     Returns:
         Updated state with checkpoint_2_status = PENDING.
     """
+    from app.websocket.manager import get_connection_manager
+
     questions = state.get("questions", [])
     validation_result = state.get("validation_result", {})
     warnings = list(state.get("warnings", []))
+    exam_id = state.get("exam_id", "")
 
-    _emit(state, {
+    manager = get_connection_manager()
+    await _emit_async(manager, exam_id, {
         "type": "hitl_checkpoint",
         "checkpoint_id": 2,
         "data": {

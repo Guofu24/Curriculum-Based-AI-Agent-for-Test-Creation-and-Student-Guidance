@@ -290,7 +290,13 @@ export function GenerationLiveViewer({
 
   // ─── Event handler ───────────────────────────────────────────────────────────
 
-  // bloomDistRef tracks the latest bloomDist to avoid stale closure in handleMessage.
+  // Refs to avoid stale closure in handleMessage.
+  const activeCheckpointRef = useRef<number | null>(null)
+  activeCheckpointRef.current = activeCheckpoint
+  const lastSeenCheckpointRef = useRef<number | null>(null)
+  const hitlApprovedRef = useRef(false)
+  const blueprintSlotsRef = useRef<BlueprintSlot[]>([])
+  blueprintSlotsRef.current = blueprintSlots
   const bloomDistRef = useRef<BloomDistribution | null>(null)
   bloomDistRef.current = bloomDist
 
@@ -303,7 +309,7 @@ export function GenerationLiveViewer({
         return
       }
       console.log("[WS] Received:", msg.type, msg)
-      console.log("[WS DEBUG] activeCheckpoint=", null, "blueprintSlots=", "[]", "this fn's activeCheckpoint=", activeCheckpoint)
+      console.log("[WS DEBUG] activeCheckpoint=", activeCheckpointRef.current, "blueprintSlots=", blueprintSlotsRef.current.length)
 
       switch (msg.type) {
         case "plan_step": {
@@ -311,6 +317,7 @@ export function GenerationLiveViewer({
           setIsGenerating(true)
           if (e.step >= 3) {
             setActiveCheckpoint(null)
+            activeCheckpointRef.current = null
           }
           setSteps((prev) =>
             prev.map((s) => {
@@ -344,7 +351,9 @@ export function GenerationLiveViewer({
           const e = msg as HitlCheckpointEvent
           console.log("[WS DEBUG hitl_checkpoint] checkpoint_id=", e.checkpoint_id, "data=", e.data)
           setActiveCheckpoint(e.checkpoint_id)
+          activeCheckpointRef.current = e.checkpoint_id
           setLastSeenCheckpoint(e.checkpoint_id)
+          lastSeenCheckpointRef.current = e.checkpoint_id
 
           if (e.checkpoint_id === 0) {
             setRequirementsData(e.data as RequirementsData)
@@ -402,12 +411,16 @@ export function GenerationLiveViewer({
         case "pipeline_paused": {
           const e = msg as PipelinePausedEvent
           setActiveCheckpoint(e.checkpoint_id)
+          activeCheckpointRef.current = e.checkpoint_id
           setLastSeenCheckpoint(e.checkpoint_id)
+          lastSeenCheckpointRef.current = e.checkpoint_id
           setHitlApproved(false)
+          hitlApprovedRef.current = false
           if (e.checkpoint_id === 1) {
             // Only set blueprint from pipeline_paused if hitl_checkpoint hasn't already set it
             if (e.blueprint && e.blueprint.length > 0) {
               setBlueprintSlots(e.blueprint)
+              blueprintSlotsRef.current = e.blueprint
               const dist: BloomDistribution = {}
               for (const slot of e.blueprint) {
                 const lvl = slot.bloom_level as BloomLevel | undefined
@@ -415,7 +428,12 @@ export function GenerationLiveViewer({
                 else if (lvl) dist[lvl] = 1
               }
               setBloomDist(dist)
+              bloomDistRef.current = dist
             }
+          }
+          if (e.checkpoint_id === 2) {
+            // checkpoint 2 has no blueprint in pipeline_paused — questions come via question_generated
+            // and validation_issues via validation_result/validation_retry events
           }
           setSteps((prev) =>
             prev.map((s) => ({ ...s, active: false }))
@@ -472,18 +490,19 @@ export function GenerationLiveViewer({
   const [lastSeenCheckpoint, setLastSeenCheckpoint] = useState<number | null>(null)
 
   const handleApprove = async () => {
-    const cp = lastSeenCheckpoint ?? activeCheckpoint ?? 1
+    const cp = lastSeenCheckpointRef.current ?? activeCheckpointRef.current ?? 1
     setHitlApproving(true)
     try {
       await onApprove(examId, true, undefined, cp)
       setHitlApproved(true)
+      hitlApprovedRef.current = true
     } finally {
       setHitlApproving(false)
     }
   }
 
   const handleReject = async (feedback?: string) => {
-    const cp = lastSeenCheckpoint ?? activeCheckpoint ?? 1
+    const cp = lastSeenCheckpointRef.current ?? activeCheckpointRef.current ?? 1
     setHitlRejecting(true)
     try {
       await onApprove(examId, false, feedback, cp)

@@ -1040,8 +1040,8 @@ class TimelineEntry(BaseModel):
     pass_rate: float = Field(0.0, description="Average verifier pass rate for this month.")
 
 
-class QualitySummaryResponse(BaseModel):
-    """Response matching frontend's QualitySummary interface."""
+class QualitySummaryV2Response(BaseModel):
+    """Response matching frontend's QualitySummary interface (v2 with timeline)."""
 
     total_exams: int = Field(..., description="Total number of exams.")
     avg_quality_score: float = Field(0.0, description="Average quality score across all exams.")

@@ -172,7 +172,7 @@ export interface Document {
   title?: string
   file_type: string
   file_size?: number
-  processing_status: 'pending' | 'processing' | 'completed' | 'failed'
+  processing_status: 'pending' | 'processing' | 'completed' | 'failed' | 'indexed'
   status?: string
   course_id?: string
   version?: number
@@ -535,6 +535,43 @@ export const examsApi = {
   
   getQualitySummary: async (): Promise<QualitySummary> => {
     return apiFetch<QualitySummary>('/exams/quality-summary')
+  },
+}
+
+// ============ FEEDBACK API ============
+export interface FeedbackEvent {
+  id: string
+  exam_id: string
+  exam_title: string | null
+  timestamp: string
+  signal_type: 'bloom_mismatch' | 'out_of_scope' | 'duplicate' | 'quality_low' | 'answer_incorrect' | 'validation_warning' | 'generation_error' | 'publish' | 'edit_applied'
+  description: string
+  resolved: boolean
+  severity?: string
+  review_status?: string
+  question_id?: string | null
+  error_categories?: string[]
+  created_at?: string
+}
+
+export interface FeedbackStoreResponse {
+  items: FeedbackEvent[]
+  total: number
+  page: number
+  limit: number
+}
+
+export const feedbackApi = {
+  list: async (
+    page = 1,
+    limit = 50,
+    signalType?: string,
+    reviewStatus?: string
+  ): Promise<FeedbackStoreResponse> => {
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) })
+    if (signalType) params.set('signal_type', signalType)
+    if (reviewStatus) params.set('review_status', reviewStatus)
+    return apiFetch<FeedbackStoreResponse>(`/exams/feedback-store?${params}`)
   },
 }
 

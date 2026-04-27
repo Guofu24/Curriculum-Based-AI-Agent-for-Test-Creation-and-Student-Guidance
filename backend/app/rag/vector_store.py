@@ -85,12 +85,13 @@ class VectorStore:
         namespace = _make_ascii_namespace(f"{document_id}_{chapter_id}")
         records = []
 
+        import numpy as np
         for chunk in chunks:
             embedding = chunk.get("embedding")
-            if not embedding:
+            if embedding is None:
                 continue
-
-            import numpy as np
+            if isinstance(embedding, np.ndarray) and embedding.size == 0:
+                continue
             embedding = np.nan_to_num(embedding, nan=0.0, posinf=1.0, neginf=-1.0).tolist()
 
             chunk_id = chunk.get("chunk_id", "")
@@ -177,12 +178,17 @@ class VectorStore:
         chapter_id: str,
         query_embedding: list[float],
         top_k: int = 20,
+        content_types: list[str] | None = None,
     ) -> list[dict]:
         """
         Query chunks from a specific chapter namespace.
 
         Namespace: {doc_id}_{chapter_id}
         Returns top_k results sorted by score (descending).
+
+        Args:
+            content_types: If provided, only return chunks matching these content types.
+                          Examples: ["definition"], ["example", "exercise"], ["formula"]
         """
         index = await self._get_index()
         if not index:
@@ -211,6 +217,14 @@ class VectorStore:
                 })
 
             all_results.sort(key=lambda x: x["score"], reverse=True)
+
+            # Domain 7B: Filter by content_type if requested
+            if content_types:
+                all_results = [
+                    r for r in all_results
+                    if r.get("metadata", {}).get("content_type", "") in content_types
+                ]
+
             return all_results
 
         except Exception:

@@ -115,3 +115,7 @@ class ExamGraphState(TypedDict, total=False):
     # ── Timestamps ────────────────────────────────────────────────────────
     created_at: float
     updated_at: float
+
+    # ── Pipeline telemetry ──────────────────────────────────────────────
+    # Tracks timing and performance metrics for each pipeline stage
+    generation_metadata: dict  # e.g. {"retrieval_ms": 1200, "llm_calls": 35}

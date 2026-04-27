@@ -82,6 +82,8 @@ async def initialize(state: ExamGraphState) -> ExamGraphState:
         "warnings": [],
         "error": None,
         "critical_error": None,
+        # Telemetry (populated by finalize_output)
+        "generation_metadata": {},
         # Timestamps
         "created_at": current_time,
         "updated_at": current_time,

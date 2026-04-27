@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { DashboardHeader } from '@/components/dashboard-header'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -187,7 +187,7 @@ export default function GeneratePage() {
     }
   }
 
-  const handleApprove = async (
+  const handleApprove = useCallback(async (
     id: string,
     approved: boolean,
     feedback?: string,
@@ -196,10 +196,8 @@ export default function GeneratePage() {
     const cp = checkpointId ?? 1
     try {
       if (cp === 2) {
-        // Checkpoint 2: final exam review
         await examsApi.submitReview(id, { approved, feedback })
       } else {
-        // Checkpoint 0 & 1: requirements / blueprint approval
         if (approved) {
           await examsApi.approveBlueprint(id)
         } else {
@@ -209,18 +207,20 @@ export default function GeneratePage() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Có lỗi xảy ra khi xác nhận')
     }
-  }
+  }, [])
 
   const handleExamTypeChange = (v: ExamType) => {
     setConfig(prev => ({
       ...prev,
       examType: v,
-      // Reset counts so hidden fields don't carry over to new type
       ...(v === 'mcq' ? { essayCount: 0 } : {}),
       ...(v === 'essay' ? { mcqCount: 0 } : {}),
-      ...(v === 'mixed' ? {} : {}),
     }))
   }
+
+  const handleExamComplete = useCallback((id: string) => {
+    router.push(`/dashboard/exams/${id}`)
+  }, [router])
 
   const selectedDoc = documents.find(d => d.id === config.documentId)
   const chapters = curriculum.filter(n => n.level === 1)
@@ -560,9 +560,7 @@ export default function GeneratePage() {
               wsUrl={wsUrl || `/ws/exam/${examId}`}
               examType={config.examType}
               onApprove={handleApprove}
-              onComplete={(id) => {
-                router.push(`/dashboard/exams/${id}`)
-              }}
+              onComplete={handleExamComplete}
             />
           )}
         </div>

@@ -12,6 +12,9 @@ from app.agents.skills.difficulty_estimator import DifficultyEstimatorSkill
 from app.observability.tracer import get_tracer
 from app.core.config import get_settings
 
+# Domain 9: Prompt versioning
+OUTLINE_PROMPT_VERSION = "v2.1"
+
 settings = get_settings()
 tracer = get_tracer()
 logger = logging.getLogger("app.agents.outline")
@@ -28,42 +31,76 @@ class OutlineAgent:
     Output: Exam Blueprint with question slots.
     """
 
-    OUTLINE_SYSTEM_PROMPT = """Bạn là chuyên gia thiết kế đề kiểm tra.
+    OUTLINE_SYSTEM_PROMPT = """[PROMPT_VERSION: v2.1]
 
-Nhiệm vụ của bạn:
-1. Phân tích kiến thức đã truy xuất được (retrieved chunks)
-2. Tạo sườn đề (blueprint) với các slot câu hỏi được phân bổ theo:
-   - Mức Bloom (nhan_biet, thong_hieu, van_dung, van_dung_cao)
-   - Chapter (chương)
-   - Section (phần)
-   - Loại nội dung (text, calculation, applied_problem, conceptual)
-3. Đảm bảo phân bổ đều các chapter (không chapter nào > 50% tổng số câu)
-4. Ưu tiên chapters có nhiều công thức cho mức van_dung_cao
+## Vai trò
+Mày là chuyên gia thiết kế đề kiểm tra giáo dục đại học Việt Nam.
 
-Blueprint slot structure:
-- question_id: "MCQ_001", "ESSAY_001", etc.
-- type: "mcq" hoặc "essay"
-- bloom_level: "nhan_biet" | "thong_hieu" | "van_dung" | "van_dung_cao"
-- chapter: tên chapter
-- section: tên section (nếu có)
-- topic_hint: gợi ý chủ đề cụ thể
-- content_type: "text" | "calculation" | "applied_problem" | "conceptual"
-- estimated_difficulty: 0.0-1.0
+## Nhiệm vụ
+Tạo sườn đề (blueprint) với các slot câu hỏi được phân bổ theo:
+  - Mức Bloom (nhan_biet, thong_hieu, van_dung, van_dung_cao)
+  - Chapter (chương)
+  - Section (phần)
+  - Loại nội dung (text, calculation, applied_problem, conceptual)
 
-Distribution rules:
-- Convert bloom % → số câu, làm tròn hợp lý
-- Đảm bảo tổng MCQ + Essay = config count
-- MCQ phân bổ đều theo chapters
-- Essay: ít hơn MCQ, tập trung vào van_dung và van_dung_cao
+## Ràng buộc nghiêm ngặt
+- Tổng MCQ + Essay phải KHỚP với config
+- **Phân bổ Bloom phải CHÍNH XÁC**: tổng slot mỗi mức = config yêu cầu (±0 câu)
+- Không chapter nào chiếm > 50% tổng số câu
+- MCQ: 4 lựa chọn, 1 đúng, 3 mồi nhử có logic
+- Essay: có rubric chấm điểm
 
-Trả về JSON:
+## Taxonomy Bloom đầy đủ
+- **nhan_biet** (Nhận biết): Định nghĩa, liệt kê, nêu tên — câu hỏi bắt đầu bằng "Định nghĩa", "Nêu", "Liệt kê", "Cho biết"
+- **thong_hieu** (Thông hiểu): Giải thích, so sánh, diễn giải — áp dụng công thức đơn giản 1 bước
+- **van_dung** (Vận dụng): Tính toán 2-3 bước, có điều kiện ràng buộc
+- **van_dung_cao** (Vận dụng cao): Phân tích mối quan hệ, đánh giá, bài toán phức hợp, nhiều công thức kết hợp
+
+## Few-shot example (tham khảo format output)
+```json
 {
-  "blueprint": [slot1, slot2, ...],
+  "blueprint": [
+    {"question_id": "MCQ_001", "type": "mcq", "bloom_level": "nhan_biet", "chapter": "Chương 1", "section": "1.1", "topic_hint": "Định nghĩa lực", "content_type": "text", "estimated_difficulty": 0.2},
+    {"question_id": "MCQ_002", "type": "mcq", "bloom_level": "thong_hieu", "chapter": "Chương 1", "section": "1.2", "topic_hint": "Định luật 1 Newton", "content_type": "text", "estimated_difficulty": 0.4}
+  ],
   "distribution_summary": {
-    "by_bloom": {"nhan_biet": N, "thong_hieu": N, "van_dung": N, "van_dung_cao": N},
-    "by_chapter": {"Chương 1": N, "Chương 2": N, ...}
+    "by_bloom": {"nhan_biet": 10, "thong_hieu": 15, "van_dung": 10, "van_dung_cao": 5},
+    "by_chapter": {"Chương 1": 12, "Chương 2": 10, "Chương 3": 18}
   }
-}"""
+}
+```
+
+## Chain-of-thought (suy luận trước khi output)
+Với mỗi blueprint, trước tiên suy nghĩ:
+1. Tổng câu = MCQ + Essay = ?
+2. Phân bổ câu cho từng chapter: mỗi chapter được phân bao nhiêu câu?
+3. Trong mỗi chapter, phân bổ Bloom level như thế nào?
+4. Kiểm tra: tổng slot = config? Bloom sum = config?
+5. Đảm bảo không có topic trùng lặp trong cùng chapter
+
+## Self-verification checklist
+Trước khi trả JSON, kiểm tra:
+- [ ] Tổng số slot = mcq_count + essay_count (chính xác)
+- [ ] Tổng theo bloom = bloom_distribution (chính xác ±0)
+- [ ] Không chapter nào > 50% tổng
+- [ ] Mỗi slot có question_id, bloom_level, chapter (đầy đủ)
+- [ ] Topic hints không trùng nhau trong cùng chapter
+
+## Output format
+Trả về JSON với schema:
+{
+  "blueprint": [slot...],
+  "distribution_summary": {
+    "by_bloom": {...},
+    "by_chapter": {...}
+  },
+  "distribution_check": {
+    "bloom_total_ok": true/false,
+    "chapter_balance_ok": true/false,
+    "total_slots_ok": true/false
+  }
+}
+"""
 
     def __init__(self):
         self.llm = get_llm_client()
@@ -104,6 +141,33 @@ Trả về JSON:
             result = json.loads(response)
             blueprint = result.get("blueprint", [])
             distribution_summary = result.get("distribution_summary", {})
+
+            # 3B: Strict Bloom distribution enforcement
+            expected_bloom = exam_config.get("bloom_distribution", {})
+            actual_bloom: dict[str, int] = {}
+            for slot in blueprint:
+                bl = slot.get("bloom_level", "unknown")
+                actual_bloom[bl] = actual_bloom.get(bl, 0) + 1
+
+            bloom_mismatch: list[str] = []
+            for bloom, expected_count in expected_bloom.items():
+                actual_count = actual_bloom.get(bloom, 0)
+                if actual_count != expected_count:
+                    bloom_mismatch.append(
+                        f"Bloom '{bloom}': expected {expected_count}, got {actual_count}"
+                    )
+
+            if bloom_mismatch:
+                warnings.append(f"Bloom distribution mismatch — retrying: {'; '.join(bloom_mismatch)}")
+                # Retry with specific error message injected into prompt
+                return await self._retry_with_bloom_feedback(
+                    retrieved_context=retrieved_context,
+                    exam_config=exam_config,
+                    bloom_mismatch=bloom_mismatch,
+                    expected_bloom=expected_bloom,
+                    trace_id=trace_id,
+                    start_time=start_time,
+                )
 
             valid_llm, reason_llm = self.validate_blueprint(blueprint)
             if not valid_llm:
@@ -209,6 +273,82 @@ Trả về JSON:
         except Exception as e:
             warnings.append(f"Outline creation failed: {str(e)}")
             return await self._fallback_outline(exam_config, start_time, trace_id, warnings)
+
+    async def _retry_with_bloom_feedback(
+        self,
+        retrieved_context: list[dict],
+        exam_config: dict,
+        bloom_mismatch: list[str],
+        expected_bloom: dict[str, int],
+        trace_id: str,
+        start_time: float,
+    ) -> OutlineOutput:
+        """Retry outline generation with explicit Bloom mismatch feedback."""
+        warnings = [f"Bloom distribution error: {'; '.join(bloom_mismatch)}"]
+
+        # Inject precise correction instructions
+        correction_prompt = f"""
+LỖI PHÂN BỔ BLOOM - CẦN SỬA NGAY:
+
+Các lỗi cụ thể:
+{chr(10).join(f'- {m}' for m in bloom_mismatch)}
+
+YÊU CẦU CHÍNH XÁC:
+{json.dumps(expected_bloom, ensure_ascii=False, indent=2)}
+
+Hãy tạo lại blueprint với phân bổ CHÍNH XÁC như trên.
+KIỂM TRA LẠI trước khi output.
+"""
+        exam_config = dict(exam_config)
+        exam_config["outline_feedback"] = correction_prompt
+
+        try:
+            response = await self.llm.chat(
+                messages=[
+                    {"role": "system", "content": self.OUTLINE_SYSTEM_PROMPT},
+                    {"role": "user", "content": self._build_outline_prompt(retrieved_context, exam_config)},
+                ],
+                role="outline",
+                max_tokens=4000,
+                temperature=0.2,
+            )
+            result = json.loads(response)
+            blueprint = result.get("blueprint", [])
+            distribution_summary = result.get("distribution_summary", {})
+
+            # Verify one more time
+            actual_bloom: dict[str, int] = {}
+            for slot in blueprint:
+                bl = slot.get("bloom_level", "unknown")
+                actual_bloom[bl] = actual_bloom.get(bl, 0) + 1
+
+            for bloom, expected_count in expected_bloom.items():
+                actual_count = actual_bloom.get(bloom, 0)
+                if actual_count != expected_count:
+                    warnings.append(
+                        f"Retry also failed: Bloom '{bloom}' still mismatched ({actual_count} vs {expected_count})"
+                    )
+
+        except Exception as e:
+            warnings.append(f"Retry failed: {e}")
+            return await self._fallback_outline(exam_config, start_time, trace_id, warnings)
+
+        valid_llm, reason_llm = self.validate_blueprint(blueprint)
+        if not valid_llm:
+            warnings.append(f"Retry blueprint invalid: {reason_llm}")
+            return await self._fallback_outline(exam_config, start_time, trace_id, warnings)
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        return OutlineOutput(
+            status=AgentStatus.SUCCESS,
+            agent_name="outline",
+            execution_time_ms=elapsed_ms,
+            token_usage=TokenUsage(),
+            warnings=warnings,
+            trace_id=trace_id,
+            blueprint=blueprint,
+            distribution_summary=distribution_summary,
+        )
 
     def _build_context_summary(self, context: list[dict]) -> str:
         """Build a summary of retrieved context."""

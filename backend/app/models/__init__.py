@@ -5,6 +5,7 @@ from app.models.refresh_token import RefreshToken
 from app.models.document import Document
 from app.models.exam import Exam, ExamHistory
 from app.models.teacher_preference import TeacherPreference
+from app.models.feedback_event import FeedbackEvent, SignalType, Severity, ReviewStatus
 
 __all__ = [
     "User",
@@ -13,4 +14,8 @@ __all__ = [
     "Exam",
     "ExamHistory",
     "TeacherPreference",
+    "FeedbackEvent",
+    "SignalType",
+    "Severity",
+    "ReviewStatus",
 ]

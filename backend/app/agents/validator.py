@@ -12,6 +12,9 @@ from app.agents.memory.short_term import ShortTermMemory
 from app.observability.tracer import get_tracer
 from app.core.config import get_settings
 
+# Domain 9: Prompt versioning
+VALIDATOR_PROMPT_VERSION = "v2.1"
+
 settings = get_settings()
 tracer = get_tracer()
 
@@ -53,44 +56,86 @@ class ValidatorAgent:
     2. Bloom Compliance: bloom_classifier_skill verifies Bloom level
     3. Scope Violation: scope_checker_skill checks for out-of-scope knowledge
 
+    Batch Validation (Domain 5B):
+    - Questions are grouped into batches of BATCH_SIZE (default 10)
+    - Each batch gets a single LLM call instead of per-question calls
+    - For 45 questions: 5 LLM calls instead of 45+
+
     Retry Logic:
     - If validation fails → return issues list
     - Orchestrator retries Builder with issues (max 3 rounds)
     - If still failing → partial result with warning
     """
 
-    VALIDATOR_SYSTEM_PROMPT = """Bạn là giáo viên phản biện chuyên nghiệp.
+    VALIDATOR_SYSTEM_PROMPT = """[PROMPT_VERSION: v2.1]
 
-Nhiệm vụ:
-1. Đọc toàn bộ đề đã sinh
-2. Thực sự GIẢI từng câu (không chỉ đọc đáp án đề xuất)
-3. Kiểm tra 3 khía cạnh:
-   a) **Answer Checking**: Đáp án đúng phải chính xác
-   b) **Bloom Compliance**: Câu hỏi có đúng mức Bloom đã khai báo không
-   c) **Scope Violation**: Câu hỏi có dùng kiến thức ngoài phạm vi không
+## Vai trò
+Mày là giáo viên phản biện chuyên nghiệp.
 
-Output format:
-{
+## Nhiệm vụ
+Đọc toàn bộ đề và thực hiện 3 kiểm tra trên TỪNG CÂU:
+
+### 1. Answer Checking
+Với mỗi câu, THỰC SỰ GIẢI (không chỉ đọc đáp án đề xuất). So sánh kết quả của mày với đáp án trong câu hỏi.
+
+### 2. Bloom Compliance
+So sánh bloom_level đã khai báo với nội dung câu hỏi:
+- nhan_biet: hỏi định nghĩa, liệt kê, nêu tên
+- thong_hieu: giải thích, so sánh, áp dụng công thức 1 bước
+- van_dung: tính toán 2-3 bước, có điều kiện
+- van_dung_cao: phân tích phức hợp, đánh giá
+
+### 3. Scope Violation
+Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi phạm nếu có KIẾN THỨC CỤ THỂ từ chapter không được chọn.
+
+## Context có sẵn (chỉ dùng kiến thức từ đây)
+{context_chunks}
+
+## Output format — MỘT JSON object chứa MẢNG kết quả:
+{{
   "validation_passed": true/false,
-  "issues": [
-    {
-      "question_id": "MCQ_015",
-      "issue_type": "wrong_answer" | "bloom_mismatch" | "scope_violation" | "duplicate",
-      "detail": "Mô tả lỗi cụ thể",
-      "suggestion": "Đề xuất cách sửa"
-    }
+  "questions": [
+    {{
+      "question_id": "MCQ_001",
+      "answer_correct": true/false,
+      "model_answer": "B hoặc null nếu là essay",
+      "bloom_compliant": true/false,
+      "bloom_actual": "nhan_biet|thong_hieu|van_dung|van_dung_cao",
+      "bloom_confidence": 0.0-1.0,
+      "scope_ok": true/false,
+      "scope_violation_detail": "mô tả hoặc null",
+      "issues": [
+        {{
+          "issue_type": "wrong_answer|bloom_mismatch|scope_violation|duplicate",
+          "detail": "mô tả lỗi",
+          "suggestion": "cách sửa"
+        }}
+      ]
+    }}
   ],
-  "score_attempt": {
-    "MCQ_001": {"model_answer": "B", "correct": true},
-    "MCQ_002": {"model_answer": "A", "expected": "C", "correct": false}
-  },
-  "bloom_compliance": {
-    "nhan_biet": {"expected": 20, "actual": 18, "ok": false},
-    "van_dung_cao": {"expected": 20, "actual": 22, "ok": true}
-  },
+  "bloom_compliance_summary": {{
+    "nhan_biet": {{"expected": N, "actual": N, "ok": true/false}},
+    "thong_hieu": {{"expected": N, "actual": N, "ok": true/false}},
+    "van_dung": {{"expected": N, "actual": N, "ok": true/false}},
+    "van_dung_cao": {{"expected": N, "actual": N, "ok": true/false}}
+  }},
   "scope_violations": ["MCQ_015: sử dụng định luật ngoài scope"],
-  "approved_for_publish": false
-}"""
+  "approved_for_publish": true/false
+}}
+
+## Chỉ reject khi:
+- answer_correct = false VÀ confidence > 0.7
+- bloom_compliant = false VÀ confidence > 0.8
+- scope_violation rõ ràng (có tên chapter cụ thể ngoài scope)
+
+## Confidence scoring:
+- confidence > 0.8: rất chắc chắn → reject được
+- confidence 0.5-0.8: khá chắc → warn nhưng không reject tự động
+- confidence < 0.5: không chắc → skip
+"""
+
+    # Domain 5B: Batch size for validation
+    BATCH_SIZE = 10
 
     def __init__(self, redis=None):
         self.llm = get_llm_client()
@@ -108,7 +153,11 @@ Output format:
         trace_id: str = "",
     ) -> ValidatorOutput:
         """
-        Validate all questions.
+        Validate all questions using batch LLM calls (Domain 5B).
+
+        Groups questions into batches of BATCH_SIZE and makes one LLM call
+        per batch instead of one call per question. For 45 questions:
+        5 LLM calls instead of 45+.
 
         G9: Issues are persisted to Redis via ShortTermMemory so they survive
         Celery worker restarts. Max 3 retry loops enforced.
@@ -118,210 +167,162 @@ Output format:
         metrics = AgentMetrics(trace_id=trace_id)
         warnings: list[str] = []
         exam_id = trace_id.split("_retry_")[0]  # Strip retry suffix for key
-        issues: list[dict] = []  # G9: accumulate from skills + LLM
+        all_issues: list[dict] = []
+        all_llm_results: list[dict] = []
+        bloom_compliance: dict[str, dict] = {}
+        scope_violations: list[str] = []
 
-        try:
-            # G9: Load persisted retry issues from Redis before validation
-            prior_issues: list[dict] = []
-            if self.short_term:
-                try:
-                    prior_issues = await self.short_term.load_retry_issues(exam_id)
-                    if prior_issues:
-                        warnings.append(
-                            f"Loaded {len(prior_issues)} prior issues from Redis "
-                            f"(from previous retry attempt)"
-                        )
-                except Exception:
-                    pass
-
-            # Apply bloom_classifier skill to each question
-            for q in questions:
-                try:
-                    bloom_result = await self.bloom_skill.run(
-                        question_stem=q.get("stem", ""),
-                        question_type=q.get("type", "mcq"),
+        # G9: Load persisted retry issues from Redis before validation
+        prior_issues: list[dict] = []
+        if self.short_term:
+            try:
+                prior_issues = await self.short_term.load_retry_issues(exam_id)
+                if prior_issues:
+                    warnings.append(
+                        f"Loaded {len(prior_issues)} prior issues from Redis "
+                        f"(from previous retry attempt)"
                     )
-                    q["bloom_classified"] = bloom_result.get("bloom_level")
-                    # Track bloom mismatch as issue
-                    expected_bloom = q.get("bloom_level", "")
-                    actual_bloom = bloom_result.get("bloom_level", "")
-                    if expected_bloom and actual_bloom and expected_bloom != actual_bloom:
-                        issues.append({
-                            "question_id": q.get("question_id", ""),
-                            "issue_type": "bloom_mismatch",
-                            "detail": f"Expected bloom '{expected_bloom}', classified as '{actual_bloom}'",
-                            "suggestion": "Review bloom level classification",
-                        })
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
-            # Apply scope_checker skill to each question
-            for q in questions:
-                try:
-                    scope_result = await self.scope_skill.run(
-                        question_stem=q.get("stem", ""),
-                        allowed_content=retrieved_context or [],
-                        scope_chapters=exam_config.get("scope", []),
+        # Build validation context once (reused across all batches)
+        context_str = self._build_validation_context(retrieved_context)
+
+        # Batch questions into groups of BATCH_SIZE
+        total_batches = (len(questions) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
+
+        for batch_start in range(0, len(questions), self.BATCH_SIZE):
+            batch = questions[batch_start:batch_start + self.BATCH_SIZE]
+            batch_num = batch_start // self.BATCH_SIZE + 1
+
+            # Build batch-specific prompt
+            prompt = self._build_batch_prompt(batch, context_str, exam_config)
+
+            try:
+                response = await self.llm.chat(
+                    messages=[
+                        {"role": "system", "content": self.VALIDATOR_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    role="validator",
+                    max_tokens=8000,
+                    temperature=0.1,
+                )
+
+                result = json.loads(response)
+
+                # Collect per-question issues from this batch
+                batch_questions = result.get("questions", [])
+                for q_result in batch_questions:
+                    question_id = q_result.get("question_id", "")
+                    # Extract issues from each question result
+                    q_issues = q_result.get("issues", [])
+                    for issue in q_issues:
+                        issue["question_id"] = question_id
+                        all_issues.append(issue)
+                    all_llm_results.append(q_result)
+
+                # Merge bloom compliance summary
+                batch_bloom = result.get("bloom_compliance_summary", {})
+                for bloom, data in batch_bloom.items():
+                    if bloom not in bloom_compliance:
+                        bloom_compliance[bloom] = {"expected": 0, "actual": 0, "ok": True}
+                    bloom_compliance[bloom]["expected"] = data.get("expected", 0)
+                    bloom_compliance[bloom]["actual"] = data.get("actual", 0)
+                    bloom_compliance[bloom]["ok"] = (
+                        bloom_compliance[bloom]["ok"] and data.get("ok", True)
                     )
-                    if not scope_result.get("in_scope", True):
-                        issues.append({
-                            "question_id": q.get("question_id", ""),
-                            "issue_type": "scope_violation",
-                            "detail": scope_result.get("reasoning", "Out of scope"),
-                            "suggestion": "Restrict to allowed scope",
-                        })
-                except Exception as e:
-                    warnings.append(f"Scope check failed for question {q.get('question_id', '?')}: {e}")
 
-            # G9: Save current issues to Redis before returning
-            if self.short_term and issues:
-                try:
-                    await self.short_term.save_retry_issues(exam_id, issues)
-                except Exception:
-                    pass
+                scope_violations.extend(result.get("scope_violations", []))
 
-            # Build validation prompt
-            prompt = self._build_validation_prompt(questions, exam_config, retrieved_context)
+                if batch_num < total_batches:
+                    warnings.append(f"Batch {batch_num}/{total_batches} validated")
 
-            # Call LLM for validation
-            response = await self.llm.chat(
-                messages=[
-                    {"role": "system", "content": self.VALIDATOR_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                role="validator",
-                max_tokens=6000,
-                temperature=0.1,
-            )
+            except json.JSONDecodeError as e:
+                warnings.append(f"Batch {batch_num} parse failed: {e}")
+            except Exception as e:
+                warnings.append(f"Batch {batch_num} failed: {e}")
 
-            result = json.loads(response)
+        # G9: Save current issues to Redis
+        if self.short_term and all_issues:
+            try:
+                await self.short_term.save_retry_issues(exam_id, all_issues)
+            except Exception:
+                pass
 
-            validation_passed = result.get("validation_passed", False)
-            issues_data = result.get("issues", [])
-            bloom_compliance = result.get("bloom_compliance", {})
-            scope_violations = result.get("scope_violations", [])
-            approved_for_publish = result.get("approved_for_publish", False)
+        # Determine overall pass/fail
+        validation_passed = len(all_issues) == 0
 
-            # Build LLM issues, then MERGE with skill-found issues (don't overwrite)
-            llm_issues = [
-                ValidationIssue(
-                    question_id=i.get("question_id", ""),
-                    issue_type=i.get("issue_type", "unknown"),
-                    detail=i.get("detail", ""),
-                    suggestion=i.get("suggestion", ""),
-                ).to_dict()
-                for i in issues_data
-            ]
-            # Merge: keep all skill issues + all LLM issues (no deduplication to preserve audit trail)
-            issues = issues + llm_issues
+        # approved_for_publish: only if no critical issues
+        critical_issues = [
+            i for i in all_issues
+            if i.get("issue_type") in ("wrong_answer", "scope_violation")
+        ]
+        approved_for_publish = len(critical_issues) == 0
 
-            # Check bloom compliance
-            bloom_dist = exam_config.get("bloom_distribution", {})
-            for bloom, config in bloom_dist.items():
-                if bloom in bloom_compliance:
-                    compliance = bloom_compliance[bloom]
-                    expected = config
-                    actual = compliance.get("actual", 0)
-                    if abs(expected - actual) > 2:
-                        warnings.append(
-                            f"Bloom '{bloom}': expected {expected}, actual {actual} (diff > 2)"
-                        )
+        # Check bloom compliance
+        bloom_dist = exam_config.get("bloom_distribution", {})
+        for bloom, config in bloom_dist.items():
+            if bloom in bloom_compliance:
+                compliance = bloom_compliance[bloom]
+                expected = config
+                actual = compliance.get("actual", 0)
+                if abs(expected - actual) > 2:
+                    warnings.append(
+                        f"Bloom '{bloom}': expected {expected}, actual {actual} (diff > 2)"
+                    )
 
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            usage = metrics.prompt_tokens + metrics.completion_tokens
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        usage = metrics.prompt_tokens + metrics.completion_tokens
 
-            status = AgentStatus.SUCCESS
-            if not validation_passed:
-                if len(issues) > 0:
-                    status = AgentStatus.RETRY_NEEDED
-                else:
-                    status = AgentStatus.PARTIAL
+        status = AgentStatus.SUCCESS
+        if not validation_passed:
+            if len(all_issues) > 0:
+                status = AgentStatus.RETRY_NEEDED
+            else:
+                status = AgentStatus.PARTIAL
 
-            return ValidatorOutput(
-                status=status,
-                agent_name="validator",
-                execution_time_ms=elapsed_ms,
-                token_usage=TokenUsage(
-                    prompt_tokens=metrics.prompt_tokens,
-                    completion_tokens=metrics.completion_tokens,
-                    total_tokens=usage,
-                ),
-                warnings=warnings,
-                trace_id=trace_id,
-                validation_passed=validation_passed,
-                issues=issues,
-                bloom_compliance=bloom_compliance,
-                scope_violations=scope_violations,
-                approved_for_publish=approved_for_publish,
-            )
+        return ValidatorOutput(
+            status=status,
+            agent_name="validator",
+            execution_time_ms=elapsed_ms,
+            token_usage=TokenUsage(
+                prompt_tokens=metrics.prompt_tokens,
+                completion_tokens=metrics.completion_tokens,
+                total_tokens=usage,
+            ),
+            warnings=warnings,
+            trace_id=trace_id,
+            validation_passed=validation_passed,
+            issues=all_issues,
+            bloom_compliance=bloom_compliance,
+            scope_violations=scope_violations,
+            approved_for_publish=approved_for_publish,
+        )
 
-        except json.JSONDecodeError as e:
-            warnings.append(f"Failed to parse validation result: {e}")
-            # Bug-015 fix: save skill-found issues even when LLM parsing fails
-            if self.short_term and issues:
-                try:
-                    await self.short_term.save_retry_issues(exam_id, issues)
-                except Exception:
-                    pass
-            return ValidatorOutput(
-                status=AgentStatus.PARTIAL,
-                agent_name="validator",
-                execution_time_ms=int((time.time() - start_time) * 1000),
-                token_usage=TokenUsage(),
-                warnings=warnings,
-                trace_id=trace_id,
-                validation_passed=False,
-                issues=issues,
-                bloom_compliance={},
-                scope_violations=[],
-                approved_for_publish=False,
-            )
+    def _build_validation_context(self, retrieved_context: list[dict] | None) -> str:
+        """Build context string for validation prompt."""
+        if not retrieved_context:
+            return "Không có context — chỉ dựa vào câu hỏi để kiểm tra."
 
-        except Exception as e:
-            warnings.append(f"Validation failed: {str(e)}")
-            # Bug-015 fix: save skill-found issues even when validation throws unexpected error
-            if self.short_term and issues:
-                try:
-                    await self.short_term.save_retry_issues(exam_id, issues)
-                except Exception:
-                    pass
-            return ValidatorOutput(
-                status=AgentStatus.PARTIAL,
-                agent_name="validator",
-                execution_time_ms=int((time.time() - start_time) * 1000),
-                token_usage=TokenUsage(),
-                warnings=warnings,
-                trace_id=trace_id,
-                validation_passed=False,
-                issues=issues,
-                bloom_compliance={},
-                scope_violations=[],
-                approved_for_publish=False,
-            )
+        chunks = [
+            f"[{c.get('chunk_id', '?')}] {c.get('chapter', '')}: {c.get('content', '')[:300]}"
+            for c in retrieved_context[:20]
+        ]
+        return "\n\n".join(chunks)
 
-    def _build_validation_prompt(
+    def _build_batch_prompt(
         self,
-        questions: list[dict],
+        batch: list[dict],
+        context_str: str,
         exam_config: dict,
-        retrieved_context: list[dict] | None,
     ) -> str:
-        """Build the validation prompt."""
+        """Build validation prompt for a batch of questions."""
         scope = exam_config.get("scope", [])
         bloom_dist = exam_config.get("bloom_distribution", {})
+        questions_json = json.dumps(batch, ensure_ascii=False, indent=2)
 
-        # Format questions
-        questions_json = json.dumps(questions, ensure_ascii=False, indent=2)
-
-        # Format context
-        context_str = ""
-        if retrieved_context:
-            context_chunks = [
-                f"[{c.get('chunk_id', '?')}] {c.get('content', '')[:300]}"
-                for c in retrieved_context[:20]
-            ]
-            context_str = "\n\n".join(context_chunks)
-
-        prompt = f"""Kiểm tra đề kiểm tra sau:
+        prompt = f"""Kiểm tra đề kiểm tra sau ({len(batch)} câu):
 
 ## Exam Config:
 - Scope: {json.dumps(scope, ensure_ascii=False)}
@@ -330,11 +331,10 @@ Output format:
 ## Questions:
 {questions_json}
 
-## Retrieved Context (allowed knowledge):
-{context_str or "No context available."}
+## Context có sẵn:
+{context_str}
 
-Thực hiện kiểm tra:"""
-
+Thực hiện kiểm tra cho TỪNG CÂU:"""
         return prompt
 
 

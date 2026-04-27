@@ -124,6 +124,8 @@ docs/File markdown/
 docs/chunks.md
 Chunking/
 chunking_demo/
+gemini.txt
+checked_keys_result.txt
 
 # Local reference/source drops
 Data sách/*.pdf

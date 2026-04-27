@@ -12,6 +12,7 @@ from app.models.document import Document
 from app.models.exam import Exam
 from app.models.refresh_token import RefreshToken
 from app.models.teacher_preference import TeacherPreference
+from app.models.feedback_event import FeedbackEvent
 from app.core.database import Base
 from app.core.config import get_settings
 

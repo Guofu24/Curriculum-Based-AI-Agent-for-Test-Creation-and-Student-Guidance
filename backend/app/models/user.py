@@ -3,12 +3,20 @@
 import uuid
 from datetime import datetime
 from typing import List, Optional
+from enum import Enum
 
 from sqlalchemy import String, DateTime, Boolean, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+
+class UserRole(str, Enum):
+    """User role enum matching SPEC section 5.3."""
+    STUDENT = "student"
+    TEACHER = "teacher"
+    ADMIN = "admin"
 
 
 class User(Base):
@@ -24,9 +32,14 @@ class User(Base):
     )
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    role: Mapped[str] = mapped_column(String(50), default="teacher")
+    role: Mapped[str] = mapped_column(
+        String(50), default=UserRole.TEACHER.value
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
     documents: Mapped[List["Document"]] = relationship(
@@ -40,4 +53,7 @@ class User(Base):
     )
     preferences: Mapped[Optional["TeacherPreference"]] = relationship(
         "TeacherPreference", back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+    feedback_events: Mapped[List["FeedbackEvent"]] = relationship(
+        "FeedbackEvent", back_populates="user", cascade="all, delete-orphan"
     )

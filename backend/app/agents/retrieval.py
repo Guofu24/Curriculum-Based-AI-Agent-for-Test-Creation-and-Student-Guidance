@@ -70,12 +70,31 @@ class RetrievalAgent:
                 scope_chapters, bloom_targets or [], query_hints or []
             )
 
-            # Step 2: Parallel retrieval per chapter — G10
+            # Domain 7B: Map Bloom level to preferred content types for targeted retrieval
+            BLOOM_CONTENT_TYPES = {
+                "nhan_biet": ["definition", "theorem"],
+                "thong_hieu": ["definition", "explanation"],
+                "van_dung": ["example", "exercise", "applied_problem"],
+                "van_dung_cao": ["example", "exercise", "applied_problem"],
+            }
+
+            # Determine preferred content types based on Bloom targets
+            content_types: list[str] | None = None
+            if bloom_targets:
+                types_set: set[str] = set()
+                for bloom in bloom_targets:
+                    if bloom in BLOOM_CONTENT_TYPES:
+                        types_set.update(BLOOM_CONTENT_TYPES[bloom])
+                if types_set:
+                    content_types = list(types_set)
+
+            # Step 2: Parallel retrieval per chapter — G10 + Domain 2B (5s timeout)
             all_chunks, retrieval_warnings = await self._parallel_query_chapters(
                 document_id=document_id,
                 chapters=scope_chapters,
                 expanded_queries=expanded_queries,
                 top_k=settings.RAG_TOP_K_PER_CHAPTER,
+                content_types=content_types,
             )
             warnings.extend(retrieval_warnings)
 
@@ -204,31 +223,50 @@ Trả về JSON:
         chapters: list[str],
         expanded_queries: list[str],
         top_k: int = 20,
+        content_types: list[str] | None = None,
     ) -> tuple[list[dict], list[str]]:
         """
         Retrieve chunks from all chapters in parallel.
         G10: Uses asyncio.gather(return_exceptions=True) so 1 chapter failure
         doesn't fail the entire retrieval — logs warning and continues.
+        Domain 2B: Each chapter query has a hard 5-second timeout.
         """
-        async def _query_one(chapter: str) -> list[dict]:
-            return await self._retrieve_for_chapter(
-                document_id=document_id,
-                chapter=chapter,
-                queries=expanded_queries,
-                top_k=top_k,
-            )
+        CHAPTER_TIMEOUT = 5.0  # seconds
 
-        tasks = [_query_one(ch) for ch in chapters]
+        async def _query_one_with_timeout(chapter: str) -> tuple[str, list[dict] | Exception]:
+            """Query one chapter with hard timeout."""
+            try:
+                result = await asyncio.wait_for(
+                    self._retrieve_for_chapter(
+                        document_id=document_id,
+                        chapter=chapter,
+                        queries=expanded_queries,
+                        top_k=top_k,
+                        content_types=content_types,
+                    ),
+                    timeout=CHAPTER_TIMEOUT,
+                )
+                return chapter, result
+            except asyncio.TimeoutError:
+                return chapter, TimeoutError(f"Chapter '{chapter}' retrieval timed out after {CHAPTER_TIMEOUT}s")
+            except Exception as e:
+                return chapter, e
+
+        tasks = [_query_one_with_timeout(ch) for ch in chapters]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_chunks: list[dict] = []
         warnings: list[str] = []
 
-        for chapter, result in zip(chapters, results):
+        for result in results:
             if isinstance(result, Exception):
-                warnings.append(f"Chapter '{chapter}' retrieval failed: {str(result)}")
+                warnings.append(f"Chapter retrieval raised exception: {str(result)}")
                 continue
-            all_chunks.extend(result)
+            chapter, chunks_or_error = result
+            if isinstance(chunks_or_error, Exception):
+                warnings.append(f"Chapter '{chapter}' retrieval failed: {str(chunks_or_error)}")
+                continue
+            all_chunks.extend(chunks_or_error)
 
         return all_chunks, warnings
 
@@ -313,6 +351,7 @@ Trả về JSON:
         chapter: str,
         queries: list[str],
         top_k: int = 20,
+        content_types: list[str] | None = None,
     ) -> list[dict]:
         """Retrieve chunks for a specific chapter."""
         chapter_chunks = []
@@ -336,6 +375,7 @@ Trả về JSON:
             chapter_id=chapter_id,
             query_embedding=embedding,
             top_k=top_k,
+            content_types=content_types,
         )
 
         chapter_chunks.extend(results)

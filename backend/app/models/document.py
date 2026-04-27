@@ -3,6 +3,7 @@
 import uuid
 from datetime import datetime
 from typing import Optional, List, TYPE_CHECKING
+from enum import Enum
 
 from sqlalchemy import String, Integer, ForeignKey, func, DateTime, UUID as SQLUUID
 from sqlalchemy.dialects.postgresql import UUID
@@ -14,6 +15,14 @@ from app.core.database import Base
 if TYPE_CHECKING:
     from app.models.user import User
     from app.models.exam import Exam
+
+
+class DocumentProcessingStatus(str, Enum):
+    """Document processing status enum matching SPEC section 5.3."""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class Document(Base):

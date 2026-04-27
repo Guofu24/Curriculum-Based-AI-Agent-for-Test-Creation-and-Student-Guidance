@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { DashboardHeader } from '@/components/dashboard-header'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -28,69 +28,12 @@ import {
   Copy,
   TrendingDown,
   Eye,
+  RefreshCw,
 } from 'lucide-react'
 import { formatDateTime } from '@/lib/format'
 import Link from 'next/link'
 import { cn } from '@/lib/utils'
-
-// MOCK: Feedback data (backend returns empty)
-interface FeedbackEvent {
-  id: string
-  exam_id: string
-  exam_title: string
-  timestamp: string
-  signal_type: 'bloom_mismatch' | 'out_of_scope' | 'duplicate' | 'quality_low' | 'answer_incorrect'
-  description: string
-  resolved: boolean
-}
-
-const MOCK_FEEDBACK: FeedbackEvent[] = [
-  {
-    id: '1',
-    exam_id: 'exam-001',
-    exam_title: 'Đề kiểm tra Vật lý Chương 1-2',
-    timestamp: '2026-04-04T10:00:00Z',
-    signal_type: 'bloom_mismatch',
-    description: "Câu hỏi MCQ_003 có bloom_level 'thong_hieu' nhưng nội dung phù hợp 'nhan_biet'",
-    resolved: false,
-  },
-  {
-    id: '2',
-    exam_id: 'exam-001',
-    exam_title: 'Đề kiểm tra Vật lý Chương 1-2',
-    timestamp: '2026-04-04T10:05:00Z',
-    signal_type: 'out_of_scope',
-    description: 'Câu hỏi ESSAY_001 vượt phạm vi: tham khảo nội dung từ Chương 3 không nằm trong scope',
-    resolved: false,
-  },
-  {
-    id: '3',
-    exam_id: 'exam-002',
-    exam_title: 'Đề thi Hóa học giữa kỳ',
-    timestamp: '2026-04-03T14:30:00Z',
-    signal_type: 'duplicate',
-    description: 'Câu MCQ_005 và MCQ_008 có nội dung tương tự (similarity: 87%)',
-    resolved: true,
-  },
-  {
-    id: '4',
-    exam_id: 'exam-002',
-    exam_title: 'Đề thi Hóa học giữa kỳ',
-    timestamp: '2026-04-03T14:35:00Z',
-    signal_type: 'quality_low',
-    description: 'Câu MCQ_010 có quality_score thấp (0.45) do thiếu bằng chứng từ tài liệu',
-    resolved: false,
-  },
-  {
-    id: '5',
-    exam_id: 'exam-003',
-    exam_title: 'Bài kiểm tra 15 phút Toán',
-    timestamp: '2026-04-02T09:15:00Z',
-    signal_type: 'answer_incorrect',
-    description: 'Đáp án câu MCQ_002 có thể không chính xác: A = 15, nhưng tính toán cho ra 16',
-    resolved: false,
-  },
-]
+import { feedbackApi, FeedbackEvent } from '@/lib/api'
 
 const signalTypeConfig = {
   bloom_mismatch: {
@@ -118,40 +61,86 @@ const signalTypeConfig = {
     icon: XCircle,
     color: 'text-destructive bg-destructive/10 border-destructive/20',
   },
-}
+  validation_warning: {
+    label: 'Cảnh báo validation',
+    icon: AlertTriangle,
+    color: 'text-yellow-500 bg-yellow-500/10 border-yellow-500/20',
+  },
+  generation_error: {
+    label: 'Lỗi sinh câu hỏi',
+    icon: XCircle,
+    color: 'text-red-500 bg-red-500/10 border-red-500/20',
+  },
+  publish: {
+    label: 'Xuất bản',
+    icon: CheckCircle2,
+    color: 'text-green-500 bg-green-500/10 border-green-500/20',
+  },
+  edit_applied: {
+    label: 'Đã chỉnh sửa',
+    icon: Copy,
+    color: 'text-blue-500 bg-blue-500/10 border-blue-500/20',
+  },
+} as const
 
 export default function FeedbackPage() {
   const [filter, setFilter] = useState<string>('all')
   const [statusFilter, setStatusFilter] = useState<'all' | 'resolved' | 'unresolved'>('all')
+  const [feedbackItems, setFeedbackItems] = useState<FeedbackEvent[]>([])
+  const [total, setTotal] = useState(0)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isError, setIsError] = useState(false)
+  const [page, setPage] = useState(1)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const LIMIT = 50
 
-  const filteredFeedback = MOCK_FEEDBACK.filter((f) => {
-    if (filter !== 'all' && f.signal_type !== filter) return false
-    if (statusFilter === 'resolved' && !f.resolved) return false
-    if (statusFilter === 'unresolved' && f.resolved) return false
-    return true
-  })
+  const fetchFeedback = useCallback(async (refresh = false) => {
+    if (refresh) setIsRefreshing(true)
+    else setIsLoading(true)
+    setIsError(false)
+    try {
+      const reviewStatusParam = statusFilter === 'all' ? undefined
+        : statusFilter === 'resolved' ? 'accepted,rejected,corrected' : 'pending'
+      const signalTypeParam = filter === 'all' ? undefined : filter
+      const res = await feedbackApi.list(page, LIMIT, signalTypeParam, reviewStatusParam || undefined)
+      setFeedbackItems(res.items)
+      setTotal(res.total)
+    } catch {
+      setIsError(true)
+    } finally {
+      setIsLoading(false)
+      setIsRefreshing(false)
+    }
+  }, [filter, statusFilter, page])
 
+  useEffect(() => { fetchFeedback() }, [fetchFeedback])
+
+  // Stats computed from all loaded items
   const stats = {
-    total: MOCK_FEEDBACK.length,
-    unresolved: MOCK_FEEDBACK.filter((f) => !f.resolved).length,
-    byType: Object.keys(signalTypeConfig).reduce((acc, type) => {
-      acc[type] = MOCK_FEEDBACK.filter((f) => f.signal_type === type).length
-      return acc
-    }, {} as Record<string, number>),
+    total: total || feedbackItems.length,
+    unresolved: feedbackItems.filter(f => !f.resolved).length,
+    byType: Object.fromEntries(
+      Object.keys(signalTypeConfig).map(t => [t, feedbackItems.filter(f => f.signal_type === t).length])
+    ),
   }
 
   return (
     <>
       <DashboardHeader breadcrumbs={[{ label: 'Phản hồi' }]} />
-      
       <main className="flex-1 overflow-auto">
         <div className="container mx-auto p-6 space-y-6">
           {/* Header */}
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">Kho phản hồi</h1>
-            <p className="text-muted-foreground">
-              Tín hiệu chất lượng từ AI pipeline
-            </p>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-bold tracking-tight">Kho phản hồi</h1>
+              <p className="text-muted-foreground">
+                Tín hiệu chất lượng từ AI pipeline
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => fetchFeedback(true)} disabled={isRefreshing}>
+              <RefreshCw className={cn("h-4 w-4 mr-2", isRefreshing && "animate-spin")} />
+              Làm mới
+            </Button>
           </div>
 
           {/* Stats Cards */}
@@ -219,7 +208,7 @@ export default function FeedbackPage() {
               <div className="flex flex-wrap items-center gap-4">
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-muted-foreground">Loại:</span>
-                  <Select value={filter} onValueChange={setFilter}>
+                  <Select value={filter} onValueChange={(v) => { setFilter(v); setPage(1) }}>
                     <SelectTrigger className="w-[180px]">
                       <SelectValue />
                     </SelectTrigger>
@@ -236,7 +225,7 @@ export default function FeedbackPage() {
 
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-muted-foreground">Trạng thái:</span>
-                  <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as 'all' | 'resolved' | 'unresolved')}>
+                  <Select value={statusFilter} onValueChange={(v) => { setStatusFilter(v as 'all' | 'resolved' | 'unresolved'); setPage(1) }}>
                     <SelectTrigger className="w-[150px]">
                       <SelectValue />
                     </SelectTrigger>
@@ -249,7 +238,7 @@ export default function FeedbackPage() {
                 </div>
 
                 <span className="ml-auto text-sm text-muted-foreground">
-                  Hiển thị: {filteredFeedback.length} phản hồi
+                  Hiển thị: {feedbackItems.length} / {total} phản hồi
                 </span>
               </div>
             </CardContent>
@@ -264,7 +253,20 @@ export default function FeedbackPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              {filteredFeedback.length === 0 ? (
+              {isLoading ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <RefreshCw className="h-8 w-8 text-muted-foreground/50 mb-4 animate-spin" />
+                  <p className="text-muted-foreground">Đang tải phản hồi...</p>
+                </div>
+              ) : isError ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <XCircle className="h-8 w-8 text-destructive mb-4" />
+                  <p className="text-destructive font-medium mb-2">Không thể tải phản hồi</p>
+                  <Button variant="outline" size="sm" onClick={() => fetchFeedback(true)}>
+                    Thử lại
+                  </Button>
+                </div>
+              ) : feedbackItems.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
                   <MessageSquare className="h-12 w-12 text-muted-foreground/50 mb-4" />
                   <p className="text-muted-foreground">
@@ -284,15 +286,16 @@ export default function FeedbackPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredFeedback.map((feedback) => {
-                      const config = signalTypeConfig[feedback.signal_type]
+                    {feedbackItems.map((feedback) => {
+                      const config = signalTypeConfig[feedback.signal_type as keyof typeof signalTypeConfig]
+                      if (!config) return null
                       const Icon = config.icon
 
                       return (
                         <TableRow key={feedback.id}>
                           <TableCell>
-                            <Badge 
-                              variant="outline" 
+                            <Badge
+                              variant="outline"
                               className={cn("gap-1", config.color)}
                             >
                               <Icon className="h-3 w-3" />
@@ -303,15 +306,15 @@ export default function FeedbackPage() {
                             <p className="text-sm max-w-[400px]">{feedback.description}</p>
                           </TableCell>
                           <TableCell className="hidden md:table-cell">
-                            <Link 
+                            <Link
                               href={`/dashboard/exams/${feedback.exam_id}`}
                               className="text-sm text-primary hover:underline"
                             >
-                              {feedback.exam_title}
+                              {feedback.exam_title || feedback.exam_id}
                             </Link>
                           </TableCell>
                           <TableCell className="hidden lg:table-cell text-muted-foreground text-sm">
-                            {formatDateTime(feedback.timestamp)}
+                            {formatDateTime(feedback.created_at || feedback.timestamp || '')}
                           </TableCell>
                           <TableCell>
                             {feedback.resolved ? (

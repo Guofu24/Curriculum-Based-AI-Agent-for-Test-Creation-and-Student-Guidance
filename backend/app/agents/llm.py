@@ -26,6 +26,26 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 T = TypeVar("T", bound=BaseModel)
 
+# Domain 9: Prompt version mapping by role
+_PROMPT_VERSIONS: dict[str, str] = {
+    "outline": "v2.1",
+    "builder": "v2.1",
+    "validator": "v2.1",
+    "orchestrator": "v1.0",
+    "planner": "v1.0",
+    "retrieval": "v1.0",
+    "dedup": "v1.0",
+    "skills": "v1.0",
+    "classifier": "v1.0",
+    "guardrails": "v1.0",
+    "reranker": "v1.0",
+}
+
+
+def _get_prompt_version(role: str) -> str:
+    """Get the prompt version for a given role."""
+    return _PROMPT_VERSIONS.get(role, "v1.0")
+
 
 # ============================================================
 # TRACER WRAPPER (lazy import to avoid circular dependency)
@@ -649,15 +669,24 @@ class LLMClient:
                     max_tokens=max_tokens,
                 )
 
+                latency_ms = int((time.time() - start) * 1000)
+
                 if span is not None:
                     try:
-                        span.end(metadata={"latency_ms": int((time.time() - start) * 1000)})
+                        span.end(metadata={"latency_ms": latency_ms})
                     except Exception:
                         pass
 
+                # Domain 9: Structured logging for LLM calls
                 logger.debug(
-                    f"LLM chat ok | provider={provider.name()} "
-                    f"| model={resolved_model} | latency={int((time.time() - start) * 1000)}ms"
+                    "llm_call",
+                    extra={
+                        "provider": provider.name(),
+                        "model": resolved_model,
+                        "role": role,
+                        "latency_ms": latency_ms,
+                        "prompt_version": _get_prompt_version(role),
+                    },
                 )
                 return result
             except Exception as e:

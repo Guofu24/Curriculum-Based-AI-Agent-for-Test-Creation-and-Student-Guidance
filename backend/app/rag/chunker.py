@@ -3,6 +3,8 @@
 import re
 from typing import Any
 
+from app.rag.structure import _is_heading_chapter_level
+
 
 def semantic_chunk(
     markdown: str,
@@ -137,6 +139,10 @@ def _simple_chunk(
         if heading_match:
             level = len(heading_match.group(1))
             title = heading_match.group(2).strip()
+
+            # Roman numeral or letter-prefixed headings are chapter-level regardless of # depth
+            if level >= 2 and _is_heading_chapter_level(title):
+                level = 1
 
             if level == 1:
                 if current_chunks:

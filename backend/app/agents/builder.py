@@ -4,59 +4,73 @@ import logging
 import time
 import json
 import asyncio
-import re
 from typing import Any
 
+# Domain 9: Prompt versioning
+BUILDER_PROMPT_VERSION = "v2.1"
 
 # ─────────────────────────────────────────────────────────────
 # LaTeX escape sanitizer
 # ─────────────────────────────────────────────────────────────
-# LLM sometimes outputs LaTeX commands with a bare single backslash inside
-# JSON string values (e.g. "\circ").  json.loads() interprets a leading
-# backslash as a JSON escape sequence and fails because \c is not a valid
-# JSON escape (\n, \t, \", \\, \uXXXX are valid).  This function finds
-# bare LaTeX commands and doubles the backslash so json.loads sees a valid
-# escaped backslash.  JSON escapes (\n, \\, etc.) are left untouched.
-_LATEX_CMDS = sorted([
-    r"\alpha", r"\beta", r"\gamma", r"\delta", r"\epsilon", r"\zeta",
-    r"\eta", r"\theta", r"\iota", r"\kappa", r"\lambda", r"\mu",
-    r"\nu", r"\xi", r"\pi", r"\rho", r"\sigma", r"\tau", r"\upsilon",
-    r"\phi", r"\chi", r"\psi", r"\omega",
-    r"\Gamma", r"\Delta", r"\Theta", r"\Lambda", r"\Xi", r"\Pi",
-    r"\Sigma", r"\Upsilon", r"\Phi", r"\Psi", r"\Omega",
-    r"\rightarrow", r"\leftarrow", r"\Rightarrow", r"\Leftarrow",
-    r"\leftrightarrow", r"\Leftrightarrow", r"\mapsto", r"\to", r"\gets",
-    r"\leq", r"\geq", r"\neq", r"\approx", r"\equiv", r"\sim",
-    r"\ll", r"\gg", r"\perp", r"\parallel", r"\propto",
-    r"\pm", r"\times", r"\div", r"\cdot", r"\star", r"\circ", r"\bullet",
-    r"\oplus", r"\otimes", r"\ominus", r"\oslash",
-    r"\frac", r"\sqrt", r"\root", r"\infty", r"\partial", r"\nabla",
-    r"\sin", r"\cos", r"\tan", r"\cot", r"\sec", r"\csc",
-    r"\log", r"\ln", r"\exp", r"\lim", r"\sum", r"\prod",
-    r"\int", r"\oint", r"\iint", r"\iiiint",
-    r"\text", r"\mathrm", r"\mathbf", r"\mathit", r"\mathsf", r"\mathtt",
-    r"\vec", r"\hat", r"\dot", r"\ddot", r"\bar", r"\tilde", r"\breve",
-    r"\underline", r"\overline", r"\overbrace", r"\underbrace",
-    r"\quad", r"\qquad", r"\space",
-    r"\degree", r"\ang", r"\pu", r"\ldots", r"\cdots",
-    r"\vdots", r"\ddots", r"\forall", r"\exists",
-    r"\in", r"\notin", r"\subset", r"\supset", r"\cup", r"\cap", r"\emptyset",
-    r"\mathbb", r"\mathcal", r"\mathfrak",
-    r"\_", r"\^",
-], key=len, reverse=True)
+# LLM output often contains LaTeX inside JSON string values, e.g.:
+#   "stem": "Vật có $m = 5 \, \text{kg}$"
+# JSON only allows these escape sequences: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+# Any other \X is illegal and causes json.loads to raise JSONDecodeError.
+# The fix: inside every JSON string value, replace bare backslashes (not already
+# doubled) with double-backslash.  This is done via a state-machine that tracks
+# whether the current character is inside a JSON string.
 
-_LATEX_SANITIZE_RE = re.compile(
-    r"(?<!\\)(" + "|".join(re.escape(c) for c in _LATEX_CMDS) + r")"
-)
+# Valid single-char JSON escape sequences that must NOT be touched:
+_VALID_JSON_ESCAPES = set('"\\/ bfnrtu')
 
 
 def _sanitize_latex_escapes(json_str: str) -> str:
-    """Replace bare LaTeX \\cmd with \\\\cmd so json.loads sees a valid escaped backslash.
+    """Fix illegal JSON backslash escapes produced by LLMs writing LaTeX.
 
-    Only matches commands NOT preceded by another backslash.
-    Valid JSON escapes (\\n, \\\\, etc.) are untouched.
+    Walks the raw JSON text character-by-character tracking whether we are
+    inside a JSON string literal.  Any backslash inside a string that is
+    NOT followed by a valid JSON escape character is doubled so that
+    json.loads can parse it correctly.
+
+    This handles all LaTeX commands (\\vec, \\frac, \\,  \\! etc.) without
+    needing an exhaustive whitelist.
     """
-    return _LATEX_SANITIZE_RE.sub(lambda m: "\\" + m.group(0), json_str)
+    result: list[str] = []
+    in_string = False
+    i = 0
+    n = len(json_str)
+
+    while i < n:
+        ch = json_str[i]
+
+        if in_string:
+            if ch == '\\':
+                # Look at the next character
+                next_ch = json_str[i + 1] if i + 1 < n else ''
+                if next_ch in _VALID_JSON_ESCAPES:
+                    # Already a valid escape — emit as-is and skip both chars
+                    result.append(ch)
+                    result.append(next_ch)
+                    i += 2
+                else:
+                    # Bare backslash (e.g. \, \v \t in LaTeX context) — double it
+                    result.append('\\\\')  # becomes \\\\ in source = \\ in output
+                    i += 1  # do NOT skip next_ch — it will be processed normally
+            elif ch == '"':
+                # Closing quote — exit string mode
+                in_string = False
+                result.append(ch)
+                i += 1
+            else:
+                result.append(ch)
+                i += 1
+        else:
+            if ch == '"':
+                in_string = True
+            result.append(ch)
+            i += 1
+
+    return ''.join(result)
 
 
 def _extract_json_brackets(text: str) -> str | None:
@@ -100,6 +114,7 @@ def _extract_json_brackets(text: str) -> str | None:
 
     return None
 
+
 from app.agents.base import AgentBaseOutput, AgentStatus, AgentMetrics, TokenUsage, BuilderOutput
 from app.agents.llm import get_llm_client
 from app.agents.guardrails import GuardrailsPipeline, ScopeGuard
@@ -124,7 +139,7 @@ class BuilderAgent:
     Produces MCQ and Essay questions with full details.
 
     Flow:
-    1. Generate in chunks: 5-10 questions per LLM call
+    1. Generate in chunks: 5 questions per LLM call (parallelized)
     2. Each question: bloom_classifier → dedup_checker → content_filter
     3. van_dung_cao: web_search tool → adapt into scope
     4. Formula: text + LaTeX parallel output
@@ -145,6 +160,13 @@ Nhiệm vụ:
 5. Công thức: output dạng text + LaTeX song song
 6. Không trùng lặp chủ đề với câu đã sinh
 7. Chỉ dùng kiến thức trong phạm vi cho phép
+
+## QUY TẮC JSON NGHIÊM NGẶT (BẮT BUỘC):
+- CHỈ trả về JSON thuần túy — KHÔNG thêm bất kỳ văn bản, giải thích, hay suy nghĩ nào trước/sau JSON
+- KHÔNG dùng dấu nháy kép (") bên trong giá trị string — thay bằng dấu nháy đơn (') nếu cần
+- Ví dụ SAI: "stem": "Theo 'nguyên lý "bảo toàn năng lượng"', tính..."
+- Ví dụ ĐÚNG: "stem": "Theo nguyên lý bảo toàn năng lượng, tính..."
+- Không viết nhận xét kiểu 'Để tuân thủ yêu cầu...' hay chain-of-thought trong JSON
 
 MCQ Format:
 {
@@ -176,13 +198,58 @@ Essay Format:
   "estimated_solve_time_minutes": 10
 }
 
-Trả về JSON:
-{
-  "questions": [q1, q2, ...]
-}"""
+Trả về JSON array (không có key bọc ngoài):
+[câu_hỏi_1]"""
 
-    # Chunk size: questions per LLM call (1 = generate one slot at a time for reliability)
-    CHUNK_SIZE = 1
+    # Bloom-level-specific question generation guides
+    BLOOM_TEMPLATES = {
+        "nhan_biet": """## Hướng dẫn cho câu hỏi Nhận biết (nhan_biet)
+- Câu hỏi yêu cầu nhớ lại định nghĩa, sự kiện, hoặc quy trình cụ thể
+- Câu hỏi bắt đầu bằng: "Định nghĩa là gì", "Nêu", "Liệt kê", "Cho biết", "Kể tên", "Trình bày"
+- KHÔNG yêu cầu suy luận — chỉ cần nhớ lại kiến thức đã học
+- Ví dụ stem: "Định luật 2 Newton được phát biểu là gì?"
+- Options MCQ: đáp án đúng là định nghĩa/chính xác; 3 distractors là những phát biểu sai phổ biến hoặc gần đúng""",
+
+        "thong_hieu": """## Hướng dẫn cho câu hỏi Thông hiểu (thong_hieu)
+- Câu hỏi yêu cầu giải thích, so sánh, hoặc diễn giải
+- KHÔNG phải copy-paste — phải hiểu bản chất mới trả lời được
+- Câu hỏi bắt đầu bằng: "Giải thích", "So sánh", "Phân biệt", "Mô tả", "Tại sao"
+- Áp dụng công thức đơn giản 1 bước nếu có tính toán
+- Ví dụ stem: "Tại sao vật chuyển động tròn đều có gia tốc hướng tâm?"
+- Options MCQ: đáp án đúng giải thích đúng; distractors có thể giải thích sai bản chất""",
+
+        "van_dung": """## Hướng dẫn cho câu hỏi Vận dụng (van_dung)
+- Câu hỏi yêu cầu tính toán 2-3 bước hoặc có điều kiện ràng buộc
+- Phải kết hợp nhiều kiến thức/định luật
+- Câu hỏi bắt đầu bằng: "Tính", "Giải bài toán", "Xác định", "Vận dụng"
+- Ví dụ stem: "Một vật trượt trên mặt phẳng nghiêng 30°. Tính gia tốc biết hệ số ma sát μ=0.2."
+- Options MCQ: đáp án đúng cần tính toán đúng; distractors là các bước tính sai phổ biến (quên ma sát, dùng sai công thức, tính nhầm đơn vị)""",
+
+        "van_dung_cao": """## Hướng dẫn cho câu hỏi Vận dụng cao (van_dung_cao)
+- Câu hỏi yêu cầu phân tích mối quan hệ, đánh giá, hoặc bài toán phức hợp
+- Kết hợp nhiều công thức, nhiều chương, hoặc dữ liệu thực tế
+- Câu hỏi bắt đầu bằng: "Phân tích", "Đánh giá", "So sánh và nhận xét", "Thiết kế"
+- Ví dụ stem: "Hai vật A và B nối bằng sợi dây qua ròng rọc. Phân tích chuyển động và tính gia tốc của hệ."
+- Options MCQ: đáp án đúng cần phân tích đúng toàn bộ hệ; distractors là các lỗi phân tích phổ biến (bỏ qua ma sát, nhầm chiều lực, bỏ qua ràng buộc hình học)""",
+    }
+
+    # Distractor quality guide
+    DISTRACTOR_GUIDE = """## Hướng dẫn viết distractors (đáp án nhiễu) cho MCQ
+3 đáp án sai (distractors) phải thỏa mãn ĐỒNG THỜI:
+1. **Plausible**: người không học kỹ CÓ THỂ chọn — không phải đáp án vô lý
+2. **Related**: liên quan đến topic, không phải topic hoàn toàn khác
+3. **Không lộ liễu**: KHÔNG chứa từ khóa quá rõ ràng của đáp án đúng
+4. **Không có pattern**: KHÔNG có "tất cả các đáp án trên", "không có đáp án nào đúng", "A và B đúng"
+
+Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển động":
+- Tốt: "Lực ma sát cùng chiều chuyển động, làm vật tăng tốc" (plausible, sai bản chất)
+- Tốt: "Lực ma sát có phương vuông góc với mặt tiếp xúc" (related, nhầm phương)
+- Xấu: "Lực ma sát phụ thuộc vào màu sắc của vật" (không related)
+- Xấu: "Lực ma sát tỉ lệ thuận với tốc độ" (plausible nhưng pattern quá dễ nhận ra)"""
+
+    # Concurrency limits
+    MAX_CONCURRENT_LLM_CALLS = 5  # semaphore limit to avoid rate limits
+    CHUNK_SIZE = 5  # questions per LLM call
 
     def __init__(self, redis_client=None):
         self.llm = get_llm_client()
@@ -251,10 +318,11 @@ Trả về JSON:
                     )
                     flush_mode = True
 
-                # Generate questions for this chunk (one slot at a time)
+                # Generate questions for this chunk IN PARALLEL
                 questions, chunk_warnings = await self._generate_chunk(
                     chunk=chunk,
                     context=reduced_context_for_llm if flush_mode else context_for_llm,
+                    retrieved_context=retrieved_context,
                     scope_restriction=scope_restriction,
                     topics_used=topics_used,
                     slot_start_index=slot_start_index,
@@ -345,24 +413,71 @@ Trả về JSON:
         self,
         chunk: list[dict],
         context: str,
+        retrieved_context: list[dict],
         scope_restriction: str,
         topics_used: list[str],
         slot_start_index: int = 0,
         total_slots: int = 0,
     ) -> tuple[list[dict], list[str]]:
-        """Generate questions for a single blueprint chunk (one slot at a time)."""
-        warnings = []
-        all_questions: list[dict] = []
+        """Generate questions for a blueprint chunk IN PARALLEL using semaphore.
 
-        for offset, slot in enumerate(chunk):
-            slot_number = slot_start_index + offset + 1
-            question, q_warnings = await self._generate_single_slot(
-                slot=slot,
-                context=context[:8000],
-                scope_restriction=scope_restriction,
-                topics_used=topics_used,
-                slot_number=slot_number,
-            )
+        CHUNK_SIZE questions are generated concurrently (max 5 concurrent LLM calls).
+        Results are reordered by slot position to maintain stable output order
+        for the progress bar.
+        """
+        warnings: list[str] = []
+        semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_LLM_CALLS)
+
+        # Build topic-keyed context map for per-question filtering
+        topic_context_map = self._build_topic_context_map(retrieved_context)
+
+        async def _generate_one_with_semaphore(
+            slot: dict,
+            slot_number: int,
+        ) -> tuple[int, dict | None, list[str]]:
+            """Generate one question with semaphore limiting concurrency."""
+            async with semaphore:
+                # Filter context to just this slot's chapter/section
+                slot_chapter = slot.get("chapter", "Unknown")
+                slot_section = slot.get("section", "") or ""
+                topic_key = f"{slot_chapter} > {slot_section}" if slot_section else slot_chapter
+                topic_chunks = topic_context_map.get(topic_key, [])
+                question_context_str = (
+                    self._build_context_for_llm(topic_chunks)
+                    if topic_chunks
+                    else context[:8000]
+                )
+
+                question, q_warnings = await self._generate_single_slot(
+                    slot=slot,
+                    context=context[:8000],
+                    question_context=question_context_str,
+                    scope_restriction=scope_restriction,
+                    topics_used=topics_used,
+                    slot_number=slot_number,
+                )
+                return slot_number, question, q_warnings
+
+        # Launch all slots in the chunk concurrently
+        tasks = [
+            _generate_one_with_semaphore(slot, slot_start_index + offset + 1)
+            for offset, slot in enumerate(chunk)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Collect results in original order (for stable output)
+        ordered: list[tuple[int, dict | None, list[str]]] = []
+        for result in results:
+            if isinstance(result, Exception):
+                warnings.append(f"Slot generation raised exception: {result}")
+                continue
+            ordered.append(result)
+
+        # Sort by slot_number to maintain order
+        ordered.sort(key=lambda x: x[0])
+
+        all_questions: list[dict] = []
+        for slot_number, question, q_warnings in ordered:
             warnings.extend(q_warnings)
             if question:
                 all_questions.append(question)
@@ -377,12 +492,27 @@ Trả về JSON:
         scope_restriction: str,
         topics_used: list[str],
         slot_number: int = 0,
+        question_context: str = "",
     ) -> tuple[dict | None, list[str]]:
         """
         Generate a single question for one blueprint slot.
         Retries up to 2 times on JSON parse failure, then falls back to a demo question.
         """
         warnings: list[str] = []
+
+        # Use filtered topic context if provided, otherwise fall back to full context
+        effective_context = question_context if question_context else context[:8000]
+
+        q_id = slot.get("question_id", f"Q_{slot_number}")
+        q_type = slot.get("type", "mcq")
+        bloom = slot.get("bloom_level", "thong_hieu")
+        chapter = slot.get("chapter", "")
+        topic_hint = slot.get("topic_hint", "")
+        difficulty = slot.get("estimated_difficulty", 0.5)
+
+        # Domain 4B: Inject Bloom-specific template guide (after bloom/q_type are defined)
+        bloom_guide = self.BLOOM_TEMPLATES.get(bloom, "")
+        distractor_guide = self.DISTRACTOR_GUIDE if q_type == "mcq" else ""
 
         # G4: For van_dung_cao slots, fetch web search context
         search_context = ""
@@ -402,13 +532,6 @@ Trả về JSON:
                 except Exception:
                     pass
 
-        q_id = slot.get("question_id", f"Q_{slot_number}")
-        q_type = slot.get("type", "mcq")
-        bloom = slot.get("bloom_level", "thong_hieu")
-        chapter = slot.get("chapter", "")
-        topic_hint = slot.get("topic_hint", "")
-        difficulty = slot.get("estimated_difficulty", 0.5)
-
         # Prompt asks for exactly ONE question (JSON array with 1 item)
         user_prompt = f"""Sinh để trả lời đúng một câu hỏi cho blueprint slot sau:
 
@@ -417,11 +540,14 @@ Trả về JSON:
 ```
 
 ## Kiến thức nền (chỉ dùng kiến thức từ đây, không bịa đặt):
-{context}
-{search_context and f"\n## Bối cảnh mở rộng:\n{search_context}" or ""}
+{effective_context}
+{search_context and f"\n## Bối cảnh mở rộng (web search):\n{search_context}" or ""}
 
 ## Ràng buộc:
 {scope_restriction}
+
+{bloom_guide}
+{distractor_guide}
 
 ## Yêu cầu:
 - Sinh đúng MỘT câu hỏi duy nhất theo blueprint slot trên
@@ -535,7 +661,7 @@ Trả về JSON:
         logger.warning(f"Slot {slot_number}: All LLM retries failed — using demo question")
         warnings.append(f"Slot {slot_number}: LLM failed after {max_retries + 1} attempts, using demo question")
 
-        demo_q = self._build_demo_question(slot, context)
+        demo_q = self._build_demo_question(slot, effective_context)
         return demo_q, warnings
 
     async def _apply_skill_pipeline(self, q: dict, topics_used: list[str]) -> None:
@@ -666,7 +792,7 @@ Trả về JSON:
                 demo_q["stem"] = f"Bài toán liên quan đến {chapter}"
             demo_q["rubric"] = [
                 {"score": 10, "description": "Hoàn toàn chính xác và đầy đủ"},
-                {"score": 7, "description": "Đúng nhưng thiếu một số chi tiết"},
+                {"score": 7, "description": "�úng nhưng thiếu một số chi tiết"},
                 {"score": 4, "description": "Sai sót một phần"},
                 {"score": 0, "description": "Sai hoàn toàn"},
             ]
@@ -734,3 +860,19 @@ Trả về JSON:
             parts.append("")
 
         return "\n".join(parts)
+
+    def _build_topic_context_map(self, retrieved_context: list[dict]) -> dict[str, list[dict]]:
+        """Build a dict mapping topic/chapter to relevant chunks for per-question context filtering.
+
+        Instead of dumping ALL chunks into every question prompt (wasting tokens),
+        each question only gets chunks relevant to its chapter/topic.
+        """
+        topic_map: dict[str, list[dict]] = {}
+        for chunk in retrieved_context:
+            chapter = chunk.get("chapter", "Unknown")
+            section = chunk.get("section", "")
+            key = f"{chapter} > {section}" if section else chapter
+            if key not in topic_map:
+                topic_map[key] = []
+            topic_map[key].append(chunk)
+        return topic_map

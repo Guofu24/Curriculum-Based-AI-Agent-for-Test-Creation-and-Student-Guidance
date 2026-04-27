@@ -30,6 +30,21 @@ class ChapterNode:
     sections: list[SectionNode] = field(default_factory=list)
 
 
+def _is_heading_chapter_level(title: str) -> bool:
+    """
+    Returns True if a heading title looks like a chapter-level heading
+    regardless of its markdown # depth. Used to promote e.g. '## II. Something'
+    or '## A. Title' to chapter level in the tree.
+    """
+    import unicodedata
+    norm = unicodedata.normalize("NFD", title.lower())
+    ascii_title = "".join(c for c in norm if unicodedata.category(c) != "Mn")
+    return bool(
+        re.match(r"^[ivxldcm]+\.\s", ascii_title) or
+        re.match(r"^[a-z]\.\s", ascii_title)
+    )
+
+
 def _is_likely_heading(line: str, line_index: int, total_lines: int) -> int:
     """
     Heuristic: does `line` look like a heading even without # markers?
@@ -52,16 +67,15 @@ def _is_likely_heading(line: str, line_index: int, total_lines: int) -> int:
         r"^\d+\.\d+",               # 1.1, 2.3.4
         r"^\d+\s+\.",                # 1 . Title, 2 . Title
         r"^chapter\s+\d+",           # Chapter 1
-        r"^section\s+\d+",           # Section 1
+        r"^section\s+\d+",         # Section 1
         r"^part\s+\d+",             # Part 1
         r"^module\s+\d+",           # Module 1
         r"^unit\s+\d+",             # Unit 1
         r"^phần\s+\d+",             # Phần 1
         r"^bai\s+\d+",              # bai 1 (lowercase)
+        r"^[IVXLCDM]+\.\s+",         # Roman numeral prefix: "II. LƯỠNG...", "III. Something"
+        r"^[A-Z]\.\s+",            # Letter prefix: "A. QUANG...", "B. CÁI..."
     ]
-    for pat in chapter_patterns:
-        if re.search(pat, stripped, re.IGNORECASE):
-            return 1  # Chapter level
 
     # Section patterns (second level)
     section_patterns = [
@@ -214,6 +228,12 @@ def detect_heading_tree(markdown: str) -> dict:
         level = len(heading_match.group(1))
         title = heading_match.group(2).strip()
 
+        # Roman numeral or letter-prefixed headings are ALWAYS chapter-level (level 1)
+        # regardless of their # depth, so they become top-level chapters in the tree.
+        # e.g. "## II. LƯỠNG CHẤT PHẲNG" → chapter "II. LƯỠNG..." with chapter_id=ch5
+        if level >= 2 and _is_heading_chapter_level(title):
+            level = 1
+
         if level == 1:
             chapter_counter += 1
             current_chapter = ChapterNode(
@@ -306,6 +326,22 @@ def detect_heading_tree(markdown: str) -> dict:
     }
 
 
+def _roman_to_int(roman: str) -> int | None:
+    """Convert uppercase Roman numeral to integer. Returns None on failure."""
+    val = 0
+    roman = roman.upper()
+    table = [
+        ("CM", 900), ("D", 500), ("CD", 400), ("C", 100),
+        ("XC", 90), ("L", 50), ("XL", 40), ("X", 10),
+        ("IX", 9), ("V", 5), ("IV", 4), ("I", 1),
+    ]
+    for sym, num in table:
+        while roman.startswith(sym):
+            val += num
+            roman = roman[len(sym):]
+    return val if not roman else None
+
+
 def normalize_chapter_id(raw: str) -> str:
     """
     Normalize a raw chapter identifier to the canonical "ch{n}" form.
@@ -366,8 +402,17 @@ def normalize_chapter_id(raw: str) -> str:
         # "Phần 1"
         m2 = re.search(r"phan[_\s-]?(\d+)", stripped, re.IGNORECASE)
     if not m2:
+        # Roman numeral → Arabic conversion
+        # Matches "II. LUONG CHAT...", "III. SOMETHING", "I. Title", etc.
+        roman_match = re.match(r"^\s*[IVXLCMD]+\.", stripped, re.IGNORECASE)
+        if roman_match:
+            roman = re.match(r"^\s*([IVXLCMD]+)", stripped, re.IGNORECASE).group(1).upper()
+            arabic = _roman_to_int(roman)
+            if arabic:
+                chapter_num = f"ch{arabic}"
+    if not m2 and not chapter_num:
         # "A.QUANG HINH HOC", "B. CAI GI DO" -> ch_a, ch_b
-        letter_match = re.match(r"^\s*([A-Z])\.\s*[A-Z].*$", stripped, re.IGNORECASE)
+        letter_match = re.match(r"^\s*([A-Z])\.\s*[A-Z]", stripped, re.IGNORECASE)
         if letter_match:
             chapter_num = f"ch_{letter_match.group(1).lower()}"
     if not m2 and not chapter_num:

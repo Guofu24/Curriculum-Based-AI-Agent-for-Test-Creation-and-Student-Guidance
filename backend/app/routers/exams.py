@@ -28,7 +28,6 @@ from app.schemas.exam import (
     ExportPreviewResponse,
     ExamReviewRequest,
     ExamReviewResponse,
-    QualitySummaryResponse,
 )
 from app.dependencies import get_current_user
 from app.models.user import User
@@ -229,6 +228,26 @@ def _feedback_to_dict(event) -> dict:
     if isinstance(event, dict):
         return event
 
+    review_status = getattr(event, "review_status", None) or ""
+    resolved = review_status in ("accepted", "rejected", "corrected")
+
+    # Build description from signal_type if not set
+    description = getattr(event, "description", None)
+    if not description:
+        signal_type = getattr(event, "signal_type", "") or ""
+        signal_descriptions = {
+            "bloom_mismatch": "Bloom level không khớp với nội dung câu hỏi",
+            "out_of_scope": "Câu hỏi chứa nội dung ngoài phạm vi tài liệu",
+            "duplicate": "Câu hỏi trùng lặp với câu hỏi khác",
+            "quality_low": "Chất lượng câu hỏi thấp",
+            "answer_incorrect": "Đáp án có thể không chính xác",
+            "validation_warning": "Cảnh báo từ bước validation",
+            "generation_error": "Lỗi trong quá trình sinh câu hỏi",
+            "publish": "Đề thi đã được xuất bản",
+            "edit_applied": "Chỉnh sửa đã được áp dụng",
+        }
+        description = signal_descriptions.get(signal_type, f"Tín hiệu chất lượng: {signal_type}")
+
     return {
         "id": str(event.id),
         "exam_id": str(getattr(event, "exam_id", "")),
@@ -243,7 +262,7 @@ def _feedback_to_dict(event) -> dict:
         "event_source": getattr(event, "event_source", None),
         "source_type": getattr(event, "source_type", None),
         "source_ref": getattr(event, "source_ref", None),
-        "review_status": getattr(event, "review_status", None),
+        "review_status": review_status,
         "reviewed_by_human": getattr(event, "reviewed_by_human", False) or False,
         "question_id": str(getattr(event, "question_id", None)) if getattr(event, "question_id", None) else None,
         "error_categories": getattr(event, "error_categories", None) or [],
@@ -252,6 +271,8 @@ def _feedback_to_dict(event) -> dict:
         "linked_eval_sample_id": None,
         "payload": getattr(event, "payload", None),
         "created_at": event.created_at.isoformat() if event.created_at else None,
+        "description": description,
+        "resolved": resolved,
     }
 
 
@@ -396,7 +417,7 @@ async def get_quality_summary(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis_client),
     current_user: User = Depends(get_current_user),
-) -> QualitySummaryResponse:
+):
     """Get quality metrics summary. Returns dict matching frontend's QualitySummary."""
     _log = logging.getLogger("exam.router")
     service = ExamService(db, redis)
@@ -443,6 +464,7 @@ async def get_feedback_store(
     limit: int = 50,
     severity: str | None = None,
     review_status: str | None = None,
+    signal_type: str | None = None,
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis_client),
     current_user: User = Depends(get_current_user),
@@ -455,6 +477,7 @@ async def get_feedback_store(
         limit=limit,
         severity=severity,
         review_status=review_status,
+        signal_type=signal_type,
     )
     return {
         "items": [_feedback_to_dict(f) for f in events],
