@@ -150,12 +150,31 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
         if (examBlueprints.length > 0) {
           setBlueprint(examBlueprints)
         } else {
+          let fetched: BlueprintSlot[] = []
           try {
             const reviewData = await examsApi.getReviewData(id)
             const raw = reviewData.blueprint
-            setBlueprint(Array.isArray(raw) ? raw : [])
+            fetched = Array.isArray(raw) ? raw : []
           } catch {
-            // Blueprint not available
+            // Blueprint not available from review-data endpoint
+          }
+
+          if (fetched.length > 0) {
+            setBlueprint(fetched)
+          } else if (Array.isArray(examRes.questions) && examRes.questions.length > 0) {
+            // Synthesize blueprint from questions when no blueprint is stored in DB
+            // This covers exams generated before the blueprint-persistence fix
+            const synthesized: BlueprintSlot[] = examRes.questions.map((q: Question, idx: number) => ({
+              question_id: q.id || `Q_${idx + 1}`,
+              type: (q as { type?: string; question_type?: string }).type || q.question_type || 'mcq',
+              bloom_level: (q.bloom_level as BloomLevel) || 'thong_hieu',
+              chapter: (q as unknown as { chapter?: string }).chapter || '',
+              topic_hint: (q as unknown as { topic_hint?: string }).topic_hint || q.content?.slice(0, 60) || '',
+              estimated_difficulty: (q as unknown as { estimated_difficulty?: number; difficulty_score?: number }).estimated_difficulty
+                ?? (q as unknown as { difficulty_score?: number }).difficulty_score
+                ?? 0.5,
+            }))
+            setBlueprint(synthesized)
           }
         }
       } catch (error) {

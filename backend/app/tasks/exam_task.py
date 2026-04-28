@@ -147,10 +147,26 @@ def _build_demo_payload(
         "summary": {"by_chapter": by_chapter},
     }
 
+    # Build blueprint as a list-of-slots (one per question) so update_questions() can
+    # persist it to the dedicated `blueprint` DB column and the frontend can display it.
+    blueprint_slots: list[dict] = [
+        {
+            "question_id": q.get("id") or q.get("question_id", f"Q_{i + 1}"),
+            "type": q.get("type") or q.get("question_type", "mcq"),
+            "bloom_level": q.get("bloom_level", "thong_hieu"),
+            "chapter": (q.get("source_citations") or [scope[i % len(scope)]])[0] if scope else "",
+            "topic_hint": q.get("topic_hint", ""),
+            "estimated_difficulty": float(q.get("estimated_difficulty", 0.5)),
+        }
+        for i, q in enumerate(questions)
+        if isinstance(q, dict)
+    ]
+
     return {
         "exam_id": exam_id,
         "questions": questions,
-        "blueprint": blueprint,
+        "blueprint": blueprint_slots,  # list-of-slots so isinstance(result["blueprint"], list) is True
+        "blueprint_summary": blueprint,  # dict format kept for distribution table
         "distribution_summary": {
             "by_bloom": {
                 level: sum(1 for q in questions if q.get("bloom_level") == level)
@@ -279,17 +295,28 @@ def _run_async_task(
                 # Emit blueprint if pipeline is paused (before waiting for approval)
                 # This happens when wait_for_blueprint_approval returned PENDING
                 if result.get("pipeline_paused") and result.get("blueprint"):
+                    blueprint_slots = result.get("blueprint", [])
                     await manager.emit(
                         exam_id,
                         {
                             "type": "hitl_checkpoint",
                             "checkpoint_id": 1,
                             "data": {
-                                "blueprint": result.get("blueprint", []),
+                                "blueprint": blueprint_slots,
                                 "distribution_summary": result.get("distribution_summary", {}),
                             },
                         },
                     )
+                    # ── Persist blueprint to DB so page refresh shows it ──
+                    if exam_id and isinstance(blueprint_slots, list) and blueprint_slots:
+                        try:
+                            exam_service = ExamService(db, redis_client)
+                            await exam_service.update_blueprint(
+                                exam_id=uuid.UUID(exam_id),
+                                blueprint=blueprint_slots,
+                            )
+                        except Exception as _bp_err:
+                            logger.warning("Failed to persist blueprint to DB: %s", _bp_err)
 
                 if exam_id:
                     # Only update DB and emit completion if NOT paused at a checkpoint.
@@ -302,6 +329,7 @@ def _run_async_task(
                                 exam_id=uuid.UUID(exam_id),
                                 questions=result.get("questions", []),
                                 cost_report=result.get("cost_report"),
+                                blueprint=result.get("blueprint") if isinstance(result.get("blueprint"), list) else None,
                             )
 
                         status_val = result.get("status")

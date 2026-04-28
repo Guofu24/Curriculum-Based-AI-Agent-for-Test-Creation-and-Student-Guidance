@@ -110,6 +110,7 @@ class ExamService:
         exam_id: UUID,
         questions: list[dict],
         cost_report: dict | None = None,
+        blueprint: list[dict] | None = None,
     ) -> None:
         """Persist generated questions and append a history snapshot."""
         exam = await self.get_exam(exam_id, user_id=None)
@@ -123,6 +124,35 @@ class ExamService:
         exam.total_cost_usd = (cost_report or {}).get("total_cost_usd")
         exam.status = "ready_for_review" if questions else "draft"
         exam.updated_at = datetime.now(timezone.utc)
+
+        # Save blueprint to dedicated column (not just exam_config) so GET /exams/{id} returns it
+        if blueprint is not None:
+            exam.blueprint = list(blueprint)
+        elif not exam.blueprint:
+            # Fallback 1: try to extract from cost_report or exam_config
+            bp_fallback = (cost_report or {}).get("blueprint") or (exam.exam_config or {}).get("blueprint")
+            if isinstance(bp_fallback, list) and bp_fallback:
+                exam.blueprint = bp_fallback
+            elif isinstance(bp_fallback, dict):
+                # dict blueprint may have a "slots" or "blueprint" key with the list
+                slots = bp_fallback.get("slots") or bp_fallback.get("blueprint")
+                if isinstance(slots, list) and slots:
+                    exam.blueprint = slots
+            # Fallback 2: synthesize one slot per question from question data
+            if not exam.blueprint and questions:
+                exam.blueprint = [
+                    {
+                        "question_id": q.get("id") or q.get("question_id", f"Q_{i + 1}"),
+                        "type": q.get("type") or q.get("question_type", "mcq"),
+                        "bloom_level": q.get("bloom_level", "thong_hieu"),
+                        "chapter": q.get("chapter", ""),
+                        "topic_hint": q.get("topic_hint", q.get("content", "")[:60] if q.get("content") else ""),
+                        "estimated_difficulty": float(q.get("estimated_difficulty") or q.get("difficulty_score") or 0.5),
+                    }
+                    for i, q in enumerate(questions)
+                    if isinstance(q, dict)
+                ]
+
         exam.exam_config = {
             **(exam.exam_config or {}),
             "blueprint": (cost_report or {}).get("blueprint", (exam.exam_config or {}).get("blueprint", {})),
@@ -137,6 +167,19 @@ class ExamService:
                 change_description=f"Stored {len(questions or [])} generated questions.",
             )
         )
+        await self.db.commit()
+
+    async def update_blueprint(
+        self,
+        exam_id: UUID,
+        blueprint: list[dict],
+    ) -> None:
+        """Persist blueprint to the dedicated column. Called at HITL checkpoint 1."""
+        exam = await self.get_exam(exam_id, user_id=None)
+        if not exam:
+            raise ExamServiceError("Exam not found")
+        exam.blueprint = list(blueprint)
+        exam.updated_at = datetime.now(timezone.utc)
         await self.db.commit()
 
     async def update_question(

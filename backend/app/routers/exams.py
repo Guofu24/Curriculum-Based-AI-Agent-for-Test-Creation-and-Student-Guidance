@@ -147,7 +147,7 @@ def _exam_to_detail(exam, versions=None, feedback_events=None) -> dict:
     all_warnings = [w for q in q_list for w in q.get("warnings", [])]
     warning_count = len(all_warnings)
 
-    # Normalize blueprint: if it's a dict with "slots" key, extract the list
+    # Normalize blueprint: prioritise dedicated column, fallback to exam_config
     raw_blueprint = exam.blueprint
     blueprint_list: list[dict] = []
     if isinstance(raw_blueprint, list):
@@ -156,6 +156,14 @@ def _exam_to_detail(exam, versions=None, feedback_events=None) -> dict:
         blueprint_list = raw_blueprint.get("slots", [])
     elif isinstance(raw_blueprint, dict) and "blueprint" in raw_blueprint:
         blueprint_list = raw_blueprint.get("blueprint", [])
+
+    # Fallback: blueprint may have been stored inside exam_config by older pipeline versions
+    if not blueprint_list:
+        cfg_bp = (exam.exam_config or {}).get("blueprint")
+        if isinstance(cfg_bp, list):
+            blueprint_list = cfg_bp
+        elif isinstance(cfg_bp, dict):
+            blueprint_list = cfg_bp.get("slots") or cfg_bp.get("blueprint") or []
 
     return {
         "id": str(exam.id),
@@ -643,7 +651,64 @@ async def delete_exam(
     return {"message": "Exam deleted successfully"}
 
 
+@router.post(
+    "/{exam_id}/backfill-blueprint",
+    summary="Synthesize and save blueprint from existing questions",
+    description="For exams that were generated before blueprint persistence was implemented, "
+                 "this endpoint synthesizes a blueprint (one slot per question) from the "
+                 "existing question data and saves it to the DB. Safe to call multiple times.",
+    responses={
+        200: {"description": "Blueprint synthesized and saved"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Exam not found"},
+    },
+    tags=["Exams"],
+)
+async def backfill_blueprint(
+    exam_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis_client),
+    current_user: User = Depends(get_current_user),
+):
+    """Synthesize blueprint from questions and save to DB (backfill for older exams)."""
+    service = ExamService(db, redis)
+    exam = await service.get_exam(exam_id, current_user.id)
+    if not exam:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+
+    questions = list(exam.questions or [])
+    if not questions:
+        return {"message": "No questions to synthesize blueprint from", "slots": 0}
+
+    # Check if blueprint already exists as a valid list
+    existing = exam.blueprint
+    if isinstance(existing, list) and len(existing) > 0:
+        return {"message": "Blueprint already exists", "slots": len(existing)}
+
+    # Synthesize one slot per question
+    blueprint_slots = [
+        {
+            "question_id": q.get("id") or q.get("question_id", f"Q_{i + 1}"),
+            "type": q.get("type") or q.get("question_type", "mcq"),
+            "bloom_level": q.get("bloom_level", "thong_hieu"),
+            "chapter": q.get("chapter", ""),
+            "topic_hint": q.get("topic_hint", (q.get("content") or q.get("stem") or "")[:60]),
+            "estimated_difficulty": float(q.get("estimated_difficulty") or q.get("difficulty_score") or 0.5),
+        }
+        for i, q in enumerate(questions)
+        if isinstance(q, dict)
+    ]
+
+    try:
+        await service.update_blueprint(exam_id=exam_id, blueprint=blueprint_slots)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return {"message": f"Blueprint synthesized and saved ({len(blueprint_slots)} slots)", "slots": len(blueprint_slots)}
+
+
 # ── Existing endpoints (kept for compatibility) ─────────────────────────────────
+
 
 @router.patch(
     "/{exam_id}/questions/{question_id}",
