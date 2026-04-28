@@ -20,8 +20,13 @@ BUILDER_PROMPT_VERSION = "v2.1"
 # doubled) with double-backslash.  This is done via a state-machine that tracks
 # whether the current character is inside a JSON string.
 
-# Valid single-char JSON escape sequences that must NOT be touched:
-_VALID_JSON_ESCAPES = set('"\\/ bfnrtu')
+# Unambiguously safe single-char JSON escape sequences (never LaTeX):
+# NOTE: b/f/n/r/t are intentionally EXCLUDED — \b/\f/\n/\r/\t followed by an
+# alphabetic char almost certainly means a LaTeX command (\beta, \frac,
+# \nabla, \rho, \theta …), not a JSON control-character escape.
+_SAFE_JSON_ESCAPES = frozenset('"\\/ u')
+# The ambiguous single-char JSON escapes that overlap with LaTeX prefixes:
+_AMBIGUOUS_JSON_ESCAPES = frozenset('bfnrt')
 
 
 def _sanitize_latex_escapes(json_str: str) -> str:
@@ -32,8 +37,10 @@ def _sanitize_latex_escapes(json_str: str) -> str:
     NOT followed by a valid JSON escape character is doubled so that
     json.loads can parse it correctly.
 
-    This handles all LaTeX commands (\\vec, \\frac, \\,  \\! etc.) without
-    needing an exhaustive whitelist.
+    Special handling for ambiguous escapes (\\b, \\f, \\n, \\r, \\t):
+    - If the character AFTER the escape letter is alphabetic (e.g. \\frac,
+      \\beta, \\nabla, \\rho, \\theta), treat as LaTeX → double the backslash.
+    - Otherwise treat as a real JSON control-character escape → keep as-is.
     """
     result: list[str] = []
     in_string = False
@@ -45,19 +52,34 @@ def _sanitize_latex_escapes(json_str: str) -> str:
 
         if in_string:
             if ch == '\\':
-                # Look at the next character
                 next_ch = json_str[i + 1] if i + 1 < n else ''
-                if next_ch in _VALID_JSON_ESCAPES:
-                    # Already a valid escape — emit as-is and skip both chars
+
+                if next_ch in _SAFE_JSON_ESCAPES:
+                    # Unambiguously safe escape (\" \\\\ \/ \uXXXX) — keep as-is
                     result.append(ch)
                     result.append(next_ch)
                     i += 2
+
+                elif next_ch in _AMBIGUOUS_JSON_ESCAPES:
+                    # Could be JSON ctrl-char OR LaTeX prefix.
+                    # Peek at the character after the escape letter.
+                    after_next = json_str[i + 2] if i + 2 < n else ''
+                    if after_next.isalpha():
+                        # e.g. \frac, \beta, \nabla → LaTeX, double the backslash
+                        result.append('\\\\')
+                        i += 1  # leave next_ch to be re-processed
+                    else:
+                        # e.g. \n followed by space/digit/{ → real JSON escape
+                        result.append(ch)
+                        result.append(next_ch)
+                        i += 2
+
                 else:
-                    # Bare backslash (e.g. \, \v \t in LaTeX context) — double it
-                    result.append('\\\\')  # becomes \\\\ in source = \\ in output
-                    i += 1  # do NOT skip next_ch — it will be processed normally
+                    # Bare LaTeX backslash (\alpha, \vec, \, \! …) — double it
+                    result.append('\\\\')
+                    i += 1  # do NOT skip next_ch
+
             elif ch == '"':
-                # Closing quote — exit string mode
                 in_string = False
                 result.append(ch)
                 i += 1
@@ -160,6 +182,15 @@ Nhiệm vụ:
 5. Công thức: output dạng text + LaTeX song song
 6. Không trùng lặp chủ đề với câu đã sinh
 7. Chỉ dùng kiến thức trong phạm vi cho phép
+
+## QUY TẮC LATEX BẮT BUỘC:
+- Mọi ký hiệu toán học / công thức PHẢI được bao bằng dấu dollar:
+  - Inline (trong câu): $...$ — ví dụ: "Tính $\\frac{kx}{m}$ khi..."
+  - Display (chiếm dòng riêng): $$...$$ — ví dụ: "$$a = \\frac{kx}{m} - g(\\sin\\alpha + \\mu_k \\cos\\alpha)$$"
+- KHÔNG viết công thức LaTeX ra ngoài dấu dollar dưới bất kỳ hình thức nào
+- Ví dụ ĐÚNG: "stem": "Vật có khối lượng $m$ trượt trên mặt phẳng nghiêng góc $\\alpha$..."
+- Ví dụ SAI: "stem": "Vật có khối lượng m trượt trên mặt phẳng nghiêng góc α..."
+- Trong JSON, backslash LaTeX phải được viết kép: \\frac, \\sin, \\alpha, \\mu_k
 
 ## QUY TẮC JSON NGHIÊM NGẶT (BẮT BUỘC):
 - CHỈ trả về JSON thuần túy — KHÔNG thêm bất kỳ văn bản, giải thích, hay suy nghĩ nào trước/sau JSON

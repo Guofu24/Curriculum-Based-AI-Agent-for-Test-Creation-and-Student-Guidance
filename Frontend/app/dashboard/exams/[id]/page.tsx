@@ -77,6 +77,7 @@ import {
 import { StatusBadge, BloomBadge, QuestionTypeBadge, ChangeTypeBadge } from '@/components/status-badge'
 import { formatDateTime, formatPercent, formatCurrency } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { LatexRenderer } from '@/components/latex-renderer'
 
 interface PageParams {
   id: string
@@ -1094,7 +1095,12 @@ function QuestionCard({
               </FieldGroup>
             ) : (
               <>
-                <p className="text-sm whitespace-pre-wrap">{typeof question.content === 'string' ? question.content : JSON.stringify(question.content)}</p>
+                {/* Question content — may contain LaTeX */}
+                <div className="text-sm">
+                  <LatexRenderer>
+                    {typeof question.content === 'string' ? question.content : JSON.stringify(question.content)}
+                  </LatexRenderer>
+                </div>
 
                 {getQType(question) === 'mcq' && question.options && (
                   <div className="grid gap-2 sm:grid-cols-2">
@@ -1112,7 +1118,10 @@ function QuestionCard({
                             : "bg-muted"
                         )}
                       >
-                        <span className="font-medium">{key}.</span> {typeof value === 'string' ? value : JSON.stringify(value)}
+                        <span className="font-medium">{key}.</span>{' '}
+                        <LatexRenderer>
+                          {typeof value === 'string' ? value : JSON.stringify(value)}
+                        </LatexRenderer>
                       </div>
                     ))}
                   </div>
@@ -1121,14 +1130,20 @@ function QuestionCard({
                 {getQType(question) === 'essay' && question.rubric && (
                   <div className="p-3 rounded-md bg-muted text-sm">
                     <p className="font-medium mb-1">Rubric:</p>
-                    <p className="whitespace-pre-wrap text-muted-foreground">{typeof question.rubric === 'string' ? question.rubric : JSON.stringify(question.rubric)}</p>
+                    <div className="text-muted-foreground">
+                      <LatexRenderer>
+                        {typeof question.rubric === 'string' ? question.rubric : JSON.stringify(question.rubric)}
+                      </LatexRenderer>
+                    </div>
                   </div>
                 )}
 
                 {question.explanation && (
                   <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-800 dark:bg-blue-950/30">
                     <p className="text-xs font-medium uppercase tracking-wide text-blue-600 dark:text-blue-400">Giải thích</p>
-                    <p className="mt-1 text-sm text-foreground">{question.explanation}</p>
+                    <div className="mt-1 text-sm text-foreground">
+                      <LatexRenderer>{question.explanation}</LatexRenderer>
+                    </div>
                   </div>
                 )}
 
