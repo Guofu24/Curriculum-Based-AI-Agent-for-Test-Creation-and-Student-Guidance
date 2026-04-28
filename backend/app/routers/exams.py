@@ -137,13 +137,29 @@ def _exam_to_detail(exam, versions=None, feedback_events=None) -> dict:
         else:
             normalized_questions.append(q)
 
-    # Extract quality metrics from question data
-    q_list = [q for q in normalized_questions if isinstance(q, dict)]
+    # Enrich questions with quality metrics on-the-fly (covers exams saved before enrichment was added)
+    from app.services.exam_service import ExamService
+    q_list = []
+    enriched_normalized = []
+    for q in normalized_questions:
+        if isinstance(q, dict):
+            q = ExamService._enrich_question_metrics(q)
+            q_list.append(q)
+        enriched_normalized.append(q)
+    normalized_questions = enriched_normalized
+
+    # Aggregate quality metrics from enriched questions
     verifier_passed = sum(1 for q in q_list if q.get("is_validated"))
-    evidence_covered = sum(1 for q in q_list if q.get("source_evidence"))
+    evidence_covered = sum(
+        1 for q in q_list
+        if q.get("source_evidence") or q.get("source_citations")
+    )
     total_q = len(q_list)
     verifier_pass_rate = round(verifier_passed / total_q, 4) if total_q > 0 else None
     evidence_coverage_rate = round(evidence_covered / total_q, 4) if total_q > 0 else None
+    # quality_score: average of per-question scores
+    q_scores = [float(q["quality_score"]) for q in q_list if q.get("quality_score") is not None]
+    avg_quality_score = round(sum(q_scores) / len(q_scores), 4) if q_scores else None
     all_warnings = [w for q in q_list for w in q.get("warnings", [])]
     warning_count = len(all_warnings)
 
@@ -180,7 +196,7 @@ def _exam_to_detail(exam, versions=None, feedback_events=None) -> dict:
         "instructions": exam.instructions,
         "output_language": exam.output_language or "vi",
         "strict_scope_flag": exam.strict_scope_flag if exam.strict_scope_flag is not None else True,
-        "quality_score": float(exam.quality_score) if exam.quality_score else None,
+        "quality_score": avg_quality_score if avg_quality_score is not None else (float(exam.quality_score) if exam.quality_score else None),
         "verifier_pass_rate": verifier_pass_rate,
         "evidence_coverage_rate": evidence_coverage_rate,
         "warning_count": warning_count,
@@ -705,6 +721,35 @@ async def backfill_blueprint(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     return {"message": f"Blueprint synthesized and saved ({len(blueprint_slots)} slots)", "slots": len(blueprint_slots)}
+
+
+@router.post(
+    "/{exam_id}/backfill-quality",
+    summary="Recompute quality metrics for existing exam questions",
+    description="For exams generated before quality-metric enrichment was implemented, "
+                 "this recomputes quality_score, is_validated, and source_evidence "
+                 "from question data and saves them to the DB. Safe to call multiple times.",
+    responses={
+        200: {"description": "Quality metrics recomputed and saved"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Exam not found"},
+    },
+    tags=["Exams"],
+)
+async def backfill_quality(
+    exam_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis_client),
+    current_user: User = Depends(get_current_user),
+):
+    """Recompute and save quality metrics for all questions in an exam."""
+    service = ExamService(db, redis)
+    exam = await service.get_exam(exam_id, current_user.id)
+    if not exam:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+
+    updated = await service.recompute_quality_metrics(exam_id)
+    return {"message": f"Quality metrics recomputed for {updated} questions", "questions_updated": updated}
 
 
 # ── Existing endpoints (kept for compatibility) ─────────────────────────────────

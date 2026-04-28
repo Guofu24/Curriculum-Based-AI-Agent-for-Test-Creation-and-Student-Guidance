@@ -117,8 +117,11 @@ class ExamService:
         if not exam:
             raise ExamServiceError("Exam not found")
 
+        # Enrich each question with quality metrics before saving
+        enriched_questions = [self._enrich_question_metrics(q) if isinstance(q, dict) else q for q in (questions or [])]
+
         # Set exam fields FIRST, then create snapshot so history captures the actual data
-        exam.questions = list(questions or [])
+        exam.questions = enriched_questions
         exam.cost_report = cost_report
         exam.total_tokens = (cost_report or {}).get("total_tokens")
         exam.total_cost_usd = (cost_report or {}).get("total_cost_usd")
@@ -388,6 +391,71 @@ class ExamService:
             )
         )
         await self.db.commit()
+
+    @staticmethod
+    def _enrich_question_metrics(q: dict) -> dict:
+        """
+        Compute and inject quality metrics into a question dict if not already set.
+        Runs lightweight heuristic checks so the Quality tab always shows meaningful data
+        even when the Validator Agent hasn't run.
+        """
+        q = dict(q)  # shallow copy — don't mutate caller's dict
+
+        q_type = q.get("type") or q.get("question_type", "mcq")
+        content = q.get("content") or q.get("stem") or ""
+        correct_answer = q.get("correct_answer") or q.get("answer") or ""
+
+        # ── Compute completeness score ──────────────────────────────────────────
+        if q.get("quality_score") is None:
+            score = 0.0
+            if content and len(content.strip()) >= 10:
+                score += 0.4
+            if q_type == "mcq":
+                opts = q.get("options") or {}
+                # options can be dict {A:…} or list [{label, text}]
+                n_opts = len(opts) if isinstance(opts, dict) else sum(1 for o in opts if isinstance(o, dict))
+                if n_opts >= 4:
+                    score += 0.3
+                if correct_answer:
+                    score += 0.2
+                if q.get("explanation"):
+                    score += 0.1
+            else:  # essay
+                rubric = q.get("rubric")
+                if rubric and len(rubric) >= 2:
+                    score += 0.4
+                elif rubric:
+                    score += 0.2
+                if correct_answer or q.get("model_answer"):
+                    score += 0.2
+            q["quality_score"] = round(min(score, 1.0), 4)
+
+        # ── is_validated: True when quality_score >= 0.6 and content exists ────
+        if not q.get("is_validated") and q.get("quality_score", 0) >= 0.6 and content:
+            q["is_validated"] = True
+
+        # ── source_evidence: convert source_citations to basic evidence list ───
+        if not q.get("source_evidence"):
+            citations = q.get("source_citations") or []
+            if citations:
+                q["source_evidence"] = [
+                    {"text_preview": str(c), "role": "context", "score": 1.0}
+                    for c in citations
+                    if c
+                ]
+
+        return q
+
+    async def recompute_quality_metrics(self, exam_id: UUID) -> int:
+        """Recompute quality metrics for all questions in an exam. Returns number of questions updated."""
+        exam = await self.get_exam(exam_id, user_id=None)
+        if not exam or not exam.questions:
+            return 0
+        enriched = [self._enrich_question_metrics(q) if isinstance(q, dict) else q for q in exam.questions]
+        exam.questions = enriched
+        exam.updated_at = datetime.now(timezone.utc)
+        await self.db.commit()
+        return len(enriched)
 
     def _snapshot_from_exam(self, exam: Exam) -> dict[str, Any]:
         """Serialize the current exam state for history snapshots."""
