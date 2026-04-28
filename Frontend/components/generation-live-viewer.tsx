@@ -354,6 +354,10 @@ export function GenerationLiveViewer({
           activeCheckpointRef.current = e.checkpoint_id
           setLastSeenCheckpoint(e.checkpoint_id)
           lastSeenCheckpointRef.current = e.checkpoint_id
+          // Reset approval state for every new checkpoint — otherwise cp2 would
+          // inherit hitlApproved=true from the user having approved cp1.
+          setHitlApproved(false)
+          hitlApprovedRef.current = false
 
           if (e.checkpoint_id === 0) {
             setRequirementsData(e.data as RequirementsData)
@@ -362,7 +366,6 @@ export function GenerationLiveViewer({
             const slots = (e.data as { blueprint?: BlueprintSlot[] }).blueprint || []
             console.log("[WS DEBUG hitl_checkpoint] setting blueprintSlots:", slots.length, slots)
             setBlueprintSlots(slots)
-            setHitlApproved(false)
             const dist: BloomDistribution = {}
             for (const slot of slots) {
               const lvl = slot.bloom_level as BloomLevel | undefined
@@ -494,8 +497,15 @@ export function GenerationLiveViewer({
     setHitlApproving(true)
     try {
       await onApprove(examId, true, undefined, cp)
-      setHitlApproved(true)
-      hitlApprovedRef.current = true
+      // Only mark as approved if we're still on the same checkpoint.
+      // approveBlueprint is a blocking call that returns AFTER the graph has run
+      // to the next interrupt — by then the WebSocket may have already delivered
+      // hitl_checkpoint N+1 and reset hitlApproved=false. Setting it back to true
+      // here would override that reset and hide the approval button for the next CP.
+      if (activeCheckpointRef.current === cp) {
+        setHitlApproved(true)
+        hitlApprovedRef.current = true
+      }
     } finally {
       setHitlApproving(false)
     }

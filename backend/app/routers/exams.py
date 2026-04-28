@@ -1394,4 +1394,24 @@ async def submit_exam_review(
         feedback=request.feedback,
         direct_edits=request.direct_edits,
     )
+
+    # orchestrator.submit_review may return {'status': 'failed', 'error': '...'}
+    # instead of a valid ExamReviewResponse dict — convert to proper HTTP error.
+    if isinstance(result, dict) and result.get("status") == "failed":
+        error_msg = result.get("error", "Review submission failed")
+        if "session not found" in error_msg.lower() or "not found" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Exam session expired or not found. Please start a new generation. ({error_msg})",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error_msg,
+        )
+
+    # Ensure result always has required fields for ExamReviewResponse
+    if isinstance(result, dict) and "message" not in result:
+        result["message"] = "Review submitted successfully."
+
     return result
+

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, use } from 'react'
+import { useEffect, useRef, useState, use } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { DashboardHeader } from '@/components/dashboard-header'
@@ -91,6 +91,10 @@ interface McqEditForm {
   [key: string]: unknown
 }
 
+// Normalize question type — backend may store as 'type' or 'question_type'
+const getQType = (q: { type?: string; question_type?: string }) =>
+  q.type || q.question_type || 'mcq'
+
 const BLOOM_LABELS: Record<BloomLevel, string> = {
   nhan_biet: 'Nhận biết',
   thong_hieu: 'Thông hiểu',
@@ -125,6 +129,9 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
   const [blueprintAction, setBlueprintAction] = useState<'approve' | 'reject' | null>(null)
   const [blueprintFeedback, setBlueprintFeedback] = useState('')
   const [isBlueprintActing, setIsBlueprintActing] = useState(false)
+  // HITL pending state — set true when WebSocket receives hitl_checkpoint cp1
+  const [hitlPending, setHitlPending] = useState(false)
+  const wsRef = useRef<WebSocket | null>(null)
 
   useEffect(() => {
     async function fetchData() {
@@ -159,6 +166,79 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
     }
 
     fetchData()
+  }, [id])
+
+  // ── WebSocket: lắng nghe hitl_checkpoint events khi pipeline đang chạy ──
+  useEffect(() => {
+    // Xây WebSocket URL từ exam id
+    const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const backendHost = typeof window !== 'undefined' && window.location.port === '3000'
+      ? `${window.location.hostname}:8000`
+      : (typeof window !== 'undefined' ? window.location.host : 'localhost:8000')
+    const wsUrl = `${proto}://${backendHost}/ws/exam/${id}`
+
+    let ws: WebSocket | null = null
+    let closed = false
+
+    function connect() {
+      if (closed) return
+      ws = new WebSocket(wsUrl)
+      wsRef.current = ws
+
+      ws.onmessage = (evt) => {
+        if (closed) return
+        try {
+          const msg = JSON.parse(typeof evt.data === 'string' ? evt.data : JSON.stringify(evt.data))
+          console.log('[ExamDetail WS]', msg.type, msg)
+
+          if (msg.type === 'hitl_checkpoint' && msg.checkpoint_id === 1) {
+            // Blueprint sườn đề đã sẵn sàng — hiện lên để approve
+            const slots: BlueprintSlot[] = (msg.data?.blueprint ?? [])
+            if (slots.length > 0) {
+              setBlueprint(slots)
+            }
+            setHitlPending(true)
+            setActiveTab('blueprint') // Auto-switch sang tab blueprint
+            toast.info('📋 Sườn đề đã sẵn sàng để duyệt!', { duration: 5000 })
+          }
+
+          if (msg.type === 'pipeline_paused' && msg.checkpoint_id === 1) {
+            setHitlPending(true)
+            setActiveTab('blueprint')
+            if (msg.blueprint && (msg.blueprint as BlueprintSlot[]).length > 0) {
+              setBlueprint(msg.blueprint as BlueprintSlot[])
+            }
+          }
+
+          if (msg.type === 'completed') {
+            // Pipeline hoàn thành — reload exam data
+            setHitlPending(false)
+            examsApi.get(id).then(updated => setExam(updated)).catch(() => {})
+          }
+
+          if (msg.type === 'blueprint_approved_received') {
+            setHitlPending(false)
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
+
+      ws.onerror = () => { /* ignore */ }
+      ws.onclose = () => {
+        wsRef.current = null
+        // Reconnect after 3s nếu chưa unmount
+        if (!closed) setTimeout(connect, 3000)
+      }
+    }
+
+    connect()
+
+    return () => {
+      closed = true
+      ws?.close()
+      wsRef.current = null
+    }
   }, [id])
 
   const handleExportPdf = async () => {
@@ -301,7 +381,8 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
     try {
       if (blueprintAction === 'approve') {
         await examsApi.approveBlueprint(id)
-        toast.success('Đã duyệt sườn đề. Pipeline đang tiếp tục...')
+        setHitlPending(false) // Dismiss banner — pipeline đã tiếp tục
+        toast.success('Đã duyệt sườn đề. Pipeline đang tiếp tục sinh câu hỏi...')
       } else {
         if (!blueprintFeedback.trim()) {
           toast.error('Vui lòng nhập phản hồi khi từ chối')
@@ -309,12 +390,16 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
           return
         }
         await examsApi.rejectBlueprint(id, blueprintFeedback)
+        setHitlPending(false) // Dismiss — đang đợi blueprint mới qua WebSocket
         toast.success('Đã gửi phản hồi. Sườn đề mới đang được tạo...')
       }
       setShowBlueprintActionDialog(false)
-      const reviewData = await examsApi.getReviewData(id)
-      const raw2 = reviewData.blueprint
-      setBlueprint(Array.isArray(raw2) ? raw2 : [])
+      // Reload blueprint from API after action (blueprint mới sẽ tới qua WebSocket cũng được)
+      try {
+        const reviewData = await examsApi.getReviewData(id)
+        const raw2 = reviewData.blueprint
+        if (Array.isArray(raw2) && raw2.length > 0) setBlueprint(raw2)
+      } catch { /* WebSocket sẽ update sau */ }
     } catch (error) {
       toast.error(blueprintAction === 'approve' ? 'Không thể duyệt sườn đề' : 'Không thể gửi phản hồi')
     } finally {
@@ -364,11 +449,11 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
   }
 
   const filteredQuestions = exam.questions?.filter(q => 
-    questionFilter === 'all' || q.type === questionFilter
+    questionFilter === 'all' || getQType(q) === questionFilter
   ) || []
 
-  const mcqCount = exam.questions?.filter(q => q.type === 'mcq').length || 0
-  const essayCount = exam.questions?.filter(q => q.type === 'essay').length || 0
+  const mcqCount = exam.questions?.filter(q => getQType(q) === 'mcq').length || 0
+  const essayCount = exam.questions?.filter(q => getQType(q) === 'essay').length || 0
 
   return (
     <>
@@ -572,6 +657,19 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
 
             {/* Blueprint Tab */}
             <TabsContent value="blueprint">
+              {/* HITL Pending Banner */}
+              {hitlPending && (
+                <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4 flex items-start gap-3">
+                  <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <p className="font-semibold text-amber-900">⏳ Pipeline đang chờ phê duyệt sườn đề</p>
+                    <p className="text-sm text-amber-700 mt-1">
+                      Xem xét sườn đề bên dưới rồi nhấn <strong>Duyệt sườn đề</strong> để tiếp tục sinh câu hỏi,
+                      hoặc nhấn <strong>Từ chối</strong> để yêu cầu AI điều chỉnh lại.
+                    </p>
+                  </div>
+                </div>
+              )}
               <Card>
                 <CardHeader>
                   <CardTitle>Sườn đề (Blueprint)</CardTitle>
@@ -582,7 +680,9 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
                 <CardContent>
                   {blueprint.length === 0 ? (
                     <div className="text-center py-8 text-muted-foreground">
-                      Sườn đề không có sẵn cho đề này.
+                      {hitlPending
+                        ? 'Đang tải sườn đề từ pipeline...'
+                        : 'Sườn đề không có sẵn cho đề này.'}
                     </div>
                   ) : (
                     <Table>
@@ -996,25 +1096,29 @@ function QuestionCard({
               <>
                 <p className="text-sm whitespace-pre-wrap">{typeof question.content === 'string' ? question.content : JSON.stringify(question.content)}</p>
 
-                {question.type === 'mcq' && question.options && (
+                {getQType(question) === 'mcq' && question.options && (
                   <div className="grid gap-2 sm:grid-cols-2">
-                    {Object.entries(question.options).map(([key, value]) => (
+                    {/* Handle both array [{label,text}] and dict {A:text} option formats */}
+                    {(Array.isArray(question.options)
+                      ? question.options.map((opt: { label: string; text: string }) => [opt.label, opt.text] as [string, string])
+                      : Object.entries(question.options as Record<string, string>)
+                    ).map(([key, value]) => (
                       <div
-                      key={key}
-                      className={cn(
-                        "p-2 rounded-md text-sm",
-                        key === question.correct_answer
-                          ? "bg-primary/10 text-primary border border-primary/20"
-                          : "bg-muted"
-                      )}
-                    >
-                      <span className="font-medium">{key}.</span> {typeof value === 'string' ? value : JSON.stringify(value)}
-                    </div>
-                  ))}
+                        key={key}
+                        className={cn(
+                          "p-2 rounded-md text-sm",
+                          key === question.correct_answer
+                            ? "bg-primary/10 text-primary border border-primary/20"
+                            : "bg-muted"
+                        )}
+                      >
+                        <span className="font-medium">{key}.</span> {typeof value === 'string' ? value : JSON.stringify(value)}
+                      </div>
+                    ))}
                   </div>
                 )}
 
-                {question.type === 'essay' && question.rubric && (
+                {getQType(question) === 'essay' && question.rubric && (
                   <div className="p-3 rounded-md bg-muted text-sm">
                     <p className="font-medium mb-1">Rubric:</p>
                     <p className="whitespace-pre-wrap text-muted-foreground">{typeof question.rubric === 'string' ? question.rubric : JSON.stringify(question.rubric)}</p>

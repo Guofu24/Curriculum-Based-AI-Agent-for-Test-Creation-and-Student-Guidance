@@ -510,15 +510,11 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             direct_edits: Optional direct question edits
         """
         session = await self.short_term.load_session(exam_id, user_id)
-        if not session:
-            return {
-                "status": "failed",
-                "error": "Session not found. Please start a new generation.",
-            }
 
         if approved:
             # G14: Persist teacher preferences to long-term memory after approval
-            if self.long_term:
+            # (non-blocking — missing session doesn't block approval)
+            if session and self.long_term:
                 try:
                     exam_config = session.get("exam_config_original", {})
                     await self.long_term.save_preferences(
@@ -528,38 +524,105 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                         subject_focus=",".join(exam_config.get("scope", [])),
                     )
                 except Exception:
-                    pass  # Non-blocking — preferences save failure shouldn't block approval
+                    pass
 
             # Snapshot exam_history with change_type='published'
-            history_key = f"exam_history:{exam_id}"
-            try:
-                import json as _json
-                history_entry = {
-                    "change_type": "published",
-                    "timestamp": time.time(),
-                    "user_id": user_id,
-                    "exam_config": session.get("exam_config_original", {}),
+            if session:
+                history_key = f"exam_history:{exam_id}"
+                try:
+                    import json as _json
+                    history_entry = {
+                        "change_type": "published",
+                        "timestamp": time.time(),
+                        "user_id": user_id,
+                        "exam_config": session.get("exam_config_original", {}),
+                        "topics_used": session.get("topics_used", []),
+                        "questions_count": len(session.get("questions", [])) if session.get("questions") else 0,
+                    }
+                    existing_hist = await self.redis.get(history_key)
+                    hist_list = _json.loads(existing_hist) if existing_hist else []
+                    hist_list.append(history_entry)
+                    await self.redis.set(history_key, _json.dumps(hist_list), ttl=86400)
+                except Exception:
+                    pass
+
+                await self.short_term.save_session(exam_id, user_id, {
+                    "exam_config_original": session.get("exam_config_original", {}),
                     "topics_used": session.get("topics_used", []),
-                    "questions_count": len(session.get("questions", [])) if session.get("questions") else 0,
-                }
-                existing_hist = await self.redis.get(history_key)
-                hist_list = _json.loads(existing_hist) if existing_hist else []
-                hist_list.append(history_entry)
-                await self.redis.set(history_key, _json.dumps(hist_list), ttl=86400)
-            except Exception:
-                pass
+                    "conversation_history": session.get("conversation_history", []),
+                    "retry_count": session.get("retry_count", 0),
+                    "review_approved": True,
+                    "review_feedback": feedback,
+                })
 
-            await self.short_term.save_session(exam_id, user_id, {
-                "exam_config_original": session.get("exam_config_original", {}),
-                "topics_used": session.get("topics_used", []),
-                "conversation_history": session.get("conversation_history", []),
-                "retry_count": session.get("retry_count", 0),
-                "review_approved": True,
-                "review_feedback": feedback,
-            })
-
-            # HITL Checkpoint 2: Set Redis key so orchestrator's poll loop unblocks
+            # HITL Checkpoint 2: Set Redis key so wait_for_review can read it on resume
             await self.redis.set(f"hitl:approved:{exam_id}:2", "true", ttl=3600)
+
+            # Resume the interrupted LangGraph graph — same pattern as approve_blueprint.
+            # The graph is paused at wait_for_review via interrupt(); it needs explicit resume.
+            resume_result: dict = {}
+            try:
+                from langgraph.types import Command
+                from app.agents.graph.builder import build_exam_graph
+                graph = build_exam_graph()
+                config = {"configurable": {"thread_id": exam_id, "recursion_limit": 500}}
+                logger.info(f"Resuming graph for exam {exam_id} at CP2 with approved=True")
+                resume_result = await graph.ainvoke(
+                    Command(resume={"approved": True, "feedback": feedback}),
+                    config=config,
+                ) or {}
+            except Exception as e:
+                if "interrupt" in str(e).lower() or "nothing to resume" in str(e).lower():
+                    logger.info(f"No interrupt to resume for CP2 exam {exam_id}: {e}")
+                else:
+                    logger.warning(f"Could not resume CP2 graph for exam {exam_id}: {e}")
+
+            # Persist questions to DB after graph completes.
+            # The Celery task's update_questions is only called on the initial run path,
+            # NOT on the resume path. We must save here so GET /exams/{id} returns questions.
+            try:
+                questions_to_save = (
+                    resume_result.get("questions")
+                    or resume_result.get("approved_questions")
+                    or []
+                )
+                cost_report_to_save = resume_result.get("cost_report") or {}
+
+                # Fallback: if graph resume didn't return questions (e.g. checkpointer state
+                # expired), try to get them from the Redis session which was saved during streaming.
+                if not questions_to_save and session:
+                    questions_to_save = session.get("questions") or []
+                    logger.info(
+                        f"Graph resume had no questions for exam {exam_id} — "
+                        f"falling back to Redis session ({len(questions_to_save)} questions)"
+                    )
+
+                if questions_to_save and self.db_session:
+                    from app.services.exam_service import ExamService
+                    import uuid as _uuid
+                    exam_service = ExamService(self.db_session, self.redis)
+                    await exam_service.update_questions(
+                        exam_id=_uuid.UUID(exam_id),
+                        questions=questions_to_save,
+                        cost_report=cost_report_to_save,
+                    )
+                    logger.info(
+                        f"Persisted {len(questions_to_save)} questions to DB for exam {exam_id} after CP2 approval"
+                    )
+                elif not questions_to_save:
+                    logger.warning(
+                        f"No questions to persist for exam {exam_id} after CP2 approval — "
+                        "exam detail page may show empty questions."
+                    )
+                elif not self.db_session:
+                    logger.warning(
+                        f"No db_session available in submit_review for exam {exam_id} — "
+                        "questions may not be persisted. Relying on Celery task path."
+                    )
+            except Exception as persist_err:
+                logger.error(
+                    f"Failed to persist questions after CP2 approval for exam {exam_id}: {persist_err}"
+                )
 
             return {
                 "status": "approved",
@@ -568,6 +631,12 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             }
         else:
             # G8 (checkpoint 2 reject): Queue Celery task for regeneration
+            if not session:
+                return {
+                    "status": "failed",
+                    "error": "Session not found. Please start a new generation.",
+                }
+
             original_config = session.get("exam_config_original", {})
             if feedback:
                 original_config["review_feedback"] = feedback
@@ -601,6 +670,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "message": "Đề đang được sinh lại theo phản hồi của bạn.",
                 "checkpoint": 2,
             }
+
 
     async def edit_via_prompt(
         self,
