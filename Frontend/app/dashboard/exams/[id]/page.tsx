@@ -751,16 +751,18 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
                     </Table>
                   )}
                 </CardContent>
-                <CardFooter className="flex gap-3 border-t pt-4">
-                  <Button onClick={handleApproveBlueprint} disabled={isBlueprintActing}>
-                    <CheckCircle2 className="mr-2 h-4 w-4" />
-                    Duyệt sườn đề
-                  </Button>
-                  <Button variant="outline" onClick={handleRejectBlueprint} disabled={isBlueprintActing}>
-                    <XCircle className="mr-2 h-4 w-4" />
-                    Từ chối
-                  </Button>
-                </CardFooter>
+                {hitlPending && (
+                  <CardFooter className="flex gap-3 border-t pt-4">
+                    <Button onClick={handleApproveBlueprint} disabled={isBlueprintActing}>
+                      <CheckCircle2 className="mr-2 h-4 w-4" />
+                      Duyệt sườn đề
+                    </Button>
+                    <Button variant="outline" onClick={handleRejectBlueprint} disabled={isBlueprintActing}>
+                      <XCircle className="mr-2 h-4 w-4" />
+                      Từ chối
+                    </Button>
+                  </CardFooter>
+                )}
               </Card>
             </TabsContent>
 
