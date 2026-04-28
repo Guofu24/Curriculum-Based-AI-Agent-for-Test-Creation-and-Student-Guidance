@@ -169,6 +169,14 @@ interface CostReport {
   validator?: Record<string, unknown>
 }
 
+// ─── Stream feed item types ───────────────────────────────────────────────────
+type FeedItem =
+  | { id: string; kind: 'reasoning'; stepLabel: string; message: string; icon: string }
+  | { id: string; kind: 'blueprint'; slots: BlueprintSlot[]; bloomDist: BloomDistribution }
+  | { id: string; kind: 'question'; question: QuestionGeneratedEvent['question']; index: number }
+  | { id: string; kind: 'validation'; issues: ValidationIssue[] }
+  | { id: string; kind: 'hitl_waiting'; checkpointId: number }
+
 interface PlanStep {
   step: number
   message: string
@@ -256,13 +264,14 @@ export function GenerationLiveViewer({
   const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
   const [costReport, setCostReport] = useState<CostReport | null>(null)
 
-  // Debug: log state changes
+  // Unified stream feed — accumulates all events in order
+  const [feedItems, setFeedItems] = useState<FeedItem[]>([])
+  const feedEndRef = useRef<HTMLDivElement | null>(null)
+
+  // Auto-scroll feed to bottom on new items
   useEffect(() => {
-    console.log("[DEBUG STATE] blueprintSlots:", blueprintSlots.length, blueprintSlots)
-  })
-  useEffect(() => {
-    console.log("[DEBUG STATE] activeCheckpoint:", activeCheckpoint)
-  })
+    feedEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [feedItems])
 
   // Connection
   const wsRef = useRef<WebSocket | null>(null)
@@ -327,6 +336,14 @@ export function GenerationLiveViewer({
             })
           )
           if (!reasoningOpen) setReasoningOpen(true)
+          // Add reasoning item to feed
+          const stepConfig = PIPELINE_STEPS.find((x) => x.id === e.step)
+          setFeedItems((prev) => {
+            const exists = prev.findIndex((f) => f.kind === 'reasoning' && (f as {id:string;kind:'reasoning';stepLabel:string;message:string;icon:string}).stepLabel === (stepConfig?.label ?? String(e.step)))
+            const item: FeedItem = { id: `step-${e.step}`, kind: 'reasoning', stepLabel: stepConfig?.label ?? `Bước ${e.step}`, message: e.message ?? '', icon: e.step.toString() }
+            if (exists >= 0) { const next = [...prev]; next[exists] = item; return next }
+            return [...prev, item]
+          })
           break
         }
 
@@ -339,10 +356,14 @@ export function GenerationLiveViewer({
           }
           setQuestions((prev) => {
             const qId = q.question_id
-            if (qId && prev.some((existing) => existing.question_id === qId)) {
-              return prev
-            }
-            return [...prev, q]
+            if (qId && prev.some((existing) => existing.question_id === qId)) return prev
+            const next = [...prev, q]
+            // Also add to feed
+            setFeedItems((f) => {
+              if (qId && f.some((fi) => fi.kind === 'question' && (fi as {id:string;kind:'question';question:QuestionGeneratedEvent['question'];index:number}).question.question_id === qId)) return f
+              return [...f, { id: `q-${qId || next.length}`, kind: 'question' as const, question: q, index: next.length - 1 }]
+            })
+            return next
           })
           break
         }
@@ -373,6 +394,13 @@ export function GenerationLiveViewer({
               else if (lvl) dist[lvl] = 1
             }
             setBloomDist(dist)
+            // Add blueprint to feed
+            if (slots.length > 0) {
+              setFeedItems((prev) => {
+                if (prev.some((f) => f.kind === 'blueprint')) return prev
+                return [...prev, { id: 'blueprint', kind: 'blueprint' as const, slots, bloomDist: dist }]
+              })
+            }
           }
           if (e.checkpoint_id === 2) {
             const d = e.data as HitlCheckpointEvent["data"]
@@ -392,6 +420,14 @@ export function GenerationLiveViewer({
         case "validation_result": {
           const e = msg as ValidationResultEvent
           setValidationIssues(e.issues || [])
+          if (e.issues && e.issues.length > 0) {
+            setFeedItems((prev) => {
+              const exists = prev.findIndex((f) => f.kind === 'validation')
+              const item: FeedItem = { id: 'validation', kind: 'validation', issues: e.issues }
+              if (exists >= 0) { const next = [...prev]; next[exists] = item; return next }
+              return [...prev, item]
+            })
+          }
           break
         }
 
@@ -420,7 +456,6 @@ export function GenerationLiveViewer({
           setHitlApproved(false)
           hitlApprovedRef.current = false
           if (e.checkpoint_id === 1) {
-            // Only set blueprint from pipeline_paused if hitl_checkpoint hasn't already set it
             if (e.blueprint && e.blueprint.length > 0) {
               setBlueprintSlots(e.blueprint)
               blueprintSlotsRef.current = e.blueprint
@@ -432,6 +467,11 @@ export function GenerationLiveViewer({
               }
               setBloomDist(dist)
               bloomDistRef.current = dist
+              // Add blueprint to feed
+              setFeedItems((prev) => {
+                if (prev.some((f) => f.kind === 'blueprint')) return prev
+                return [...prev, { id: 'blueprint', kind: 'blueprint' as const, slots: e.blueprint!, bloomDist: dist }]
+              })
             }
           }
           if (e.checkpoint_id === 2) {
@@ -1104,220 +1144,158 @@ export function GenerationLiveViewer({
           )}
         </div>
 
-        {/* ── Main content ── */}
+        {/* ── Main content: unified stream feed ── */}
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-3xl mx-auto p-6 space-y-4">
+          <div className="max-w-3xl mx-auto p-6 space-y-0">
 
-            {/* ── Reasoning stream panel ── */}
-            <div className="rounded-2xl border bg-card shadow-sm overflow-hidden">
-              <button
-                onClick={() => setReasoningOpen((v) => !v)}
-                className="w-full flex items-center justify-between px-5 py-4 hover:bg-muted/30 transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className={cn(
-                      "flex h-8 w-8 items-center justify-center rounded-lg transition-all",
-                      isGenerating ? "bg-primary text-primary-foreground animate-pulse"
-                        : completed ? "bg-emerald-100 text-emerald-700"
-                        : "bg-muted text-muted-foreground"
-                    )}
-                  >
-                    {isGenerating ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : completed ? (
-                      <Check className="h-4 w-4" />
-                    ) : (
-                      <Brain className="h-4 w-4" />
-                    )}
-                  </div>
-                  <div className="text-left">
-                    <p className="text-sm font-semibold text-foreground">
-                      {isGenerating ? currentStep?.message || "Đang xử lý..."
-                        : completed ? "Đã hoàn thành"
-                        : "Suy nghĩ của Agent"}
-                    </p>
-                    {currentStep && (
-                      <p className="text-xs text-muted-foreground">
-                        {currentStep.message || "Đang xử lý..."}
-                      </p>
-                    )}
-                  </div>
+            {/* Empty state while waiting for first event */}
+            {feedItems.length === 0 && !completed && (
+              <div className="flex flex-col items-center justify-center h-64 gap-3 text-muted-foreground">
+                <div className="relative flex h-12 w-12 items-center justify-center">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/20" />
+                  <Brain className="h-6 w-6 text-primary relative z-10" />
                 </div>
-                <ChevronDown
-                  className={cn(
-                    "h-4 w-4 text-muted-foreground transition-transform duration-200",
-                    reasoningOpen && "rotate-180"
-                  )}
-                />
-              </button>
+                <p className="text-sm">Đang kết nối đến pipeline AI...</p>
+              </div>
+            )}
 
-              {reasoningOpen && (
-                <div className="border-t">
-                  <div className="px-5 py-4 space-y-3">
-                    {steps.map((s) => {
-                      const stepConfig = PIPELINE_STEPS.find((x) => x.id === s.step)
-                      const isCompleted = s.completed
-                      const isActive = s.active
-                      const StepIcon = stepConfig?.icon || Loader
-
-                      return (
-                        <div key={s.step} className="flex items-start gap-3">
-                          <div
-                            className={cn(
-                              "flex h-6 w-6 items-center justify-center rounded-full border-2 text-xs font-bold shrink-0 mt-0.5 transition-all duration-300",
-                              isCompleted && "border-primary bg-primary text-primary-foreground",
-                              isActive && "border-primary bg-primary/10 text-primary",
-                              !isCompleted && !isActive && "border-muted-foreground/30 bg-muted text-muted-foreground"
-                            )}
-                          >
-                            {isCompleted ? (
-                              <Check className="h-3 w-3" />
-                            ) : isActive ? (
-                              <Loader2 className="h-3 w-3 animate-spin" />
-                            ) : (
-                              s.step
-                            )}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <StepIcon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                              <span
-                                className={cn(
-                                  "text-sm font-medium",
-                                  isCompleted && "text-foreground",
-                                  isActive && "text-primary",
-                                  !isCompleted && !isActive && "text-muted-foreground"
-                                )}
-                              >
-                                {stepConfig?.label || `Bước ${s.step}`}
-                              </span>
-                              {isActive && (
-                                <span className="inline-flex h-1.5 w-1.5 rounded-full bg-primary animate-ping" />
-                              )}
-                            </div>
-
-                            {isActive && s.message && (
-                              <div className="mt-1">
-                                <span className="text-xs text-muted-foreground">
-                                  <TypingText text={s.message} />
-                                </span>
-                              </div>
-                            )}
-
-                            {isCompleted && s.message && (
-                              <p className="text-xs text-muted-foreground/70 mt-0.5">{s.message}</p>
-                            )}
-                          </div>
-                        </div>
-                      )
-                    })}
-
-                    {/* Validation issues during retry */}
-                    {validationIssues.length > 0 && (
-                      <div className="mt-3 p-3 rounded-lg border border-orange-200 bg-orange-50/50 space-y-1.5">
-                        <div className="flex items-center gap-2 mb-1">
-                          <AlertCircle className="h-3.5 w-3.5 text-orange-600 shrink-0" />
-                          <p className="text-xs font-semibold text-orange-800">
-                            {validationIssues.length} câu hỏi cần sửa — đang cập nhật...
-                          </p>
-                        </div>
-                        {validationIssues.map((issue, idx) => (
-                          <div key={idx} className="flex items-start gap-2 text-[10px]">
-                            <Badge variant="outline" className="shrink-0 text-[9px] px-1 py-0 border-orange-200 text-orange-700">
-                              {issue.question_id}
-                            </Badge>
-                            <div className="flex-1 min-w-0">
-                              <span className="text-orange-700 font-medium">
-                                {issue.issue_type === "wrong_answer" ? "Sai đáp án" :
-                                  issue.issue_type === "bloom_mismatch" ? "Bloom không khớp" :
-                                  issue.issue_type === "scope_violation" ? "Vi phạm phạm vi" :
-                                  issue.issue_type === "duplicate" ? "Trùng lặp" : issue.issue_type}
-                              </span>
-                              {issue.detail && (
-                                <p className="text-orange-600/80 mt-0.5">{issue.detail}</p>
-                              )}
-                              {issue.suggestion && (
-                                <p className="text-emerald-700 mt-0.5">
-                                  → {issue.suggestion}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-                        ))}
+            {/* Feed items */}
+            {feedItems.map((item, idx) => {
+              if (item.kind === 'reasoning') {
+                const isLast = idx === feedItems.length - 1
+                return (
+                  <div key={item.id} className="flex gap-3 py-3 group animate-in fade-in slide-in-from-bottom-2 duration-300">
+                    <div className="flex flex-col items-center">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-muted border text-xs font-bold text-muted-foreground shrink-0">
+                        <Brain className="h-3.5 w-3.5" />
                       </div>
-                    )}
-
-                    {/* Progress bar */}
-                    <div className="pt-2">
-                      <div className="h-1 w-full rounded-full bg-muted overflow-hidden">
-                        <div
-                          className={cn(
-                            "h-full rounded-full bg-primary transition-all duration-500 ease-out",
-                            isGenerating && "animate-pulse"
-                          )}
-                          style={{ width: `${progressPct}%` }}
-                        />
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-1 text-right tabular-nums">
-                        {completedCount}/{PIPELINE_STEPS.length} bước hoàn tất
+                      {idx < feedItems.length - 1 && (
+                        <div className="w-px flex-1 bg-border mt-1" style={{ minHeight: 16 }} />
+                      )}
+                    </div>
+                    <div className="flex-1 pb-1 pt-0.5 min-w-0">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-0.5">{item.stepLabel}</p>
+                      <p className={`text-sm text-foreground leading-relaxed ${isLast && isGenerating ? '' : 'text-muted-foreground'}`}>
+                        {isLast && isGenerating ? <TypingText text={item.message} /> : item.message}
+                        {isLast && isGenerating && (
+                          <span className="inline-block w-0.5 h-4 bg-primary ml-0.5 animate-pulse align-text-bottom" />
+                        )}
                       </p>
                     </div>
                   </div>
-                </div>
-              )}
-            </div>
+                )
+              }
 
-            {/* ── Blueprint preview (shown when blueprint is available) ── */}
-            {blueprintSlots.length > 0 && !completed && (
-              <BlueprintPreviewCard
-                slots={blueprintSlots}
-                bloomDist={bloomDist}
-              />
+              if (item.kind === 'blueprint') {
+                return (
+                  <div key={item.id} className="py-3 animate-in fade-in slide-in-from-bottom-3 duration-500">
+                    <div className="flex items-center gap-2 mb-2 pl-1">
+                      <div className="h-px flex-1 bg-border" />
+                      <span className="text-xs text-muted-foreground font-medium px-2">Sườn đề (Blueprint)</span>
+                      <div className="h-px flex-1 bg-border" />
+                    </div>
+                    <div className="rounded-xl border bg-card shadow-sm overflow-hidden">
+                      <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Database className="h-4 w-4 text-primary" />
+                          <span className="text-sm font-semibold">{item.slots.length} slots đã lên kế hoạch</span>
+                        </div>
+                        <div className="flex gap-1.5">
+                          {(Object.keys(item.bloomDist) as BloomLevel[]).map((b) => (
+                            <span key={b} className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${BLOOM_CONFIG[b]?.bg} ${BLOOM_CONFIG[b]?.color}`}>
+                              {BLOOM_CONFIG[b]?.short} {item.bloomDist[b]}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="divide-y max-h-64 overflow-y-auto">
+                        {item.slots.map((slot, i) => {
+                          const bl = slot.bloom_level as BloomLevel | undefined
+                          const bc = bl && BLOOM_CONFIG[bl] ? BLOOM_CONFIG[bl] : null
+                          return (
+                            <div key={slot.question_id || i} className="flex items-center gap-3 px-4 py-2 text-sm hover:bg-muted/20 transition-colors">
+                              <span className="w-6 text-xs text-muted-foreground/60 text-right shrink-0">{i + 1}</span>
+                              <Badge variant={(slot.type || 'mcq') === 'mcq' ? 'secondary' : 'outline'} className="text-[10px] px-1.5 shrink-0">
+                                {(slot.type || 'mcq').toUpperCase()}
+                              </Badge>
+                              {bc && <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium shrink-0 ${bc.bg} ${bc.color}`}>{bc.short}</span>}
+                              <span className="text-muted-foreground truncate">{slot.chapter || ''}</span>
+                              <span className="text-xs text-muted-foreground/60 ml-auto shrink-0 truncate max-w-[140px]">{slot.topic_hint || ''}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )
+              }
+
+              if (item.kind === 'question') {
+                return (
+                  <div key={item.id} className="py-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                    <QuestionCard question={item.question} index={item.index} />
+                  </div>
+                )
+              }
+
+              if (item.kind === 'validation') {
+                return (
+                  <div key={item.id} className="py-3 animate-in fade-in duration-300">
+                    <div className="rounded-xl border border-orange-200 bg-orange-50/50 p-3 space-y-1.5">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="h-3.5 w-3.5 text-orange-600 shrink-0" />
+                        <p className="text-xs font-semibold text-orange-800">{item.issues.length} vấn đề phát hiện — đang tự động sửa...</p>
+                      </div>
+                      {item.issues.slice(0, 3).map((issue, i) => (
+                        <p key={i} className="text-[10px] text-orange-700 pl-5">• {issue.question_id}: {issue.issue_type || issue.detail}</p>
+                      ))}
+                    </div>
+                  </div>
+                )
+              }
+
+              return null
+            })}
+
+            {/* Blinking cursor at the end while generating */}
+            {isGenerating && feedItems.length > 0 && feedItems[feedItems.length - 1]?.kind !== 'question' && (
+              <div className="flex gap-3 py-2">
+                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 border border-primary/30 shrink-0">
+                  <Loader2 className="h-3.5 w-3.5 text-primary animate-spin" />
+                </div>
+                <div className="flex items-center gap-1.5 pt-1.5">
+                  <span className="h-2 w-2 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="h-2 w-2 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="h-2 w-2 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
+              </div>
             )}
 
-            {/* ── Question stream ── */}
-            <div className="space-y-3">
-              <div className="flex items-center gap-2">
-                <Sparkles className="h-4 w-4 text-primary" />
-                <h2 className="text-sm font-semibold text-foreground">
-                  Câu hỏi đang sinh
-                </h2>
-                {questions.length > 0 && (
-                  <Badge variant="secondary" className="text-xs tabular-nums">
-                    {questions.length} câu
-                  </Badge>
-                )}
-                {examType === "mcq" && (
-                  <Badge variant="outline" className="text-xs">Chỉ MCQ</Badge>
-                )}
-                {examType === "essay" && (
-                  <Badge variant="outline" className="text-xs">Chỉ Essay</Badge>
-                )}
-              </div>
-
-              <div className="space-y-3">
-                {questions.map((q, idx) => (
-                  <QuestionCard key={q.question_id || idx} question={q} index={idx} />
-                ))}
-
-                {isGenerating && (
-                  <QuestionCardSkeleton isLoading={questions.length === 0} />
-                )}
-              </div>
-
-              {!isGenerating && questions.length === 0 && !completed && (
-                <div className="rounded-xl border border-dashed border-muted p-8 text-center">
-                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground mx-auto mb-2" />
-                  <p className="text-sm text-muted-foreground">
-                    Đang chờ câu hỏi đầu tiên...
-                  </p>
+            {/* Completion banner */}
+            {completed && (
+              <div className="py-4 animate-in fade-in zoom-in-95 duration-500">
+                <div className="rounded-xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-teal-50 p-5 text-center space-y-3">
+                  <div className="flex justify-center">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                      <PartyPopper className="h-6 w-6" />
+                    </div>
+                  </div>
+                  <div>
+                    <p className="font-semibold text-emerald-900">Đề thi đã hoàn tất!</p>
+                    <p className="text-sm text-emerald-700 mt-0.5">{questions.length} câu hỏi · {questions.filter(q => (q.type || 'mcq') === 'mcq').length} MCQ · {questions.filter(q => q.type === 'essay').length} Essay</p>
+                  </div>
+                  <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={handleViewExam}>
+                    Xem đề đầy đủ <ChevronRight className="h-4 w-4 ml-1" />
+                  </Button>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
+
+            <div ref={feedEndRef} />
           </div>
         </div>
-      </div>
+
+      </div>{/* ── end flex flex-1 overflow-hidden ── */}
 
       {/* ── Reject Feedback Dialog ── */}
       <Dialog open={rejectDialogOpen} onOpenChange={setRejectDialogOpen}>
