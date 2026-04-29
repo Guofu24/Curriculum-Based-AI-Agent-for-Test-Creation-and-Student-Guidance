@@ -42,6 +42,14 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
             warnings.append("Injecting blueprint rejection feedback for regeneration")
 
     print(f"[create_outline] exam_id={exam_id}, retrieved_context_chunks={len(retrieved_context)}, calling OutlineAgent...", flush=True)
+
+    # Stream reasoning to frontend
+    _emit(state, {
+        "type": "reasoning_chunk",
+        "step_id": "step-2",
+        "chunk": f"Phân tích {len(retrieved_context)} đoạn văn bản từ tài liệu...\n",
+    })
+
     outline_result = await outline_agent.create_outline(
         retrieved_context=retrieved_context,
         exam_config=exam_config,
@@ -63,6 +71,12 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
         "blueprint_slots": len(blueprint),
         "mcq_count": sum(1 for s in blueprint if s.get("type") != "essay"),
         "essay_count": sum(1 for s in blueprint if s.get("type") == "essay"),
+    })
+    # Stream blueprint summary to reasoning feed
+    _emit(state, {
+        "type": "reasoning_chunk",
+        "step_id": "step-2",
+        "chunk": f"Hoàn tất! Tạo {len(blueprint)} câu ({sum(1 for s in blueprint if s.get('type') != 'essay')} MCQ + {sum(1 for s in blueprint if s.get('type') == 'essay')} Essay).\n",
     })
 
     return {

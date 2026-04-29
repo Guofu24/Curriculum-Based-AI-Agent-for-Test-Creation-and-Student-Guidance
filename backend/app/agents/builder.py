@@ -461,6 +461,11 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
         # Build topic-keyed context map for per-question filtering
         topic_context_map = self._build_topic_context_map(retrieved_context)
+        # Also build a normalized-key map for fuzzy lookup
+        norm_context_map = {
+            self._normalize_chapter_key(k): v
+            for k, v in topic_context_map.items()
+        }
 
         async def _generate_one_with_semaphore(
             slot: dict,
@@ -472,11 +477,33 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 slot_chapter = slot.get("chapter", "Unknown")
                 slot_section = slot.get("section", "") or ""
                 topic_key = f"{slot_chapter} > {slot_section}" if slot_section else slot_chapter
+                # Try exact match first, then normalized match
                 topic_chunks = topic_context_map.get(topic_key, [])
+                if not topic_chunks:
+                    norm_key = self._normalize_chapter_key(slot_chapter)
+                    topic_chunks = norm_context_map.get(norm_key, [])
+                # Last resort: pick any chunks whose normalized key contains the chapter number
+                if not topic_chunks:
+                    import re
+                    num_match = re.search(r'\d+', slot_chapter)
+                    if num_match:
+                        chapter_num = num_match.group()
+                        for k, v in norm_context_map.items():
+                            if chapter_num in re.findall(r'\d+', k):
+                                topic_chunks = v
+                                break
                 question_context_str = (
                     self._build_context_for_llm(topic_chunks)
                     if topic_chunks
                     else context[:8000]
+                )
+                logger.debug(
+                    "Slot %d chapter=%r → %d chunks (path: %s)",
+                    slot_number,
+                    slot_chapter,
+                    len(topic_chunks),
+                    "exact" if topic_context_map.get(topic_key) else
+                    "normalized" if topic_chunks else "FALLBACK_ALL"
                 )
 
                 question, q_warnings = await self._generate_single_slot(
@@ -900,10 +927,25 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         """
         topic_map: dict[str, list[dict]] = {}
         for chunk in retrieved_context:
-            chapter = chunk.get("chapter", "Unknown")
-            section = chunk.get("section", "")
+            chapter = chunk.get("chapter", "") or chunk.get("metadata", {}).get("chapter", "Unknown")
+            section = chunk.get("section", "") or chunk.get("metadata", {}).get("section", "")
             key = f"{chapter} > {section}" if section else chapter
             if key not in topic_map:
                 topic_map[key] = []
             topic_map[key].append(chunk)
         return topic_map
+
+    @staticmethod
+    def _normalize_chapter_key(key: str) -> str:
+        """Normalize a chapter key for fuzzy matching.
+
+        Strips Vietnamese diacritics, lowercases, removes spaces and punctuation
+        so 'Chuong 1', 'Chương 1', 'chuong_1', 'Chapter 1' all map to the same key.
+        """
+        import unicodedata
+        import re
+        # NFD decompose → strip combining chars (diacritics)
+        nfd = unicodedata.normalize("NFD", key)
+        stripped = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+        # lowercase, keep only alphanumeric
+        return re.sub(r'[^a-z0-9]+', '', stripped.lower())

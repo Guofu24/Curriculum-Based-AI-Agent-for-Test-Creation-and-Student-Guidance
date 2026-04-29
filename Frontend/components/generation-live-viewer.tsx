@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { LatexRenderer } from "@/components/latex-renderer"
 import {
   Brain,
   Check,
@@ -107,6 +108,13 @@ interface PipelinePausedEvent {
   distribution_summary?: BloomDistribution
 }
 
+interface ReasoningChunkEvent {
+  type: "reasoning_chunk"
+  /** ID links the chunk to its reasoning step (e.g. "step-2") */
+  step_id: string
+  chunk: string
+}
+
 type WsMessage =
   | PlanStepEvent
   | QuestionGeneratedEvent
@@ -114,6 +122,7 @@ type WsMessage =
   | ValidationResultEvent
   | CompletedEvent
   | PipelinePausedEvent
+  | ReasoningChunkEvent
   | { type: string; [key: string]: unknown }
 
 // ─── Supporting types ──────────────────────────────────────────────────────────
@@ -171,7 +180,7 @@ interface CostReport {
 
 // ─── Stream feed item types ───────────────────────────────────────────────────
 type FeedItem =
-  | { id: string; kind: 'reasoning'; stepLabel: string; message: string; icon: string }
+  | { id: string; kind: 'reasoning'; stepLabel: string; message: string; chunks: string[] }
   | { id: string; kind: 'blueprint'; slots: BlueprintSlot[]; bloomDist: BloomDistribution }
   | { id: string; kind: 'question'; question: QuestionGeneratedEvent['question']; index: number }
   | { id: string; kind: 'validation'; issues: ValidationIssue[] }
@@ -339,9 +348,21 @@ export function GenerationLiveViewer({
           // Add reasoning item to feed
           const stepConfig = PIPELINE_STEPS.find((x) => x.id === e.step)
           setFeedItems((prev) => {
-            const exists = prev.findIndex((f) => f.kind === 'reasoning' && (f as {id:string;kind:'reasoning';stepLabel:string;message:string;icon:string}).stepLabel === (stepConfig?.label ?? String(e.step)))
-            const item: FeedItem = { id: `step-${e.step}`, kind: 'reasoning', stepLabel: stepConfig?.label ?? `Bước ${e.step}`, message: e.message ?? '', icon: e.step.toString() }
-            if (exists >= 0) { const next = [...prev]; next[exists] = item; return next }
+            const itemId = `step-${e.step}`
+            const exists = prev.findIndex((f) => f.id === itemId)
+            const item: FeedItem = {
+              id: itemId,
+              kind: 'reasoning',
+              stepLabel: stepConfig?.label ?? `Bước ${e.step}`,
+              message: e.message ?? '',
+              chunks: [],   // chunks will be appended via reasoning_chunk events
+            }
+            if (exists >= 0) {
+              const next = [...prev]
+              // preserve existing chunks when step message updates
+              next[exists] = { ...item, chunks: (prev[exists] as Extract<FeedItem, {kind:'reasoning'}>).chunks }
+              return next
+            }
             return [...prev, item]
           })
           break
@@ -481,6 +502,24 @@ export function GenerationLiveViewer({
           setSteps((prev) =>
             prev.map((s) => ({ ...s, active: false }))
           )
+          break
+        }
+
+        case "reasoning_chunk": {
+          // Append streamed token to the last (or matching) reasoning feed item
+          const e = msg as ReasoningChunkEvent
+          if (!e.chunk) break
+          setFeedItems((prev) => {
+            // find the target reasoning item
+            const idx = e.step_id
+              ? prev.findIndex((f) => f.id === e.step_id)
+              : prev.map((f, i) => f.kind === 'reasoning' ? i : -1).filter(i => i >= 0).slice(-1)[0] ?? -1
+            if (idx < 0) return prev
+            const target = prev[idx] as Extract<FeedItem, { kind: 'reasoning' }>
+            const next = [...prev]
+            next[idx] = { ...target, chunks: [...target.chunks, e.chunk] }
+            return next
+          })
           break
         }
 
@@ -1163,24 +1202,36 @@ export function GenerationLiveViewer({
             {feedItems.map((item, idx) => {
               if (item.kind === 'reasoning') {
                 const isLast = idx === feedItems.length - 1
+                const hasChunks = item.chunks && item.chunks.length > 0
+                const chunksText = hasChunks ? item.chunks.join('') : ''
+                const isStreaming = isLast && isGenerating
                 return (
                   <div key={item.id} className="flex gap-3 py-3 group animate-in fade-in slide-in-from-bottom-2 duration-300">
                     <div className="flex flex-col items-center">
-                      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-muted border text-xs font-bold text-muted-foreground shrink-0">
-                        <Brain className="h-3.5 w-3.5" />
+                      <div className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs font-bold shrink-0 transition-colors ${isStreaming ? 'bg-primary/10 border-primary/40 text-primary' : 'bg-muted border-border text-muted-foreground'}`}>
+                        {isStreaming
+                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          : <Brain className="h-3.5 w-3.5" />}
                       </div>
                       {idx < feedItems.length - 1 && (
                         <div className="w-px flex-1 bg-border mt-1" style={{ minHeight: 16 }} />
                       )}
                     </div>
                     <div className="flex-1 pb-1 pt-0.5 min-w-0">
-                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-0.5">{item.stepLabel}</p>
-                      <p className={`text-sm text-foreground leading-relaxed ${isLast && isGenerating ? '' : 'text-muted-foreground'}`}>
-                        {isLast && isGenerating ? <TypingText text={item.message} /> : item.message}
-                        {isLast && isGenerating && (
-                          <span className="inline-block w-0.5 h-4 bg-primary ml-0.5 animate-pulse align-text-bottom" />
-                        )}
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">{item.stepLabel}</p>
+                      {/* Step message */}
+                      <p className={`text-sm leading-relaxed mb-1 ${isStreaming ? 'text-foreground' : 'text-muted-foreground'}`}>
+                        {isStreaming ? <TypingText text={item.message} /> : item.message}
                       </p>
+                      {/* Streaming chunks (detailed LLM reasoning) */}
+                      {(hasChunks || isStreaming) && (
+                        <div className="mt-2 rounded-lg bg-muted/40 border border-border/60 px-3 py-2 font-mono text-xs text-foreground/80 leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto">
+                          {chunksText}
+                          {isStreaming && (
+                            <span className="inline-block w-0.5 h-3.5 bg-primary ml-0.5 animate-pulse align-text-bottom" />
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )
@@ -1198,29 +1249,41 @@ export function GenerationLiveViewer({
                       <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <Database className="h-4 w-4 text-primary" />
-                          <span className="text-sm font-semibold">{item.slots.length} slots đã lên kế hoạch</span>
+                          <span className="text-sm font-semibold">{item.slots.length} câu hỏi đã lên kế hoạch</span>
                         </div>
-                        <div className="flex gap-1.5">
-                          {(Object.keys(item.bloomDist) as BloomLevel[]).map((b) => (
+                        <div className="flex gap-1.5 flex-wrap">
+                          {(BLOOM_ORDER.filter(b => item.bloomDist[b])).map((b) => (
                             <span key={b} className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${BLOOM_CONFIG[b]?.bg} ${BLOOM_CONFIG[b]?.color}`}>
                               {BLOOM_CONFIG[b]?.short} {item.bloomDist[b]}
                             </span>
                           ))}
                         </div>
                       </div>
-                      <div className="divide-y max-h-64 overflow-y-auto">
+                      <div className="divide-y max-h-80 overflow-y-auto">
                         {item.slots.map((slot, i) => {
                           const bl = slot.bloom_level as BloomLevel | undefined
                           const bc = bl && BLOOM_CONFIG[bl] ? BLOOM_CONFIG[bl] : null
+                          const topicHint = (slot.topic_hint as string) || ''
+                          const chapter = (slot.chapter as string) || ''
                           return (
-                            <div key={slot.question_id || i} className="flex items-center gap-3 px-4 py-2 text-sm hover:bg-muted/20 transition-colors">
-                              <span className="w-6 text-xs text-muted-foreground/60 text-right shrink-0">{i + 1}</span>
-                              <Badge variant={(slot.type || 'mcq') === 'mcq' ? 'secondary' : 'outline'} className="text-[10px] px-1.5 shrink-0">
-                                {(slot.type || 'mcq').toUpperCase()}
-                              </Badge>
-                              {bc && <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium shrink-0 ${bc.bg} ${bc.color}`}>{bc.short}</span>}
-                              <span className="text-muted-foreground truncate">{slot.chapter || ''}</span>
-                              <span className="text-xs text-muted-foreground/60 ml-auto shrink-0 truncate max-w-[140px]">{slot.topic_hint || ''}</span>
+                            <div key={slot.question_id || i} className="flex items-start gap-3 px-4 py-2.5 hover:bg-muted/20 transition-colors">
+                              <span className="w-5 text-xs text-muted-foreground/50 text-right shrink-0 pt-0.5">{i + 1}</span>
+                              <div className="flex items-center gap-1.5 shrink-0 pt-0.5">
+                                <Badge variant={(slot.type || 'mcq') === 'mcq' ? 'secondary' : 'outline'} className="text-[10px] px-1.5">
+                                  {(slot.type || 'mcq').toUpperCase()}
+                                </Badge>
+                                {bc && <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${bc.bg} ${bc.color}`}>{bc.short}</span>}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                {chapter && (
+                                  <p className="text-xs text-muted-foreground/70 mb-0.5">
+                                    <LatexRenderer className="text-xs">{chapter}</LatexRenderer>
+                                  </p>
+                                )}
+                                {topicHint && (
+                                  <LatexRenderer className="text-sm text-foreground">{topicHint}</LatexRenderer>
+                                )}
+                              </div>
                             </div>
                           )
                         })}
@@ -1256,6 +1319,7 @@ export function GenerationLiveViewer({
 
               return null
             })}
+
 
             {/* Blinking cursor at the end while generating */}
             {isGenerating && feedItems.length > 0 && feedItems[feedItems.length - 1]?.kind !== 'question' && (

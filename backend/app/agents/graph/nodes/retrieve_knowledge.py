@@ -39,6 +39,14 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
     retrieval_agent = RetrievalAgent(redis=redis_client)
     bloom_targets = list(exam_config.get("bloom_distribution", {}).keys())
 
+    # Stream reasoning start
+    scope_str = ', '.join(scope) if scope else 'toàn bộ'
+    _emit(state, {
+        "type": "reasoning_chunk",
+        "step_id": "step-1",
+        "chunk": f"Tìm kiếm kiến thức trong phạm vi: {scope_str}\nMục tiêu Bloom: {', '.join(bloom_targets) or 'all'}\n",
+    })
+
     retrieval_result = await retrieval_agent.retrieve(
         document_id=document_id,
         scope_chapters=scope,
@@ -63,11 +71,11 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
 
     cost_report["retrieval"] = retrieval_result.token_usage.model_dump()
 
-    # Emit event via WebSocket
+    # Stream reasoning result
     _emit(state, {
-        "type": "retrieval_completed",
-        "status": retrieval_result.status.value,
-        "chunks_count": len(retrieved_chunks),
+        "type": "reasoning_chunk",
+        "step_id": "step-1",
+        "chunk": f"Tìm thấy {len(retrieved_chunks)} đoạn văn bản liên quan.\n",
     })
 
     return {
