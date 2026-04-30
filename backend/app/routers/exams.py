@@ -84,14 +84,14 @@ def _exam_to_list_item(exam) -> dict:
         "total_questions": exam.total_questions or mcq_count + essay_count,
         "strict_scope_flag": exam.strict_scope_flag if exam.strict_scope_flag is not None else True,
         "quality_score": float(exam.quality_score) if exam.quality_score else None,
-        "current_version_number": None,  # TODO: join with ExamVersion
+        "current_version_number": len(exam.history) if exam.history else None,
         "version_count": exam.version_count or 1,
         "verifier_pass_rate": float(exam.verifier_pass_rate) if exam.verifier_pass_rate else None,
         "evidence_coverage_rate": float(exam.evidence_coverage_rate) if exam.evidence_coverage_rate else None,
         "warning_count": exam.warning_count or 0,
         "regenerate_count": exam.regenerate_count or 0,
         "human_edit_count": exam.human_edit_count or 0,
-        "feedback_event_count": 0,  # TODO: count from feedback_events
+        "feedback_event_count": len(exam.feedback_events) if exam.feedback_events is not None else 0,
         "created_at": exam.created_at.isoformat() if exam.created_at else None,
         "updated_at": exam.updated_at.isoformat() if exam.updated_at else None,
     }
@@ -1097,7 +1097,10 @@ async def approve_blueprint(
         from langgraph.types import Command
         from app.agents.graph.builder import build_exam_graph
         graph = build_exam_graph()
-        config = {"configurable": {"thread_id": str(exam_id), "recursion_limit": 500}}
+        config = {
+            "configurable": {"thread_id": str(exam_id)},
+            "recursion_limit": 500,
+        }
         logger.info(f"Resuming graph for exam {exam_id} with Command(resume={{approved: True}})")
         await graph.ainvoke(
             Command(resume={"approved": True}),
@@ -1169,7 +1172,10 @@ async def reject_blueprint(
         from langgraph.types import Command
         from app.agents.graph.builder import build_exam_graph
         graph = build_exam_graph()
-        config = {"configurable": {"thread_id": str(exam_id), "recursion_limit": 500}}
+        config = {
+            "configurable": {"thread_id": str(exam_id)},
+            "recursion_limit": 500,
+        }
         logger.info(f"Resuming graph for exam {exam_id} with Command(resume={{approved: False}})")
         await graph.ainvoke(
             Command(resume={"approved": False}),

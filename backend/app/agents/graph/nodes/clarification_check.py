@@ -12,9 +12,9 @@ async def clarification_check(state: ExamGraphState) -> ExamGraphState:
     """
     G1: Check if user requirements are clear.
 
-    Calls LLM to determine if clarification questions are needed.
-    If requirements are unclear, sets pipeline_status to CLARIFICATION_NEEDED,
-    which triggers a conditional edge to emit_clarification.
+    Quick check first: if essential config fields are present (document_id,
+    scope, and at least one question count), skip the expensive LLM call
+    and proceed directly. Only invoke the LLM when config is incomplete.
 
     Args:
         state: Must contain user_prompt, exam_config.
@@ -25,6 +25,29 @@ async def clarification_check(state: ExamGraphState) -> ExamGraphState:
     user_prompt = state.get("user_prompt") or ""
     exam_config = state.get("exam_config", {})
 
+    # ── Quick pass: skip LLM if config already has essential fields ──────────
+    has_document = bool(state.get("document_id") or exam_config.get("document_id"))
+    has_scope = bool(state.get("scope") or exam_config.get("scope"))
+    has_questions = (
+        int(exam_config.get("mcq_count", 0) or 0) > 0
+        or int(exam_config.get("essay_count", 0) or 0) > 0
+    )
+
+    if has_document and has_scope and has_questions:
+        logger.info(
+            "Clarification check: SKIP (config has document_id, scope, and question counts)"
+        )
+        return {
+            **state,
+            "pipeline_status": PipelineStatus.RUNNING,
+            "checkpoint_0_status": "approved",  # type: ignore
+            "checkpoint_0_requirements": {
+                "scope": state.get("scope", []),
+                "exam_config": exam_config,
+            },
+        }
+
+    # ── LLM clarification (only when config is incomplete) ──────────────────
     CLARIFY_PROMPT = """Bạn là giảng viên đang giao nhiệm vụ tạo đề kiểm tra.
 
 Nếu yêu cầu chưa rõ ràng, hãy đặt tối đa 3 câu hỏi làm rõ:
@@ -83,3 +106,4 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             "exam_config": state.get("exam_config", {}),
         },
     }
+

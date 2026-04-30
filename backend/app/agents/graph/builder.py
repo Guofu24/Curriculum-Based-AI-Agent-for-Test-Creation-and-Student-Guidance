@@ -158,7 +158,7 @@ def build_exam_graph(checkpointer=None):
     workflow.add_edge("handle_outline_failure", END)
     workflow.add_edge("handle_builder_failure", "emit_checkpoint_2")
     workflow.add_edge("handle_max_retries_exceeded", "emit_checkpoint_2")
-    workflow.add_edge("retry_builder", "validate_questions")  # self-loop edge
+    workflow.add_edge("retry_builder", "build_questions")  # self-loop: rebuild → then validate
     workflow.add_edge("emit_checkpoint_2", "wait_for_review")
     workflow.add_edge("save_teacher_preferences", "emit_checkpoint_3")
     workflow.add_edge("finalize_with_feedback", END)

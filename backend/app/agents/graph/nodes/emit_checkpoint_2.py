@@ -15,6 +15,9 @@ async def emit_checkpoint_2(state: ExamGraphState) -> ExamGraphState:
     Sends the questions, validation_passed, issues, and warnings to the frontend.
     This is the main review checkpoint before final export.
 
+    Also persists the session to ShortTermMemory (Redis) so that
+    orchestrator.submit_review() can load it later for rejection/regeneration.
+
     Args:
         state: Must contain questions, validation_result, warnings.
 
@@ -39,6 +42,36 @@ async def emit_checkpoint_2(state: ExamGraphState) -> ExamGraphState:
             "warnings": warnings,
         },
     })
+
+    # ── Persist session to Redis ShortTermMemory ────────────────────────────
+    # submit_review loads this session to handle rejections and regeneration.
+    user_id = state.get("user_id", "")
+    if exam_id and user_id:
+        try:
+            from app.core.redis_client import get_redis_client
+            from app.agents.memory.short_term import ShortTermMemory
+            redis_client = get_redis_client()
+            stm = ShortTermMemory(redis_client)
+            await stm.save_session(
+                exam_id, user_id,
+                exam_config=state.get("exam_config", {}),
+                exam_config_original=state.get("exam_config_original") or state.get("exam_config", {}),
+                document_id=state.get("document_id"),
+                scope=state.get("scope", []),
+                topics_used=state.get("topics_used", []),
+                retrieved_context=state.get("retrieved_context", []),
+            )
+            # Also save fields not in save_session signature via direct Redis merge
+            session_key = stm._session_key(exam_id, user_id)
+            existing = await stm.load_session(exam_id, user_id) or {}
+            existing["questions"] = questions
+            existing["cost_report"] = state.get("cost_report", {})
+            existing["blueprint"] = state.get("blueprint", [])
+            existing["retry_count"] = state.get("retry_count", 0)
+            await redis_client.set_json(session_key, existing, ttl=7200)
+            logger.info("Saved session to ShortTermMemory for exam %s at CP2", exam_id)
+        except Exception as e:
+            logger.warning("Failed to save session at CP2 for exam %s: %s", exam_id, e)
 
     return {
         **state,

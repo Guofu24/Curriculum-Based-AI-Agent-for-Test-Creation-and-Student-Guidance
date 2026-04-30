@@ -90,12 +90,11 @@ async def wait_for_blueprint_approval(state: ExamGraphState) -> ExamGraphState:
     HITL Checkpoint 1: pause for blueprint approval using LangGraph interrupt().
 
     Uses langgraph.types.interrupt() to pause execution. The graph returns
-    from ainvoke() with __interrupt__ in the result. The Celery task exits
-    cleanly. The HTTP /approve-blueprint endpoint resumes the graph via
-    Command(resume={...}).
+    from ainvoke() raising GraphInterrupt. The HTTP /approve-blueprint endpoint
+    resumes the graph via Command(resume={...}).
 
     Pre-check: if Redis key already contains approval, skip interrupt and
-    proceed immediately.
+    proceed immediately (supports resume after approval was already given).
 
     Args:
         state: Must contain exam_id, blueprint.
@@ -103,21 +102,9 @@ async def wait_for_blueprint_approval(state: ExamGraphState) -> ExamGraphState:
     Returns:
         Updated state with checkpoint_1_status set:
           - APPROVED: User approved the blueprint
-          - REJECTED: User rejected or timeout
+          - REJECTED: User rejected
     """
     exam_id = state.get("exam_id", "")
-
-    # Check timeout first
-    current_time = time.time()
-    timeout_at = state.get("checkpoint_1_timeout_at") or (current_time + HITL_CHECKPOINT_1_TIMEOUT)
-
-    if current_time >= timeout_at:
-        logger.warning(f"Checkpoint 1 timeout for exam {exam_id}")
-        return _process_approval_result(state, False, {
-            "feedback": "Timeout — blueprint approval expired after 30 minutes",
-            "timestamp": current_time,
-        })
-
     redis_key = f"hitl:approved:{exam_id}:1"
 
     # Quick check: if already approved/rejected via Redis (belt-and-suspenders)
@@ -149,6 +136,10 @@ async def wait_for_blueprint_approval(state: ExamGraphState) -> ExamGraphState:
 
     if approved is not None:
         # Already resolved — proceed without interrupt
+        logger.info(
+            "[wait_for_blueprint_approval] Redis has decision for exam %s: approved=%s",
+            exam_id, approved,
+        )
         return _process_approval_result(state, approved, rejection_data)
 
     # Emit pipeline_paused so frontend knows to show the approval UI
@@ -165,13 +156,32 @@ async def wait_for_blueprint_approval(state: ExamGraphState) -> ExamGraphState:
 
     logger.info(f"Interrupting graph for exam {exam_id} — waiting for blueprint approval")
 
-    # Domain 8: Use LangGraph interrupt() to actually pause the graph.
-    # This causes ainvoke() to return {"__interrupt__": [...]} instead of continuing.
-    # The Celery task exits cleanly. HTTP endpoint resumes via Command(resume={...}).
-    raise interrupt({
+    # Use LangGraph interrupt() to pause the graph.
+    # interrupt() raises GraphInterrupt internally — ainvoke() catches it
+    # and saves graph state to the checkpointer for later resume.
+    resume_value = interrupt({
         "type": "blueprint_approval",
         "exam_id": exam_id,
         "redis_key": redis_key,
         "message": "Waiting for teacher to approve or reject the blueprint",
-        "timeout_at": timeout_at,
     })
+
+    # This code runs ONLY after graph is resumed via Command(resume=...)
+    logger.info(
+        "[wait_for_blueprint_approval] Resumed for exam %s with value: %s",
+        exam_id, resume_value,
+    )
+
+    # Process the resume value
+    if isinstance(resume_value, dict):
+        is_approved = resume_value.get("approved", False)
+        if not is_approved:
+            rejection_data = {
+                "feedback": resume_value.get("feedback", ""),
+                "timestamp": resume_value.get("timestamp", time.time()),
+            }
+        return _process_approval_result(state, is_approved, rejection_data)
+
+    # Simple boolean resume
+    return _process_approval_result(state, bool(resume_value))
+

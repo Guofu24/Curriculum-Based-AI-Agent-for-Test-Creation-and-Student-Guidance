@@ -152,7 +152,7 @@ class DocumentService:
                 total_chapters=total_chapters,
                 total_pages_or_slides=total_pages_or_slides,
                 total_chunks=total_chunks,
-                processing_status="completed",
+                processing_status="processing",
             )
         )
         await self.db.commit()
@@ -190,6 +190,20 @@ class DocumentService:
                 _log.warning("delete_all_document_vectors returned False — used per-chapter delete for %s", doc_id_str)
         except Exception as e:
             _log.error("Pinecone delete failed for %s: %s — document DB record will still be deleted", doc_id_str, e)
+
+        # Delete Redis embedding cache for this document (embed:{doc_id}:* keys)
+        try:
+            if self.redis:
+                pattern = f"embed:{doc_id_str}:*"
+                deleted_count = 0
+                async for key in self.redis.client.scan_iter(pattern):
+                    await self.redis.client.delete(key)
+                    deleted_count += 1
+                # Also clear doc_status cache
+                await self.redis.client.delete(f"doc_status:{doc_id_str}")
+                _log.info("Deleted %d Redis cache keys for doc %s", deleted_count, doc_id_str)
+        except Exception as e:
+            _log.warning("Redis cache cleanup failed for %s: %s", doc_id_str, e)
 
         # Delete from DB
         await self.db.delete(document)
@@ -360,7 +374,23 @@ class DocumentService:
                 except Exception:
                     pass
 
-                enriched = await embed_chunks(chunks, doc_id_str, redis)
+                # Progress callback: map embed batch progress to 88-99% range
+                async def _embed_progress(completed: int, total: int) -> None:
+                    try:
+                        # Map [0, total] → [88, 99]
+                        pct = 88 + int((completed / max(total, 1)) * 11)
+                        pct = min(pct, 99)
+                        await mgr.broadcast(doc_id_str, {
+                            "type": "processing_step",
+                            "document_id": doc_id_str,
+                            "step": "embed",
+                            "message": f"Đang tạo vector embeddings ({completed}/{total})...",
+                            "percent": pct,
+                        })
+                    except Exception:
+                        pass
+
+                enriched = await embed_chunks(chunks, doc_id_str, redis, progress_callback=_embed_progress)
                 chapter_groups: dict[str, list[dict]] = {}
                 for chunk in enriched:
                     chapter_groups.setdefault(chunk.get("chapter_id", "unknown"), []).append(chunk)

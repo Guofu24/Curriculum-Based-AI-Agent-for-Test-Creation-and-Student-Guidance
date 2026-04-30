@@ -175,7 +175,10 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             from app.agents.graph.builder import build_exam_graph
             self.graph = build_exam_graph()
 
-        config = {"configurable": {"thread_id": exam_id, "recursion_limit": 500}}
+        config = {
+            "configurable": {"thread_id": exam_id},
+            "recursion_limit": 500,
+        }
         logger.info("Starting graph with recursion_limit=500 for exam_id=%s", exam_id)
 
         initial_state = {
@@ -208,13 +211,16 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         try:
             result = await self.graph.ainvoke(initial_state, config)
         except BaseException as e:
-            # Handle GraphInterrupt (raised by older LangGraph when interrupt() is called).
+            # Handle GraphInterrupt (raised when interrupt() is called).
             # The graph state is saved in the checkpointer; HTTP endpoint resumes it.
             try:
-                from langgraph.types import GraphInterrupt as _GI
-                is_interrupt = isinstance(e, _GI)
+                from langgraph.errors import GraphInterrupt as _GI
             except ImportError:
-                is_interrupt = False
+                try:
+                    from langgraph.types import GraphInterrupt as _GI
+                except ImportError:
+                    _GI = None
+            is_interrupt = _GI is not None and isinstance(e, _GI)
 
             if is_interrupt:
                 return {
@@ -546,14 +552,15 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 except Exception:
                     pass
 
-                await self.short_term.save_session(exam_id, user_id, {
-                    "exam_config_original": session.get("exam_config_original", {}),
-                    "topics_used": session.get("topics_used", []),
-                    "conversation_history": session.get("conversation_history", []),
-                    "retry_count": session.get("retry_count", 0),
-                    "review_approved": True,
-                    "review_feedback": feedback,
-                })
+                await self.short_term.save_session(
+                    exam_id, user_id,
+                    exam_config_original=session.get("exam_config_original", {}),
+                    topics_used=session.get("topics_used", []),
+                    conversation_history=session.get("conversation_history", []),
+                    retry_count=session.get("retry_count", 0),
+                    review_approved=True,
+                    review_feedback=feedback,
+                )
 
             # HITL Checkpoint 2: Set Redis key so wait_for_review can read it on resume
             await self.redis.set(f"hitl:approved:{exam_id}:2", "true", ttl=3600)
@@ -644,11 +651,10 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 original_config["direct_edits"] = direct_edits
 
             # Store the review feedback for the regeneration task
-            await self.short_term.save_session(exam_id, user_id, {
-                **session,
-                "review_feedback": feedback,
-                "direct_edits": direct_edits,
-            })
+            session["review_feedback"] = feedback
+            session["direct_edits"] = direct_edits
+            session_key = self.short_term._session_key(exam_id, user_id)
+            await self.redis.set_json(session_key, session, ttl=7200)
 
             # Dispatch Celery task — do NOT call generate_exam directly (would block HTTP)
             try:

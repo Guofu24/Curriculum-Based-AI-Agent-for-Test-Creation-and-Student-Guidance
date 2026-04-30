@@ -172,7 +172,7 @@ export interface Document {
   title?: string
   file_type: string
   file_size?: number
-  processing_status: 'pending' | 'processing' | 'completed' | 'failed' | 'indexed'
+  processing_status: 'pending' | 'processing' | 'completed' | 'failed' | 'indexed' | 'processed'
   status?: string
   course_id?: string
   version?: number
@@ -262,7 +262,9 @@ export const documentsApi = {
   },
   
   refreshUrl: async (id: string): Promise<{ url: string }> => {
-    return apiFetch<{ url: string }>(`/documents/${id}/refresh-url`)
+    // Backend returns { presigned_url } — map to { url } for consistency
+    const res = await apiFetch<{ presigned_url?: string; url?: string }>(`/documents/${id}/refresh-url`)
+    return { url: res.presigned_url ?? res.url ?? '' }
   },
 
   rescanStructure: async (id: string): Promise<void> => {
@@ -489,15 +491,18 @@ export const examsApi = {
   },
   
   rejectBlueprint: async (examId: string, feedback: string): Promise<void> => {
+    if (!feedback || feedback.trim().length < 5) {
+      throw new Error('Feedback phải có ít nhất 5 ký tự')
+    }
     await apiFetch(`/exams/${examId}/reject-blueprint`, {
       method: 'POST',
-      body: JSON.stringify({ feedback }),
+      body: JSON.stringify({ feedback: feedback.trim() }),
     })
   },
   
   submitReview: async (
     examId: string,
-    data: { approved: boolean; feedback?: string; direct_edits?: unknown[] }
+    data: { approved: boolean; feedback?: string; direct_edits?: Record<string, unknown>[] }
   ): Promise<void> => {
     await apiFetch(`/exams/${examId}/submit-review`, {
       method: 'POST',

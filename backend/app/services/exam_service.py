@@ -72,7 +72,10 @@ class ExamService:
 
     async def get_exam(self, exam_id: UUID, user_id: UUID | None) -> Exam | None:
         """Get an exam by id. When user_id is None, skip ownership filter."""
-        stmt = select(Exam).options(selectinload(Exam.history)).where(Exam.id == exam_id)
+        stmt = select(Exam).options(
+            selectinload(Exam.history),
+            selectinload(Exam.feedback_events),
+        ).where(Exam.id == exam_id)
         if user_id is not None:
             stmt = stmt.where(Exam.user_id == user_id)
         result = await self.db.execute(stmt)
@@ -98,7 +101,10 @@ class ExamService:
         total = count_result.scalar() or 0
 
         result = await self.db.execute(
-            stmt.options(selectinload(Exam.history))
+            stmt.options(
+                selectinload(Exam.history),
+                selectinload(Exam.feedback_events),
+            )
             .order_by(Exam.created_at.desc())
             .offset(offset)
             .limit(limit)

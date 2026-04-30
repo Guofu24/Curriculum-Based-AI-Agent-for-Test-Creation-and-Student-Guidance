@@ -88,7 +88,10 @@ class RetrievalAgent:
                 if types_set:
                     content_types = list(types_set)
 
-            # Step 2: Parallel retrieval per chapter — G10 + Domain 2B (5s timeout)
+            # NOTE: Models (bge-m3 + CrossEncoder) are pre-loaded at server startup
+            # via lifespan in main.py — no per-request warmup needed.
+
+            # Step 2: Parallel retrieval per chapter — G10 + Domain 2B (30s timeout)
             all_chunks, retrieval_warnings = await self._parallel_query_chapters(
                 document_id=document_id,
                 chapters=scope_chapters,
@@ -97,6 +100,89 @@ class RetrievalAgent:
                 content_types=content_types,
             )
             warnings.extend(retrieval_warnings)
+
+            # ── Global fallback ──
+            # If ALL scoped chapters returned 0 (e.g. heading tree over-fragmented),
+            # fall back to querying ALL namespaces for this document.
+            if not all_chunks and scope_chapters:
+                logger.warning(
+                    "All %d scoped chapters returned 0 results — falling back to global query",
+                    len(scope_chapters),
+                )
+                warnings.append(
+                    f"All {len(scope_chapters)} scoped chapters returned 0 results. "
+                    "Falling back to global document query."
+                )
+                # Get all chapter IDs from the document's heading tree
+                from app.core.database import async_session_maker
+                from app.models.document import Document
+                from sqlalchemy import select
+                from uuid import UUID as _UUID
+
+                all_chapter_ids: list[str] = []
+                try:
+                    async with async_session_maker() as session:
+                        result = await session.execute(
+                            select(Document).where(Document.id == _UUID(document_id))
+                        )
+                        doc = result.scalar_one_or_none()
+                        if doc and doc.heading_tree:
+                            all_chapter_ids = [
+                                ch["chapter_id"]
+                                for ch in doc.heading_tree.get("chapters", [])
+                                if ch.get("chapter_id")
+                            ]
+                except Exception as e:
+                    logger.warning("Failed to fetch all chapter IDs for global fallback: %s", e)
+
+                if all_chapter_ids:
+                    logger.info(
+                        "Global fallback: querying %d total chapters for doc %s",
+                        len(all_chapter_ids), document_id,
+                    )
+                    all_chunks, fb_warnings = await self._parallel_query_chapters(
+                        document_id=document_id,
+                        chapters=all_chapter_ids,
+                        expanded_queries=expanded_queries,
+                        top_k=settings.RAG_TOP_K_PER_CHAPTER,
+                        content_types=None,  # no content type filter for fallback
+                    )
+                    warnings.extend(fb_warnings)
+
+            # Step 3: Per-chapter rerank — ensures every chapter retains context.
+            # Global rerank would let dominant chapters crowd out others.
+            rerank_total = settings.RAG_TOP_K_AFTER_RERANK  # e.g. 30
+
+            # Group chunks by chapter
+            by_chapter: dict[str, list[dict]] = {}
+            for chunk in all_chunks:
+                ch = chunk.get("metadata", {}).get("chapter", "unknown")
+                by_chapter.setdefault(ch, []).append(chunk)
+
+            num_chapters = max(len(by_chapter), 1)
+            per_chapter_k = max(rerank_total // num_chapters, 5)  # at least 5 per chapter
+
+            logger.info(
+                "Reranking %d chunks across %d chapters (top %d per chapter)",
+                len(all_chunks), num_chapters, per_chapter_k,
+            )
+
+            reranked_all: list[dict] = []
+            query_text = " ".join(expanded_queries)
+
+            for ch, ch_chunks in by_chapter.items():
+                if len(ch_chunks) <= per_chapter_k:
+                    # No need to rerank — keep all
+                    reranked_all.extend(ch_chunks)
+                else:
+                    reranked = await self._rerank_chunks(
+                        query=query_text,
+                        chunks=ch_chunks,
+                        top_k=per_chapter_k,
+                    )
+                    reranked_all.extend(reranked)
+
+            all_chunks = reranked_all
 
             # Enforce token budget cap (Phase 1 guard)
             all_chunks, token_warning = self._enforce_token_budget(
@@ -113,19 +199,12 @@ class RetrievalAgent:
                     coverage_map[ch] = []
                 coverage_map[ch].append(chunk["chunk_id"])
 
-            # Step 3: Rerank and dedupe
-            if len(all_chunks) > settings.RAG_TOP_K_AFTER_RERANK:
-                all_chunks = await self._rerank_chunks(
-                    query=" ".join(expanded_queries),
-                    chunks=all_chunks,
-                    top_k=settings.RAG_TOP_K_AFTER_RERANK,
-                )
-
             # Step 4: Build response
             retrieved_chunks = [
                 {
                     "chunk_id": c["chunk_id"],
                     "chapter": c["metadata"].get("chapter", ""),
+                    "chapter_id": c["metadata"].get("chapter_id", ""),
                     "section": c["metadata"].get("section", ""),
                     "content": c["metadata"].get("content", ""),
                     "content_type": c["metadata"].get("content_type", "text"),
@@ -231,7 +310,7 @@ Trả về JSON:
         doesn't fail the entire retrieval — logs warning and continues.
         Domain 2B: Each chapter query has a hard 5-second timeout.
         """
-        CHAPTER_TIMEOUT = 5.0  # seconds
+        CHAPTER_TIMEOUT = 30.0  # seconds — needs headroom for embedding + Pinecone query
 
         async def _query_one_with_timeout(chapter: str) -> tuple[str, list[dict] | Exception]:
             """Query one chapter with hard timeout."""
@@ -357,6 +436,10 @@ Trả về JSON:
         chapter_chunks = []
 
         chapter_id = normalize_chapter_id(chapter)
+        logger.info(
+            "[_retrieve_for_chapter] doc=%s, chapter_input='%s', chapter_id='%s'",
+            document_id, chapter, chapter_id,
+        )
 
         # Generate embedding for the query
         query_text = " ".join(queries[:3])
@@ -378,6 +461,10 @@ Trả về JSON:
             content_types=content_types,
         )
 
+        logger.info(
+            "[_retrieve_for_chapter] doc=%s, chapter_id='%s' → %d results",
+            document_id, chapter_id, len(results),
+        )
         chapter_chunks.extend(results)
 
         return chapter_chunks

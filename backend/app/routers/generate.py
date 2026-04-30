@@ -307,8 +307,8 @@ def _map_fe_to_be_request(data: dict) -> ExamConfigRequest:
         mcq_count=mcq_count,
         essay_count=essay_count,
         bloom_distribution=BloomDistribution(**bloom),
-        user_prompt=data.get("prompt") or None,
-        extra_instructions=data.get("instructions"),
+        user_prompt=data.get("user_prompt") or data.get("prompt") or None,
+        extra_instructions=data.get("extra_instructions") or data.get("instructions") or None,
     )
 
 

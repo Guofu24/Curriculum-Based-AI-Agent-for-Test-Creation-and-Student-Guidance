@@ -230,11 +230,11 @@ class Settings(BaseSettings):
 
     # RAG settings
     RAG_TOP_K_PER_CHAPTER: int = 20
-    RAG_TOP_K_AFTER_RERANK: int = 8
+    RAG_TOP_K_AFTER_RERANK: int = 30
     RAG_CHUNK_SIZE: int = 1200
     RAG_CHUNK_OVERLAP: int = 200
     EMBEDDING_CACHE_TTL_SECONDS: int = 604800  # 7 days
-    MAX_CONTEXT_TOKENS: int = 3000  # Hard cap per chapter slot before truncation
+    MAX_CONTEXT_TOKENS: int = 12000  # Hard cap — allows ~30 chunks of ~400 tokens each
 
     @field_validator("DEBUG", mode="before")
     @classmethod

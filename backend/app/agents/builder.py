@@ -95,6 +95,76 @@ def _sanitize_latex_escapes(json_str: str) -> str:
     return ''.join(result)
 
 
+def _repair_json_string(json_str: str) -> str:
+    """Attempt to repair malformed JSON from LLM output.
+
+    Handles the most common failure: unescaped double-quotes inside string
+    values.  Example:
+        "explanation": "Đề bài giả thiết "quả cầu dừng lại" là ..."
+    becomes:
+        "explanation": "Đề bài giả thiết 'quả cầu dừng lại' là ..."
+
+    Strategy: try json.loads; on failure, find the offending position and
+    replace the inner quote with a single-quote, then retry.
+    """
+    # First try — maybe it already works
+    try:
+        json.loads(json_str, strict=False)
+        return json_str
+    except json.JSONDecodeError:
+        pass
+
+    # Heuristic repair: replace inner quotes with single quotes.
+    # Walk through the string tracking JSON structure.
+    chars = list(json_str)
+    i = 0
+    n = len(chars)
+    in_string = False
+    string_start = -1
+
+    while i < n:
+        ch = chars[i]
+
+        if not in_string:
+            if ch == '"':
+                in_string = True
+                string_start = i
+            i += 1
+            continue
+
+        # Inside a string
+        if ch == '\\':
+            i += 2  # skip escaped char
+            continue
+
+        if ch == '"':
+            # Is this the real end of the string, or an unescaped inner quote?
+            # Look ahead: real string-end is followed by , } ] : or whitespace
+            rest = json_str[i + 1:].lstrip()
+            if rest and rest[0] in ',:}]':
+                # This is the real closing quote
+                in_string = False
+                i += 1
+                continue
+            else:
+                # This is an unescaped inner quote — replace with single quote
+                chars[i] = "'"
+                i += 1
+                continue
+
+        i += 1
+
+    repaired = ''.join(chars)
+
+    # Validate the repair worked
+    try:
+        json.loads(repaired, strict=False)
+        return repaired
+    except json.JSONDecodeError:
+        # Repair didn't fully fix it — return original (caller will handle)
+        return json_str
+
+
 def _extract_json_brackets(text: str) -> str | None:
     """Extract the outermost JSON object or array from text using bracket counting.
 
@@ -362,8 +432,12 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
                 warnings.extend(chunk_warnings)
 
-                # Validate each question
-                validated = self.guardrails.validate_batch(questions)
+                # Separate demo questions (safe by construction) from real LLM output
+                real_questions = [q for q in questions if not q.get("is_demo_question")]
+                demo_questions = [q for q in questions if q.get("is_demo_question")]
+
+                # Validate only real LLM-generated questions
+                validated = self.guardrails.validate_batch(real_questions)
 
                 for q in validated:
                     if not q.get("filter_passed", True):
@@ -395,6 +469,12 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     # Track referenced chunks
                     if q.get("evidence_chunks"):
                         chunks_referenced.extend(q["evidence_chunks"])
+
+                # Demo questions skip guardrails — always included
+                for q in demo_questions:
+                    all_questions.append(q)
+                    if q.get("topic_hint"):
+                        topics_used.append(q["topic_hint"])
 
                 # Record token usage
                 metrics.completion_tokens += len(questions) * 50  # Estimate
@@ -466,6 +546,17 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
             self._normalize_chapter_key(k): v
             for k, v in topic_context_map.items()
         }
+        # Also build a map keyed by normalized chapter_id (ch1, ch2, etc.)
+        # so blueprint slots with 'ch2' can find chunks stored with chapter='1. ĐỘNG HỌC VẬT RẮN'
+        from app.rag.structure import normalize_chapter_id
+        chid_context_map: dict[str, list[dict]] = {}
+        for k, v in topic_context_map.items():
+            # Extract just the chapter part (before ' > section')
+            chapter_part = k.split(" > ")[0] if " > " in k else k
+            ch_id = normalize_chapter_id(chapter_part)
+            if ch_id not in chid_context_map:
+                chid_context_map[ch_id] = []
+            chid_context_map[ch_id].extend(v)
 
         async def _generate_one_with_semaphore(
             slot: dict,
@@ -479,9 +570,18 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 topic_key = f"{slot_chapter} > {slot_section}" if slot_section else slot_chapter
                 # Try exact match first, then normalized match
                 topic_chunks = topic_context_map.get(topic_key, [])
+                match_path = "exact" if topic_chunks else ""
                 if not topic_chunks:
                     norm_key = self._normalize_chapter_key(slot_chapter)
                     topic_chunks = norm_context_map.get(norm_key, [])
+                    if topic_chunks:
+                        match_path = "normalized"
+                # Try chapter_id match (ch2 -> chunks from that namespace)
+                if not topic_chunks:
+                    ch_id = normalize_chapter_id(slot_chapter)
+                    topic_chunks = chid_context_map.get(ch_id, [])
+                    if topic_chunks:
+                        match_path = "chapter_id"
                 # Last resort: pick any chunks whose normalized key contains the chapter number
                 if not topic_chunks:
                     import re
@@ -491,19 +591,21 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         for k, v in norm_context_map.items():
                             if chapter_num in re.findall(r'\d+', k):
                                 topic_chunks = v
+                                match_path = "number_fallback"
                                 break
+                if not topic_chunks:
+                    match_path = "FALLBACK_ALL"
                 question_context_str = (
                     self._build_context_for_llm(topic_chunks)
                     if topic_chunks
                     else context[:8000]
                 )
-                logger.debug(
+                logger.info(
                     "Slot %d chapter=%r → %d chunks (path: %s)",
                     slot_number,
                     slot_chapter,
                     len(topic_chunks),
-                    "exact" if topic_context_map.get(topic_key) else
-                    "normalized" if topic_chunks else "FALLBACK_ALL"
+                    match_path,
                 )
 
                 question, q_warnings = await self._generate_single_slot(
@@ -650,10 +752,16 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
                 try:
                     data = json.loads(json_str, strict=False)
-                except json.JSONDecodeError as je:
-                    warnings.append(f"Slot {slot_number}: JSON parse error after sanitize")
-                    logger.warning(f"[DEBUG] Slot {slot_number} JSONDecodeError at char {je.pos}: {je.msg} | snippet: {json_str[max(0,je.pos-20):je.pos+40]!r}")
-                    continue
+                except json.JSONDecodeError:
+                    # Try repairing unescaped quotes inside string values
+                    repaired = _repair_json_string(json_str)
+                    try:
+                        data = json.loads(repaired, strict=False)
+                        logger.info(f"Slot {slot_number}: JSON repaired successfully (attempt {attempt + 1})")
+                    except json.JSONDecodeError as je:
+                        warnings.append(f"Slot {slot_number}: JSON parse error after sanitize+repair")
+                        logger.warning(f"[DEBUG] Slot {slot_number} JSONDecodeError at char {je.pos}: {je.msg} | snippet: {repaired[max(0,je.pos-20):je.pos+40]!r}")
+                        continue
 
                 # Normalize: data can be {"questions": [...]} or [...]
                 questions_raw: list = []
@@ -924,15 +1032,23 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
         Instead of dumping ALL chunks into every question prompt (wasting tokens),
         each question only gets chunks relevant to its chapter/topic.
+
+        Keys include both chapter titles AND chapter_ids for flexible matching.
         """
         topic_map: dict[str, list[dict]] = {}
         for chunk in retrieved_context:
             chapter = chunk.get("chapter", "") or chunk.get("metadata", {}).get("chapter", "Unknown")
+            chapter_id = chunk.get("chapter_id", "") or chunk.get("metadata", {}).get("chapter_id", "")
             section = chunk.get("section", "") or chunk.get("metadata", {}).get("section", "")
             key = f"{chapter} > {section}" if section else chapter
             if key not in topic_map:
                 topic_map[key] = []
             topic_map[key].append(chunk)
+            # Also index by chapter_id (e.g., "ch2") so blueprint slots can match
+            if chapter_id and chapter_id != chapter:
+                if chapter_id not in topic_map:
+                    topic_map[chapter_id] = []
+                topic_map[chapter_id].append(chunk)
         return topic_map
 
     @staticmethod

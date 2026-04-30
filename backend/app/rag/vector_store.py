@@ -35,7 +35,7 @@ class VectorStore:
         self._index = None
 
     async def _get_index(self):
-        """Lazy-load Pinecone index."""
+        """Lazy-load Pinecone index. Raises RuntimeError on connection failure."""
         if self._index is None:
             try:
                 from pinecone import Pinecone, ServerlessSpec
@@ -55,12 +55,15 @@ class VectorStore:
                     )
 
                 self._index = pc.Index(settings.PINECONE_INDEX)
+                logger.info("Pinecone index '%s' connected successfully", settings.PINECONE_INDEX)
 
-            except ImportError:
-                self._index = None
+            except ImportError as e:
+                raise RuntimeError(
+                    "Pinecone package not installed or conflict detected. "
+                    "Run: pip uninstall pinecone-client -y && pip install pinecone"
+                ) from e
             except Exception as e:
-                logger.warning("Pinecone connection failed: %s", e)
-                self._index = None
+                raise RuntimeError(f"Pinecone connection failed: {e}") from e
 
         return self._index
 
@@ -78,9 +81,7 @@ class VectorStore:
         section, section_id, content_type, latex_repr, page_number.
         Chunks must already have an "embedding" field.
         """
-        index = await self._get_index()
-        if not index:
-            return
+        index = await self._get_index()  # raises RuntimeError if unavailable
 
         namespace = _make_ascii_namespace(f"{document_id}_{chapter_id}")
         records = []
@@ -190,9 +191,13 @@ class VectorStore:
             content_types: If provided, only return chunks matching these content types.
                           Examples: ["definition"], ["example", "exercise"], ["formula"]
         """
-        index = await self._get_index()
-        if not index:
-            logger.warning("Pinecone index unavailable for query_namespace")
+        try:
+            index = await self._get_index()
+        except RuntimeError as e:
+            logger.warning(
+                "Pinecone unavailable for query_namespace (doc=%s ch=%s): %s",
+                doc_id, chapter_id, e,
+            )
             return []
 
         namespace = _make_ascii_namespace(f"{doc_id}_{chapter_id}")
@@ -218,16 +223,24 @@ class VectorStore:
 
             all_results.sort(key=lambda x: x["score"], reverse=True)
 
-            # Domain 7B: Filter by content_type if requested
-            if content_types:
-                all_results = [
-                    r for r in all_results
-                    if r.get("metadata", {}).get("content_type", "") in content_types
-                ]
+            logger.info(
+                "[query_namespace] doc=%s, chapter=%s, namespace='%s', "
+                "top_k=%d, results=%d",
+                doc_id, chapter_id, namespace, top_k, len(all_results),
+            )
+
+            # NOTE: content_type filter removed — chunks are stored with
+            # default content_type='text', so Bloom-based content_type
+            # filtering (e.g., 'definition', 'theorem') would discard
+            # ALL results. Bloom targeting is handled at outline/builder level.
 
             return all_results
 
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "[query_namespace] FAILED doc=%s, chapter=%s, namespace='%s': %s",
+                doc_id, chapter_id, namespace, e,
+            )
             return []
 
     async def delete_document_vectors(

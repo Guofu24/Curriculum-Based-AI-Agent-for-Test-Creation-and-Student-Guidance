@@ -22,6 +22,8 @@ const statusConfig: StatusConfig = {
   pending: { label: 'Đang chờ', variant: 'secondary' },
   processing: { label: 'Đang xử lý', variant: 'default', showSpinner: true },
   completed: { label: 'Hoàn thành', variant: 'default', className: 'bg-primary/10 text-primary border-primary/20' },
+  indexed: { label: 'Hoàn thành', variant: 'default', className: 'bg-primary/10 text-primary border-primary/20' },
+  processed: { label: 'Hoàn thành', variant: 'default', className: 'bg-primary/10 text-primary border-primary/20' },
   failed: { label: 'Lỗi', variant: 'destructive' },
 
   // Exam statuses

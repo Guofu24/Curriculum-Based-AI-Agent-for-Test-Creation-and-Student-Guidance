@@ -404,8 +404,8 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
         setHitlPending(false) // Dismiss banner — pipeline đã tiếp tục
         toast.success('Đã duyệt sườn đề. Pipeline đang tiếp tục sinh câu hỏi...')
       } else {
-        if (!blueprintFeedback.trim()) {
-          toast.error('Vui lòng nhập phản hồi khi từ chối')
+        if (!blueprintFeedback.trim() || blueprintFeedback.trim().length < 5) {
+          toast.error('Phản hồi phải có ít nhất 5 ký tự')
           setIsBlueprintActing(false)
           return
         }
@@ -421,7 +421,8 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
         if (Array.isArray(raw2) && raw2.length > 0) setBlueprint(raw2)
       } catch { /* WebSocket sẽ update sau */ }
     } catch (error) {
-      toast.error(blueprintAction === 'approve' ? 'Không thể duyệt sườn đề' : 'Không thể gửi phản hồi')
+      const errMsg = error instanceof Error ? error.message : String(error)
+      toast.error(errMsg || (blueprintAction === 'approve' ? 'Không thể duyệt sườn đề' : 'Không thể gửi phản hồi'))
     } finally {
       setIsBlueprintActing(false)
     }

@@ -416,6 +416,9 @@ def normalize_chapter_id(raw: str) -> str:
         if letter_match:
             chapter_num = f"ch_{letter_match.group(1).lower()}"
     if not m2 and not chapter_num:
+        # "3. VA CHAM VAT RAN", "1. DONG HOC", "10. Title" → ch3, ch1, ch10
+        m2 = re.match(r"^\s*(\d+)\.\s+\S", stripped)
+    if not m2 and not chapter_num:
         # Standalone number: "1", "01", "1: Động học"
         m2 = re.search(r"(?:^|_|\s)(\d+)(?:\s|:|$)", stripped)
 

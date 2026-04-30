@@ -21,6 +21,7 @@ function UploadNotificationItem({
   const isProcessing = item.status === 'processing'
   const isDone = item.status === 'completed'
   const isFailed = item.status === 'failed'
+  const isActive = isUploading || isProcessing
 
   const displayPercent = isUploading
     ? item.uploadPercent
@@ -46,9 +47,15 @@ function UploadNotificationItem({
         </div>
         <button
           onClick={() => onDismiss(item.documentId)}
-          className="flex-shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+          title={isActive ? 'Hủy và xóa tài liệu này' : 'Đóng thông báo'}
+          className={`flex-shrink-0 transition-colors flex items-center gap-1 text-xs font-medium rounded px-1.5 py-0.5
+            ${isActive
+              ? 'text-red-500 hover:text-red-700 hover:bg-red-50'
+              : 'text-muted-foreground hover:text-foreground'
+            }`}
         >
-          <X className="h-4 w-4" />
+          <X className="h-3.5 w-3.5" />
+          {isActive && <span>Hủy</span>}
         </button>
       </div>
 
@@ -62,6 +69,12 @@ function UploadNotificationItem({
           <span className="flex items-center gap-1 text-xs text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" />
             Đang xử lý
+          </span>
+        )}
+        {isUploading && (
+          <span className="flex items-center gap-1 text-xs text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Đang upload
           </span>
         )}
         {isDone && (

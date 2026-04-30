@@ -287,12 +287,17 @@ async def embed_chunks(
     chunks: list[dict],
     doc_id: str,
     redis: RedisClient,
+    progress_callback: Any | None = None,
 ) -> list[dict]:
     """
     Embed chunks with document-specific caching.
 
     Cache key: embed:{doc_id}:{chunk_id}  TTL 7 days.
     Check cache BEFORE encoding — only embed uncached chunks.
+
+    Args:
+        progress_callback: Optional async callable(completed: int, total: int)
+            called after each sub-batch completes so callers can report progress.
 
     Returns list of chunks enriched with `embedding` field.
     Each chunk dict should have: chunk_id, content (text to embed).
@@ -318,9 +323,24 @@ async def embed_chunks(
 
     if uncached_chunks:
         texts = [c["content"] for c in uncached_chunks]
-        new_embeddings = await service.embed_texts(texts)
+        batch_size = 32
+        total_texts = len(texts)
+        all_embeddings: list[list[float]] = []
 
-        for idx, (chunk, embedding) in zip(uncached_indices, zip(uncached_chunks, new_embeddings)):
+        for batch_start in range(0, total_texts, batch_size):
+            batch_texts = texts[batch_start:batch_start + batch_size]
+            batch_embeddings = await service._call_embedding_batch(batch_texts)
+            all_embeddings.extend(batch_embeddings)
+
+            # Report progress after each sub-batch
+            if progress_callback:
+                completed = min(batch_start + batch_size, total_texts)
+                try:
+                    await progress_callback(completed, total_texts)
+                except Exception:
+                    pass
+
+        for idx, (chunk, embedding) in zip(uncached_indices, zip(uncached_chunks, all_embeddings)):
             chunk_id = chunk.get("chunk_id", f"chunk_{idx:04d}")
             cache_key = f"embed:{doc_id}:{chunk_id}"
             await service._cache_set(cache_key, embedding)

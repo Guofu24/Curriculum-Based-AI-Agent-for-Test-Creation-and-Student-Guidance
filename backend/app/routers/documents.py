@@ -396,10 +396,11 @@ async def get_document_status(
 async def delete_document(
     document_id: UUID,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis_client),
     current_user: User = Depends(get_current_user),
 ):
-    """Delete a document: removes from DB, S3, and Pinecone vectors."""
-    service = DocumentService(db)
+    """Delete a document: removes from DB, S3, Pinecone vectors, and Redis cache."""
+    service = DocumentService(db, redis=redis)
     deleted = await service.delete_document(document_id, current_user.id)
 
     if not deleted:

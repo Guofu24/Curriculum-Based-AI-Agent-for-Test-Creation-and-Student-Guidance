@@ -97,6 +97,34 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Redis connection skipped: {e}")
 
+    # Test Pinecone connection — surface package conflicts early
+    try:
+        from app.rag.vector_store import get_vector_store
+        vs = get_vector_store()
+        await vs._get_index()
+        logger.info("Pinecone connected")
+    except RuntimeError as e:
+        logger.error(
+            "⚠️  PINECONE STARTUP CHECK FAILED: %s\n"
+            "    Documents uploaded will NOT be indexed until this is fixed.\n"
+            "    Fix: pip uninstall pinecone-client -y",
+            e,
+        )
+    except Exception as e:
+        logger.warning("Pinecone startup check skipped: %s", e)
+
+    # Pre-load embedding + reranker models so first request isn't slow (~15s cold start)
+    try:
+        from app.rag.embedder import _get_model, _get_cross_encoder
+        logger.info("Pre-loading embedding model (BAAI/bge-m3)...")
+        await _get_model()
+        logger.info("Embedding model loaded ✓")
+        logger.info("Pre-loading CrossEncoder reranker...")
+        await _get_cross_encoder()
+        logger.info("CrossEncoder reranker loaded ✓")
+    except Exception as e:
+        logger.warning("Model pre-loading failed (will lazy-load on first use): %s", e)
+
     yield
 
     # Shutdown
