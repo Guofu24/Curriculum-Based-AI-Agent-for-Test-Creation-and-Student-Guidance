@@ -36,7 +36,7 @@ from app.dependencies import get_current_user
 from app.models.user import User
 from app.models.document import Document
 from app.rag.parser import parse_document
-from app.rag.structure import detect_heading_tree
+from app.rag.structure import detect_heading_tree_llm
 from app.tasks.document_task import process_document_task
 
 router = APIRouter(prefix="/api/v1/documents", tags=["Documents"])
@@ -559,7 +559,7 @@ async def rescan_document_structure(
 
         parse_result = await parse_document(file_bytes, document.file_type)
         markdown_content = parse_result["content"]
-        heading_tree = detect_heading_tree(markdown_content)
+        heading_tree = await detect_heading_tree_llm(markdown_content)
         total_chapters = len(heading_tree.get("chapters", []))
 
         # Update heading_tree and total_chapters in DB
@@ -639,8 +639,8 @@ async def reprocess_document(
         markdown_content = parse_result["content"]
 
         # 4. Re-detect heading tree from markdown (uses latest patterns including Roman numerals)
-        from app.rag.structure import detect_heading_tree
-        heading_tree = detect_heading_tree(markdown_content)
+        from app.rag.structure import detect_heading_tree_llm as _detect_llm
+        heading_tree = await _detect_llm(markdown_content)
         _log.info("Re-detected heading tree: %d chapters", len(heading_tree.get("chapters", [])))
 
         # 5. Re-chunk using the new heading tree
@@ -682,7 +682,7 @@ async def reprocess_document(
             chunks_for_ch = chapter_chunks.get(ch_id, [])
             if chunks_for_ch:
                 await vs.upsert_chunks(str(document_id), ch_id, chunks_for_ch)
-                _log.info("Upserted %d chunks to namespace %s_%s", len(chunks_for_ch), document_id, ch_id)
+                _log.info("Upserted %d chunks (chapter=%s) to document namespace", len(chunks_for_ch), ch_id)
             else:
                 _log.info("No chunks for chapter %s (%s)", chapter.get("title", ""), ch_id)
 

@@ -1,0 +1,82 @@
+@startuml UC04_Manage_Teaching_Documents
+!theme plain
+title UC04 - Manage Teaching Documents
+
+actor "Teacher" as USER
+participant "Frontend" as FE
+participant "FastAPI documents_router" as ROUTE
+participant "DocumentService" as SVC
+participant "MinIO/S3 Storage" as S3
+database "PostgreSQL" as DB
+database "Pinecone" as PIN
+
+alt View document list
+  USER -> FE : Open Documents page
+  FE -> ROUTE : GET /api/v1/documents/
+  ROUTE -> DB : SELECT documents WHERE user_id ORDER BY uploaded_at DESC
+  DB -> ROUTE : Paginated document list
+  ROUTE -> FE : {documents[], total, page}
+  FE -> USER : Display document list + processing statuses
+end
+
+alt Upload document
+  USER -> FE : Click Upload, select PDF/DOCX/PPTX file
+  FE -> USER : Validate file type
+  alt Unsupported file type
+    FE -> USER : Display error "Unsupported file format"
+  end
+  USER -> FE : Confirm upload
+  FE -> ROUTE : POST /api/v1/documents/upload (multipart/form-data)
+  ROUTE -> SVC : upload_document(file, user_id)
+  SVC -> S3 : PUT uploads/{user_id}/{uuid}.{ext}
+  SVC -> DB : INSERT documents (status=pending)
+  SVC -> FE : {document_id, s3_key, processing_status:pending}
+  FE -> USER : Display success + add to list
+
+  ROUTE -> SVC : process_document(document_id)
+  SVC -> S3 : GET file content
+  SVC -> SVC : parse_document() -> markdown
+  SVC -> SVC : detect_heading_tree() -> nested chapters
+  SVC -> SVC : semantic_chunk() -> chunks with chapter_id
+  SVC -> SVC : embed_chunks() -> BAAI/bge-m3 (768-dim)
+  SVC -> PIN : upsert_chunks() per chapter namespace
+  SVC -> DB : UPDATE documents SET status=completed, heading_tree, total_chapters, total_chunks
+end
+
+alt Open document detail
+  USER -> FE : Click document row
+  FE -> ROUTE : GET /api/v1/documents/{id}
+  ROUTE -> DB : SELECT documents WHERE id
+  DB -> ROUTE : full record + heading_tree
+  ROUTE -> FE : DocumentDetail
+  FE -> USER : Display document info + curriculum tree
+
+  alt Open original file
+    USER -> FE : Click "Open Original File"
+    FE -> ROUTE : GET /api/v1/documents/{id}/refresh-url
+    ROUTE -> SVC : Generate presigned URL (TTL 1h)
+    ROUTE -> FE : {url}
+    FE -> USER : Open URL in new tab (PDF viewer or download)
+  end
+end
+
+alt Delete document
+  USER -> FE : Click Delete icon
+  FE -> USER : Show confirmation dialog
+  USER -> FE : Confirm delete
+  FE -> ROUTE : DELETE /api/v1/documents/{id}
+  ROUTE -> SVC : delete_document(id, user_id)
+  SVC -> S3 : DELETE file
+  SVC -> PIN : DELETE namespace {doc_id}_*
+  SVC -> DB : DELETE documents WHERE id
+  DB -> FE : 204 No Content
+  FE -> USER : Remove from list + show success
+end
+
+alt Poll processing status
+  FE -> ROUTE : GET /api/v1/documents/{id}/status
+  ROUTE -> DB : SELECT documents WHERE id
+  DB -> FE : processing_status (pending -> processing -> completed or failed)
+  FE -> USER : Update status badge in document list
+end
+@enduml

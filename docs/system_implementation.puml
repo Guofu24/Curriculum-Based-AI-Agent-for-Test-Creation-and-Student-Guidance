@@ -1,0 +1,230 @@
+@startuml System_Implementation_Diagram
+!theme plain
+skinparam maxMessageSize 300
+skinparam linetype ortho
+skinparam nodesep 30
+skinparam ranksep 40
+
+title SYSTEM IMPLEMENTATION OVERVIEW
+
+package "Frontend" {
+  [Next.js 16\n(App Router)] as FE
+  [AuthProvider] as FE_AUTH
+  [Dashboard Pages] as FE_PAGES
+  [WebSocket Client\n(api.ts)] as FE_WS
+}
+
+package "FastAPI Backend (Monolith)" {
+  package "Routers" {
+    [auth_router] as R_AUTH
+    [documents_router] as R_DOC
+    [generate_router\n/generate/exam] as R_GEN
+    [exams_router\n/exams/*] as R_EXAM
+    [playbook_router] as R_PLB
+    [courses_router] as R_CRS
+  }
+
+  package "Services" {
+    [AuthService] as SVC_AUTH
+    [DocumentService] as SVC_DOC
+    [ExamService] as SVC_EXAM
+  }
+
+  package "Multi-Agent Pipeline" {
+    [OrchestratorAgent\n(orchestrator.py)] as ORCH
+    [build_exam_graph\n(LangGraph StateGraph)] as GRAPH
+  }
+
+  package "Graph Nodes (24 nodes)" {
+    [initialize] as N_INIT
+    [clarification_check] as N_CLAR
+    [load_long_term_memory] as N_LTM
+    [decide_plan] as N_DECIDE
+    [plan_complex] as N_PLAN
+    [retrieve_knowledge] as N_RETRIEVE
+    [create_outline] as N_OUTLINE
+    [emit_checkpoint_1] as N_CP1
+    [wait_for_blueprint_approval\n(interrupt)] as N_WAIT1
+    [build_questions] as N_BUILD
+    [validate_questions] as N_VALIDATE
+    [check_validation_result] as N_CVR
+    [retry_builder] as N_RETRY
+    [handle_max_retries_exceeded] as N_MAXR
+    [emit_checkpoint_2] as N_CP2
+    [wait_for_review\n(interrupt)] as N_WAIT2
+    [save_teacher_preferences] as N_STP
+    [emit_checkpoint_3] as N_CP3
+    [finalize_output] as N_FINAL
+    [finalize_with_feedback] as N_FINALFB
+    [handle_timeout] as N_TIMEOUT
+    [emit_clarification] as N_ECLAR
+    [handle_retrieval_failure] as N_HR
+    [handle_outline_failure] as N_HO
+    [handle_builder_failure] as N_HB
+  }
+
+  package "Agents" {
+    [RetrievalAgent] as AG_RET
+    [OutlineAgent] as AG_OUT
+    [BuilderAgent] as AG_BLD
+    [ValidatorAgent] as AG_VAL
+    [PlannerAgent] as AG_PLN
+  }
+
+  package "Skills Library" {
+    [bloom_classifier] as SK_BLOOM
+    [scope_checker] as SK_SCOPE
+    [dedup_checker] as SK_DEDUP
+    [difficulty_estimator] as SK_DIFF
+    [latex_renderer] as SK_LATEX
+  }
+
+  package "Memory" {
+    [ShortTermMemory\n(Redis)] as MEM_ST
+    [LongTermMemory\n(PostgreSQL)] as MEM_LT
+  }
+
+  package "WebSocket" {
+    [ConnectionManager] as WS_MGR
+    [DocumentUploadManager] as WS_DOC
+  }
+}
+
+package "Infrastructure" {
+  database "PostgreSQL" as DB {
+    [users] as T_USR
+    [refresh_tokens] as T_RT
+    [documents] as T_DOC
+    [exams\n(JSONB fields)] as T_EXAM
+    [exam_history] as T_HIST
+    [feedback_events] as T_FEED
+    [teacher_preferences] as T_PREFS
+  }
+
+  database "Redis" {
+    [session:{exam_id}:{uid}\nTTL 2h] as R_SESSION
+    [retry_issues:{exam_id}\nTTL 1h] as R_RETRY
+    [ws_events:{exam_id}\nTTL 1h] as R_EVENTS
+    [channel exam:{exam_id}] as R_PUBSUB
+    [embedding_cache\nTTL 7d] as R_CACHE
+    [ratelimit:*] as R_RATE
+  }
+
+  database "Pinecone" as PIN {
+    [Index: curriculum-ai\nNamespace: {doc_id}_{ch_id}] as PIN_IDX
+  }
+
+  storage "MinIO / S3" as STORAGE {
+    [uploads/{user_id}/...] as S3_FILE
+  }
+}
+
+package "External Services" {
+  [Groq API\n(llama-3.3-70b,\n llama-3.1-8b)] as GROQ
+  [Ollama\n(llama3.2)] as OLLAMA
+  [g4f\n(free aggregator)] as G4F
+  [BAAI/bge-m3\n(local embedder)] as EMBED
+  [BAAI/bge-reranker-v2-m3\n(local CrossEncoder)] as RERANK
+  [Qwen Vision API\n(via ngrok)] as VISION
+  [SerpAPI\n(search)] as SEARCH
+}
+
+' === RELATIONSHIPS ===
+
+FE --> R_AUTH : HTTP
+FE --> R_DOC : HTTP
+FE --> R_GEN : HTTP POST /generate/exam
+FE --> R_EXAM : HTTP
+
+FE_WS --> WS_MGR : WebSocket\n/ws/exam/{exam_id}
+FE_WS --> WS_DOC : WebSocket\n/ws/document/{doc_id}
+
+R_AUTH --> SVC_AUTH
+R_DOC --> SVC_DOC
+R_GEN --> SVC_EXAM
+R_EXAM --> SVC_EXAM
+
+SVC_DOC --> T_DOC
+SVC_DOC --> T_USR
+SVC_DOC --> STORAGE
+SVC_DOC --> PIN_IDX
+SVC_DOC --> EMBED
+SVC_DOC --> R_CACHE
+SVC_DOC --> R_EVENTS
+
+SVC_EXAM --> T_EXAM
+SVC_EXAM --> T_HIST
+SVC_EXAM --> MEM_LT
+SVC_EXAM --> R_SESSION
+
+R_GEN --> ORCH
+
+ORCH --> GRAPH
+ORCH --> MEM_ST
+ORCH --> MEM_LT
+ORCH --> WS_MGR
+
+GRAPH --> N_INIT
+GRAPH --> N_CLAR
+GRAPH --> N_LTM
+GRAPH --> N_DECIDE
+GRAPH --> N_PLAN
+GRAPH --> N_RETRIEVE
+GRAPH --> N_OUTLINE
+GRAPH --> N_CP1
+GRAPH --> N_WAIT1
+GRAPH --> N_BUILD
+GRAPH --> N_VALIDATE
+GRAPH --> N_CVR
+GRAPH --> N_RETRY
+GRAPH --> N_MAXR
+GRAPH --> N_CP2
+GRAPH --> N_WAIT2
+GRAPH --> N_STP
+GRAPH --> N_CP3
+GRAPH --> N_FINAL
+GRAPH --> N_FINALFB
+GRAPH --> N_TIMEOUT
+GRAPH --> N_ECLAR
+GRAPH --> N_HR
+GRAPH --> N_HO
+GRAPH --> N_HB
+
+N_RETRIEVE --> AG_RET
+N_OUTLINE --> AG_OUT
+N_BUILD --> AG_BLD
+N_VALIDATE --> AG_VAL
+N_PLAN --> AG_PLN
+
+AG_RET --> EMBED
+AG_RET --> RERANK
+AG_RET --> PIN_IDX
+AG_RET --> GROQ
+AG_RET --> R_SESSION
+
+AG_OUT --> GROQ
+AG_OUT --> SK_BLOOM
+AG_OUT --> SK_DIFF
+
+AG_BLD --> GROQ
+AG_BLD --> SEARCH
+AG_BLD --> SK_BLOOM
+AG_BLD --> SK_SCOPE
+AG_BLD --> SK_DEDUP
+AG_BLD --> SK_DIFF
+AG_BLD --> SK_LATEX
+
+AG_VAL --> GROQ
+AG_VAL --> SK_BLOOM
+AG_VAL --> SK_SCOPE
+AG_VAL --> MEM_ST
+
+WS_MGR --> R_EVENTS
+WS_MGR --> R_PUBSUB
+WS_MGR --> R_SESSION
+
+MEM_ST --> R_SESSION
+MEM_ST --> R_RETRY
+MEM_LT --> T_PREFS
+
+@enduml

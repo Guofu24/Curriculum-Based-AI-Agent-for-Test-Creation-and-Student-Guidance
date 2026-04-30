@@ -12,7 +12,7 @@ from app.models.document import Document
 from app.core.redis_client import RedisClient
 from app.utils.storage import get_storage, StorageError
 from app.rag.parser import parse_document
-from app.rag.structure import detect_heading_tree, flatten_heading_tree
+from app.rag.structure import detect_heading_tree_llm, flatten_heading_tree
 from app.rag.chunker import semantic_chunk
 from app.rag.embedder import embed_chunks
 from app.rag.vector_store import get_vector_store
@@ -329,7 +329,7 @@ class DocumentService:
             except Exception:
                 pass
 
-            heading_tree = detect_heading_tree(markdown_content)
+            heading_tree = await detect_heading_tree_llm(markdown_content)
             total_chapters = len(heading_tree.get("chapters", []))
 
             try:

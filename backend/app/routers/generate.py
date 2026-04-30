@@ -371,36 +371,10 @@ async def generate_exam_fe(
         _log.exception("create_exam failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to create exam: {e}")
 
-    # ── Scope guard: count chunks before generation ───────────────────────────
-    scope_warning: str | None = None
-    if config.document_id and config.scope:
-        from app.rag.vector_store import VectorStore
-        vs = VectorStore()
-        try:
-            chunk_count = await vs.count_chunks_in_scope(
-                doc_id=str(config.document_id),
-                scope_chapters=config.scope,
-            )
-            if chunk_count > 200:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Scope too large: {chunk_count} chunks found. "
-                        f"Please narrow the scope to specific sections (max ≈200 chunks)."
-                    ),
-                )
-            if chunk_count > 80:
-                scope_warning = (
-                    f"Scope has {chunk_count} chunks — consider narrowing to "
-                    f"specific sections for better quality."
-                )
-                _log.warning("Scope chunk count=%d (>80) for exam_id=%s", chunk_count, exam.id)
-        except HTTPException:
-            raise
-        except Exception as e:
-            _log.warning("Could not count chunks in scope: %s", e)
-            chunk_count = 0
-    # ──────────────────────────────────────────────────────────────────────────
+    # NOTE: Scope size guard removed — with single namespace per document,
+    # chunk count reflects the entire document. Retrieval handles scope
+    # via metadata filter + per-chapter reranking + token budget cap.
+
 
     job_id = str(uuid.uuid4())
     exam_uuid = str(exam.id)
@@ -413,7 +387,7 @@ async def generate_exam_fe(
         job_id=job_id,
         message="Exam generation started.",
         websocket_url=f"{settings.ws_base_url}/ws/exam/{exam.id}",
-        scope_warning=scope_warning,
+        scope_warning=None,
     )
 
     async def _background_generation():

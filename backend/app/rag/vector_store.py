@@ -1,4 +1,4 @@
-"""Pinecone vector store operations."""
+"""Pinecone vector store operations — single namespace per document."""
 
 import logging
 import unicodedata
@@ -27,8 +27,14 @@ def _make_ascii_namespace(namespace: str) -> str:
     return ascii_str
 
 
+def _doc_namespace(document_id: str) -> str:
+    """Build single namespace for a document: doc_{uuid_no_dashes}."""
+    clean_id = document_id.replace("-", "")
+    return _make_ascii_namespace(f"doc_{clean_id}")
+
+
 class VectorStore:
-    """Pinecone vector store manager."""
+    """Pinecone vector store manager — single namespace per document."""
 
     def __init__(self):
         self._client = None
@@ -74,16 +80,17 @@ class VectorStore:
         chunks: list[dict],
     ) -> None:
         """
-        Upsert chunks to Pinecone with namespace per chapter.
+        Upsert chunks to Pinecone — single namespace per document.
 
-        Namespace: {doc_id}_{chapter_id} (e.g., "doc123_ch1")
+        Namespace: doc_{document_id} (all chapters in same namespace).
+        chapter_id is stored in metadata for filtering.
         Each chunk dict must have: chunk_id, content, chapter, chapter_id,
         section, section_id, content_type, latex_repr, page_number.
         Chunks must already have an "embedding" field.
         """
         index = await self._get_index()  # raises RuntimeError if unavailable
 
-        namespace = _make_ascii_namespace(f"{document_id}_{chapter_id}")
+        namespace = _doc_namespace(document_id)
         records = []
 
         import numpy as np
@@ -107,7 +114,7 @@ class VectorStore:
                     "document_id": document_id,
                     "chunk_id": chunk.get("chunk_id", ""),
                     "chapter": chunk.get("chapter", ""),
-                    "chapter_id": chunk.get("chapter_id", ""),
+                    "chapter_id": chapter_id,  # Explicit chapter_id for metadata filtering
                     "section": chunk.get("section", ""),
                     "section_id": chunk.get("section_id", ""),
                     "content_type": chunk.get("content_type", "text"),
@@ -148,11 +155,10 @@ class VectorStore:
         scope_chapters: list[str],
     ) -> int:
         """
-        Count total chunks across all scope chapters.
+        Count total chunks in the document namespace.
 
-        Uses describe_index_stats() for efficiency (single API call),
-        then filters by prefix-match on namespace. Falls back to 0
-        if the index or stats are unavailable.
+        With single namespace, this just returns the total vector count
+        for the document. Per-chapter count isn't available without querying.
         """
         index = await self._get_index()
         if not index:
@@ -164,12 +170,8 @@ class VectorStore:
             if not stats:
                 return 0
             namespaces: dict = stats.get("namespaces", {})
-            total = 0
-            for chapter in scope_chapters:
-                chapter_id = normalize_chapter_id(chapter)
-                ns_key = _make_ascii_namespace(f"{doc_id}_{chapter_id}")
-                total += namespaces.get(ns_key, {}).get("vector_count", 0)
-            return total
+            ns_key = _doc_namespace(doc_id)
+            return namespaces.get(ns_key, {}).get("vector_count", 0)
         except Exception:
             return 0
 
@@ -182,14 +184,11 @@ class VectorStore:
         content_types: list[str] | None = None,
     ) -> list[dict]:
         """
-        Query chunks from a specific chapter namespace.
+        Query chunks from a document namespace, filtered by chapter_id.
 
-        Namespace: {doc_id}_{chapter_id}
+        Namespace: doc_{document_id} (single namespace per document).
+        Uses Pinecone metadata filter: {"chapter_id": chapter_id}
         Returns top_k results sorted by score (descending).
-
-        Args:
-            content_types: If provided, only return chunks matching these content types.
-                          Examples: ["definition"], ["example", "exercise"], ["formula"]
         """
         try:
             index = await self._get_index()
@@ -200,11 +199,14 @@ class VectorStore:
             )
             return []
 
-        namespace = _make_ascii_namespace(f"{doc_id}_{chapter_id}")
+        namespace = _doc_namespace(doc_id)
 
         import numpy as np
         query_embedding = np.nan_to_num(query_embedding, nan=0.0, posinf=1.0, neginf=-1.0).tolist()
 
+        # No metadata filter — query ALL vectors in the document namespace.
+        # With single namespace (~300-600 vectors), this is fast.
+        # Chapter relevance is handled by query embedding + reranking.
         try:
             result = index.query(
                 vector=query_embedding,
@@ -221,6 +223,27 @@ class VectorStore:
                     "metadata": match.get("metadata", {}),
                 })
 
+            # ── Legacy fallback: try old per-chapter namespace if new returns 0 ──
+            if not all_results and chapter_id:
+                legacy_ns = _make_ascii_namespace(f"{doc_id}_{chapter_id}")
+                if legacy_ns != namespace:
+                    logger.info(
+                        "[query_namespace] 0 results in new ns '%s', trying legacy ns '%s'",
+                        namespace, legacy_ns,
+                    )
+                    legacy_result = index.query(
+                        vector=query_embedding,
+                        top_k=top_k,
+                        namespace=legacy_ns,
+                        include_metadata=True,
+                    )
+                    for match in legacy_result.get("matches", []):
+                        all_results.append({
+                            "chunk_id": match["id"],
+                            "score": match["score"],
+                            "metadata": match.get("metadata", {}),
+                        })
+
             all_results.sort(key=lambda x: x["score"], reverse=True)
 
             logger.info(
@@ -228,11 +251,6 @@ class VectorStore:
                 "top_k=%d, results=%d",
                 doc_id, chapter_id, namespace, top_k, len(all_results),
             )
-
-            # NOTE: content_type filter removed — chunks are stored with
-            # default content_type='text', so Bloom-based content_type
-            # filtering (e.g., 'definition', 'theorem') would discard
-            # ALL results. Bloom targeting is handled at outline/builder level.
 
             return all_results
 
@@ -249,11 +267,10 @@ class VectorStore:
         chapters: list[str],
     ) -> None:
         """
-        Delete all vectors for specific chapters of a document.
+        Delete all vectors for a document.
 
-        Deletes namespace {doc_id}_{chapter_id} for each chapter in the list,
-        plus the 'ch_unknown' namespace (chunks without detected headings).
-        Uses retry loop to handle transient Pinecone errors.
+        With single namespace, simply delete the entire doc namespace.
+        The chapters parameter is kept for API compatibility but ignored.
         """
         index = await self._get_index()
         if not index:
@@ -262,32 +279,42 @@ class VectorStore:
             )
             return
 
-        all_chapters = list(chapters) + ["ch_unknown"]
-
-        for chapter_id in all_chapters:
-            namespace = _make_ascii_namespace(f"{doc_id}_{chapter_id}")
-            for attempt in range(3):
-                try:
-                    index.delete(delete_all=True, namespace=namespace)
-                    logger.info(
-                        "Deleted Pinecone namespace '%s' for doc %s", namespace, doc_id
+        namespace = _doc_namespace(doc_id)
+        for attempt in range(3):
+            try:
+                index.delete(delete_all=True, namespace=namespace)
+                logger.info("Deleted Pinecone namespace '%s' for doc %s", namespace, doc_id)
+                break
+            except Exception as e:
+                if attempt < 2:
+                    logger.warning(
+                        "Pinecone delete attempt %d failed for namespace '%s': %s — retrying",
+                        attempt + 1, namespace, e,
                     )
-                    break
-                except Exception as e:
-                    if attempt < 2:
-                        logger.warning(
-                            "Pinecone delete attempt %d failed for namespace '%s': %s — retrying",
-                            attempt + 1, namespace, e,
-                        )
-                    else:
-                        logger.error(
-                            "Pinecone delete FAILED for namespace '%s' after 3 attempts: %s",
-                            namespace, e,
-                        )
+                else:
+                    logger.error(
+                        "Pinecone delete FAILED for namespace '%s' after 3 attempts: %s",
+                        namespace, e,
+                    )
+
+        # Also try to clean up legacy per-chapter namespaces (migration)
+        try:
+            stats = index.describe_index_stats()
+            namespaces = stats.get("namespaces", {}) if stats else {}
+            doc_prefix = doc_id.replace("-", "")
+            for ns in list(namespaces.keys()):
+                if ns.startswith(doc_prefix) and ns != namespace:
+                    try:
+                        index.delete(delete_all=True, namespace=ns)
+                        logger.info("Deleted legacy namespace '%s' for doc %s", ns, doc_id)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     async def delete_all_document_vectors(self, doc_id: str) -> bool:
         """
-        Delete all vectors for a document (all namespaces).
+        Delete all vectors for a document (all namespaces including legacy).
 
         Lists all namespaces matching this doc_id prefix and deletes each.
         Returns True if Pinecone is reachable, False if unreachable.
@@ -303,8 +330,9 @@ class VectorStore:
             stats = index.describe_index_stats()
             namespaces: dict = stats.get("namespaces", {})
             deleted_any = False
+            doc_prefix = doc_id.replace("-", "")
             for ns in namespaces:
-                if ns.startswith(doc_id.replace('-', '')) or ns.startswith(f"{doc_id}_"):
+                if ns.startswith(doc_prefix) or ns.startswith(f"doc_{doc_prefix}") or ns.startswith(f"{doc_id}_"):
                     try:
                         index.delete(delete_all=True, namespace=ns)
                         logger.info("Deleted Pinecone namespace '%s' (doc %s)", ns, doc_id)

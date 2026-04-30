@@ -91,63 +91,17 @@ class RetrievalAgent:
             # NOTE: Models (bge-m3 + CrossEncoder) are pre-loaded at server startup
             # via lifespan in main.py — no per-request warmup needed.
 
-            # Step 2: Parallel retrieval per chapter — G10 + Domain 2B (30s timeout)
+            # Step 2: Single document query (no per-chapter namespace split).
+            # With single namespace per document, one query retrieves all relevant
+            # vectors. Reranking handles chapter relevance.
             all_chunks, retrieval_warnings = await self._parallel_query_chapters(
                 document_id=document_id,
-                chapters=scope_chapters,
+                chapters=scope_chapters[:1] or ["_all"],  # Single query suffices
                 expanded_queries=expanded_queries,
                 top_k=settings.RAG_TOP_K_PER_CHAPTER,
                 content_types=content_types,
             )
             warnings.extend(retrieval_warnings)
-
-            # ── Global fallback ──
-            # If ALL scoped chapters returned 0 (e.g. heading tree over-fragmented),
-            # fall back to querying ALL namespaces for this document.
-            if not all_chunks and scope_chapters:
-                logger.warning(
-                    "All %d scoped chapters returned 0 results — falling back to global query",
-                    len(scope_chapters),
-                )
-                warnings.append(
-                    f"All {len(scope_chapters)} scoped chapters returned 0 results. "
-                    "Falling back to global document query."
-                )
-                # Get all chapter IDs from the document's heading tree
-                from app.core.database import async_session_maker
-                from app.models.document import Document
-                from sqlalchemy import select
-                from uuid import UUID as _UUID
-
-                all_chapter_ids: list[str] = []
-                try:
-                    async with async_session_maker() as session:
-                        result = await session.execute(
-                            select(Document).where(Document.id == _UUID(document_id))
-                        )
-                        doc = result.scalar_one_or_none()
-                        if doc and doc.heading_tree:
-                            all_chapter_ids = [
-                                ch["chapter_id"]
-                                for ch in doc.heading_tree.get("chapters", [])
-                                if ch.get("chapter_id")
-                            ]
-                except Exception as e:
-                    logger.warning("Failed to fetch all chapter IDs for global fallback: %s", e)
-
-                if all_chapter_ids:
-                    logger.info(
-                        "Global fallback: querying %d total chapters for doc %s",
-                        len(all_chapter_ids), document_id,
-                    )
-                    all_chunks, fb_warnings = await self._parallel_query_chapters(
-                        document_id=document_id,
-                        chapters=all_chapter_ids,
-                        expanded_queries=expanded_queries,
-                        top_k=settings.RAG_TOP_K_PER_CHAPTER,
-                        content_types=None,  # no content type filter for fallback
-                    )
-                    warnings.extend(fb_warnings)
 
             # Step 3: Per-chapter rerank — ensures every chapter retains context.
             # Global rerank would let dominant chapters crowd out others.
