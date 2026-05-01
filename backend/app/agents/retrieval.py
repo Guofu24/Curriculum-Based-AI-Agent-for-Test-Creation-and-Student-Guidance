@@ -93,12 +93,13 @@ class RetrievalAgent:
 
             # Step 2: Single document query (no per-chapter namespace split).
             # With single namespace per document, one query retrieves all relevant
-            # vectors. Reranking handles chapter relevance.
+            # vectors. We boost top_k to cover all chapters in scope.
+            boosted_top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(scope_chapters), 3)
             all_chunks, retrieval_warnings = await self._parallel_query_chapters(
                 document_id=document_id,
-                chapters=scope_chapters[:1] or ["_all"],  # Single query suffices
+                chapters=["_all"],  # Single query to whole document namespace
                 expanded_queries=expanded_queries,
-                top_k=settings.RAG_TOP_K_PER_CHAPTER,
+                top_k=min(boosted_top_k, 100),  # Cap at 100
                 content_types=content_types,
             )
             warnings.extend(retrieval_warnings)
