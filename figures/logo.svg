@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="ExamAI Logo">
+  <title>ExamAI Logo</title>
+  <desc>ExamAI logo  AI-powered exam generation system</desc>
+
+  <defs>
+    <linearGradient id="logoBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1e3a8a"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="gradA" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="gradB" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6"/>
+      <stop offset="100%" style="stop-color:#ec4899"/>
+    </linearGradient>
+    <linearGradient id="paperGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff"/>
+      <stop offset="100%" style="stop-color:#f1f5f9"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+    <filter id="glowBlue">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="url(#logoBg)" filter="url(#shadow)"/>
+
+  <!-- Decorative ring -->
+  <circle cx="100" cy="100" r="88" fill="none" stroke="white" stroke-width="0.5" stroke-opacity="0.2"/>
+
+  <!-- Brain / AI network pattern (subtle) -->
+  <circle cx="100" cy="100" r="70" fill="none" stroke="white" stroke-width="0.3" stroke-opacity="0.15" stroke-dasharray="4,4"/>
+
+  <!-- Document / Paper shape -->
+  <rect x="55" y="45" width="90" height="110" rx="6" fill="url(#paperGrad)" filter="url(#shadow)"/>
+  <!-- Paper fold -->
+  <path d="M 130 45 L 145 45 L 145 60 Z" fill="#e2e8f0"/>
+  <path d="M 130 45 L 130 60 L 145 60" fill="#cbd5e1"/>
+
+  <!-- Question mark on paper -->
+  <text x="100" y="88" text-anchor="middle" fill="#1e3a8a" font-family="Georgia, serif" font-size="36" font-weight="bold" opacity="0.85">?</text>
+
+  <!-- AI sparkle / sparkle stars -->
+  <g fill="#fbbf24" opacity="0.9">
+    <!-- Star top-right -->
+    <path d="M 155 45 L 157 50 L 162 50 L 158 53 L 160 58 L 155 55 L 150 58 L 152 53 L 148 50 L 153 50 Z"/>
+    <!-- Star top-left -->
+    <path d="M 48 50 L 50 54 L 54 54 L 51 57 L 52.5 61 L 48 58.5 L 43.5 61 L 45 57 L 42 54 L 46 54 Z" transform="scale(0.7) translate(20,25)"/>
+    <!-- Star bottom -->
+    <path d="M 100 158 L 101.5 162 L 105 162 L 102.5 164.5 L 103.5 168 L 100 166 L 96.5 168 L 97.5 164.5 L 95 162 L 98.5 162 Z" transform="scale(0.6) translate(67,67)"/>
+  </g>
+
+  <!-- Checkmarks / tick marks (representing correct answers) -->
+  <g stroke="#10b981" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <!-- Check 1 -->
+    <path d="M 65 108 L 72 115 L 85 100" opacity="0.8"/>
+    <!-- Check 2 -->
+    <path d="M 65 122 L 72 129 L 85 114" opacity="0.6"/>
+    <!-- Check 3 -->
+    <path d="M 65 136 L 72 143 L 85 128" opacity="0.4"/>
+  </g>
+
+  <!-- AI "E" letter stylized at bottom of paper -->
+  <text x="100" y="150" text-anchor="middle" fill="#7c3aed" font-family="Arial, sans-serif" font-size="14" font-weight="bold" opacity="0.7">AI</text>
+
+  <!-- Text: ExamAI -->
+  <text x="100" y="182" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="16" font-weight="bold" letter-spacing="1">ExamAI</text>
+  <text x="100" y="195" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="7" letter-spacing="0.5">INTELLIGENT EXAM GENERATION</text>
+</svg>

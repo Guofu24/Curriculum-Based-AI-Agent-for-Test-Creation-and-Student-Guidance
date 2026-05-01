@@ -1,0 +1,229 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" role="img" aria-label="ExamAI Agent Pipeline">
+  <title>ExamAI Agent Pipeline  5-Step Multi-Agent Flow</title>
+  <desc>The 5-agent pipeline for exam generation with Human-in-the-Loop checkpoints</desc>
+
+  <defs>
+    <linearGradient id="pipeBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <linearGradient id="ag1Grad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#0d9488"/><stop offset="100%" style="stop-color:#0f766e"/></linearGradient>
+    <linearGradient id="ag2Grad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#7c3aed"/><stop offset="100%" style="stop-color:#6d28d9"/></linearGradient>
+    <linearGradient id="ag3Grad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#2563eb"/><stop offset="100%" style="stop-color:#1d4ed8"/></linearGradient>
+    <linearGradient id="ag4Grad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#dc2626"/><stop offset="100%" style="stop-color:#b91c1c"/></linearGradient>
+    <linearGradient id="ag0Grad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#d97706"/><stop offset="100%" style="stop-color:#b45309"/></linearGradient>
+    <linearGradient id="hitlGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#f59e0b"/><stop offset="100%" style="stop-color:#d97706"/></linearGradient>
+    <linearGradient id="skillGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#059669"/><stop offset="100%" style="stop-color:#047857"/></linearGradient>
+    <linearGradient id="recallGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#7c3aed"/><stop offset="100%" style="stop-color:#6d28d9"/></linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="3" result="coloredBlur"/><feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#94a3b8"/></marker>
+    <marker id="arrGreen" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#4ade80"/></marker>
+    <marker id="arrRed" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#f87171"/></marker>
+    <marker id="arrYellow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#fbbf24"/></marker>
+    <marker id="arrPurple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#c084fc"/></marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="500" fill="url(#pipeBg)" rx="12"/>
+  <pattern id="grid2" width="25" height="25" patternUnits="userSpaceOnUse"><path d="M 25 0 L 0 0 0 25" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+  <rect width="1000" height="500" fill="url(#grid2)" opacity="0.4"/>
+
+  <!-- Title -->
+  <text x="500" y="32" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="18" font-weight="bold">ExamAI  Pipeline 5 Agent Sinh Á Tñ Ùng</text>
+
+  <!-- ============ ORCHESTRATOR ============ -->
+  <rect x="15" y="60" width="200" height="110" rx="10" fill="#2d1b69" stroke="#a855f7" stroke-width="2" filter="url(#glow)"/>
+  <text x="115" y="84" text-anchor="middle" fill="#e9d5ff" font-family="Arial, sans-serif" font-size="13" font-weight="bold">> Orchestrator Agent</text>
+  <text x="115" y="100" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="10">Agent 0  iÁu phÑi toàn pipeline</text>
+  <text x="115" y="114" text-anchor="middle" fill="#a78bfa" font-family="Arial, sans-serif" font-size="9">" GÍi sub-agents nh° tools</text>
+  <text x="115" y="127" text-anchor="middle" fill="#a78bfa" font-family="Arial, sans-serif" font-size="9">" Emit WebSocket events</text>
+  <text x="115" y="140" text-anchor="middle" fill="#a78bfa" font-family="Arial, sans-serif" font-size="9">" HITL checkpoints + Redis pub/sub</text>
+  <text x="115" y="153" text-anchor="middle" fill="#a78bfa" font-family="Arial, sans-serif" font-size="9">" Memory: Short + Long-term</text>
+
+  <!-- Memory boxes -->
+  <rect x="25" y="175" width="88" height="36" rx="6" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="69" y="189" text-anchor="middle" fill="#94a3b8" font-family="Arial, sans-serif" font-size="8">Short-term</text>
+  <text x="69" y="200" text-anchor="middle" fill="#64748b" font-family="Arial, sans-serif" font-size="7">Redis</text>
+
+  <rect x="117" y="175" width="88" height="36" rx="6" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="161" y="189" text-anchor="middle" fill="#94a3b8" font-family="Arial, sans-serif" font-size="8">Long-term</text>
+  <text x="161" y="200" text-anchor="middle" fill="#64748b" font-family="Arial, sans-serif" font-size="7">PostgreSQL</text>
+
+  <!-- Arrow: Orchestrator ’ Retrieval -->
+  <line x1="215" y1="115" x2="250" y2="115" stroke="#a855f7" stroke-width="2" marker-end="url(#arrPurple)"/>
+  <text x="232" y="107" text-anchor="middle" fill="#a78bfa" font-family="Arial, sans-serif" font-size="8">dispatch</text>
+
+  <!-- ============ RETRIEVAL AGENT ============ -->
+  <rect x="255" y="60" width="140" height="110" rx="10" fill="#134e4a" stroke="#0d9488" stroke-width="2"/>
+  <rect x="255" y="60" width="140" height="30" rx="10" fill="url(#ag1Grad)"/>
+  <rect x="255" y="80" width="140" height="10" fill="url(#ag1Grad)"/>
+  <text x="325" y="79" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="bold">Retrieval Agent</text>
+  <text x="325" y="104" text-anchor="middle" fill="#5eead4" font-family="Arial, sans-serif" font-size="10">Agent 1</text>
+  <text x="325" y="118" text-anchor="middle" fill="#2dd4bf" font-family="Arial, sans-serif" font-size="9">Pinecone vector search</text>
+  <text x="325" y="131" text-anchor="middle" fill="#14b8a6" font-family="Arial, sans-serif" font-size="8">Bloom-level filtering</text>
+  <text x="325" y="144" text-anchor="middle" fill="#0d9488" font-family="Arial, sans-serif" font-size="8">Scope: chapters</text>
+  <text x="325" y="157" text-anchor="middle" fill="#0f766e" font-family="Arial, sans-serif" font-size="8">Output: chunks[]</text>
+
+  <!-- Output: retrieved_chunks -->
+  <rect x="255" y="178" width="140" height="44" rx="6" fill="#0f2a2a" stroke="#0d9488" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="325" y="195" text-anchor="middle" fill="#5eead4" font-family="Arial, sans-serif" font-size="8">retrieved_chunks[]</text>
+  <text x="325" y="208" text-anchor="middle" fill="#2dd4bf" font-family="Arial, sans-serif" font-size="8">{content, chapter,</text>
+  <text x="325" y="218" text-anchor="middle" fill="#2dd4bf" font-family="Arial, sans-serif" font-size="8"> page, score}</text>
+
+  <!-- Arrow: Retrieval ’ Outline -->
+  <line x1="395" y1="115" x2="430" y2="115" stroke="#0d9488" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="412" y="107" text-anchor="middle" fill="#5eead4" font-family="Arial, sans-serif" font-size="8">chunks[]</text>
+
+  <!-- ============ OUTLINE AGENT ============ -->
+  <rect x="435" y="60" width="140" height="110" rx="10" fill="#2e1065" stroke="#7c3aed" stroke-width="2"/>
+  <rect x="435" y="60" width="140" height="30" rx="10" fill="url(#ag2Grad)"/>
+  <rect x="435" y="80" width="140" height="10" fill="url(#ag2Grad)"/>
+  <text x="505" y="79" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="bold">Outline Agent</text>
+  <text x="505" y="104" text-anchor="middle" fill="#ddd6fe" font-family="Arial, sans-serif" font-size="10">Agent 2</text>
+  <text x="505" y="118" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="9">T¡o blueprint slots</text>
+  <text x="505" y="131" text-anchor="middle" fill="#a78bfa" font-family="Arial, sans-serif" font-size="8">Bloom distribution</text>
+  <text x="505" y="144" text-anchor="middle" fill="#8b5cf6" font-family="Arial, sans-serif" font-size="8">MCQ / Essay ratio</text>
+  <text x="505" y="157" text-anchor="middle" fill="#7c3aed" font-family="Arial, sans-serif" font-size="8">Output: blueprint[]</text>
+
+  <!-- Output: blueprint -->
+  <rect x="435" y="178" width="140" height="44" rx="6" fill="#1e1b4b" stroke="#7c3aed" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="505" y="195" text-anchor="middle" fill="#ddd6fe" font-family="Arial, sans-serif" font-size="8">blueprint[]</text>
+  <text x="505" y="208" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="8">{q_id, bloom_level,</text>
+  <text x="505" y="218" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="8"> chapter, topic_hint}</text>
+
+  <!-- ============ HITL CHECKPOINT 1 ============ -->
+  <rect x="590" y="60" width="145" height="165" rx="10" fill="#451a03" stroke="#f59e0b" stroke-width="2.5"/>
+  <rect x="590" y="60" width="145" height="30" rx="10" fill="url(#hitlGrad)"/>
+  <rect x="590" y="80" width="145" height="10" fill="url(#hitlGrad)"/>
+  <text x="662" y="79" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="11" font-weight="bold">HITL Checkpoint 1</text>
+  <text x="662" y="104" text-anchor="middle" fill="#fde68a" font-family="Arial, sans-serif" font-size="9">ø PAUSE  Pipeline dëng</text>
+  <text x="662" y="118" text-anchor="middle" fill="#fcd34d" font-family="Arial, sans-serif" font-size="9">Xem blueprint</text>
+  <text x="662" y="130" text-anchor="middle" fill="#fcd34d" font-family="Arial, sans-serif" font-size="9">Phân bÕ Bloom</text>
+  <text x="662" y="142" text-anchor="middle" fill="#fbbf24" font-family="Arial, sans-serif" font-size="8">SÑ câu tëng ch°¡ng</text>
+
+  <!-- HITL Actions -->
+  <rect x="602" y="152" width="60" height="22" rx="4" fill="#15803d" stroke="#22c55e" stroke-width="1"/>
+  <text x="632" y="166" text-anchor="middle" fill="#bbf7d0" font-family="Arial, sans-serif" font-size="8"> Approve</text>
+
+  <rect x="667" y="152" width="60" height="22" rx="4" fill="#7f1d1d" stroke="#ef4444" stroke-width="1"/>
+  <text x="697" y="166" text-anchor="middle" fill="#fca5a5" font-family="Arial, sans-serif" font-size="8"> Reject</text>
+
+  <text x="662" y="188" text-anchor="middle" fill="#f59e0b" font-family="Arial, sans-serif" font-size="7">Redis pub/sub notification</text>
+  <text x="662" y="198" text-anchor="middle" fill="#d97706" font-family="Arial, sans-serif" font-size="7">WS: hitl_checkpoint type</text>
+  <text x="662" y="208" text-anchor="middle" fill="#b45309" font-family="Arial, sans-serif" font-size="7">Timeout: 30 phút</text>
+
+  <!-- Arrow: Outline ’ HITL1 -->
+  <line x1="575" y1="115" x2="590" y2="115" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrYellow)"/>
+  <text x="582" y="107" text-anchor="middle" fill="#fbbf24" font-family="Arial, sans-serif" font-size="8">blueprint[]</text>
+
+  <!-- Arrow: HITL1 ’ Builder -->
+  <line x1="735" y1="142" x2="775" y2="115" stroke="#22c55e" stroke-width="2" marker-end="url(#arrGreen)"/>
+  <text x="752" y="122" text-anchor="middle" fill="#4ade80" font-family="Arial, sans-serif" font-size="8">approved</text>
+
+  <!-- ============ BUILDER AGENT ============ -->
+  <rect x="780" y="60" width="140" height="110" rx="10" fill="#1e3a8a" stroke="#2563eb" stroke-width="2"/>
+  <rect x="780" y="60" width="140" height="30" rx="10" fill="url(#ag3Grad)"/>
+  <rect x="780" y="80" width="140" height="10" fill="url(#ag3Grad)"/>
+  <text x="850" y="79" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="bold">Builder Agent</text>
+  <text x="850" y="104" text-anchor="middle" fill="#bfdbfe" font-family="Arial, sans-serif" font-size="10">Agent 3</text>
+  <text x="850" y="118" text-anchor="middle" fill="#93c5fd" font-family="Arial, sans-serif" font-size="9">Sinh câu hÏi thñc t¿</text>
+  <text x="850" y="131" text-anchor="middle" fill="#60a5fa" font-family="Arial, sans-serif" font-size="8">MCQ 4 lña chÍn</text>
+  <text x="850" y="144" text-anchor="middle" fill="#3b82f6" font-family="Arial, sans-serif" font-size="8">Essay + rubric</text>
+  <text x="850" y="157" text-anchor="middle" fill="#2563eb" font-family="Arial, sans-serif" font-size="8">Output: questions[]</text>
+
+  <!-- Skills box below builder -->
+  <rect x="780" y="178" width="140" height="58" rx="6" fill="#022c22" stroke="#059669" stroke-width="1.5"/>
+  <text x="850" y="193" text-anchor="middle" fill="#4ade80" font-family="Arial, sans-serif" font-size="9" font-weight="bold">Skills Pipeline</text>
+  <text x="850" y="206" text-anchor="middle" fill="#22c55e" font-family="Arial, sans-serif" font-size="8">BloomClassifier</text>
+  <text x="850" y="217" text-anchor="middle" fill="#16a34a" font-family="Arial, sans-serif" font-size="8">DedupChecker</text>
+  <text x="850" y="228" text-anchor="middle" fill="#15803d" font-family="Arial, sans-serif" font-size="8">DifficultyEstimator</text>
+  <text x="850" y="239" text-anchor="middle" fill="#14532d" font-family="Arial, sans-serif" font-size="8">LatexRenderer</text>
+
+  <!-- Arrow: Builder ’ Validator -->
+  <line x1="920" y1="115" x2="955" y2="340" stroke="#2563eb" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ============ VALIDATOR AGENT ============ -->
+  <rect x="830" y="290" width="140" height="120" rx="10" fill="#450a0a" stroke="#dc2626" stroke-width="2"/>
+  <rect x="830" y="290" width="140" height="30" rx="10" fill="url(#ag4Grad)"/>
+  <rect x="830" y="310" width="140" height="10" fill="url(#ag4Grad)"/>
+  <text x="900" y="309" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="bold">Validator Agent</text>
+  <text x="900" y="334" text-anchor="middle" fill="#fecaca" font-family="Arial, sans-serif" font-size="10">Agent 4</text>
+  <text x="900" y="348" text-anchor="middle" fill="#fca5a5" font-family="Arial, sans-serif" font-size="9">KiÃm tra ch¥t l°ãng</text>
+  <text x="900" y="361" text-anchor="middle" fill="#f87171" font-family="Arial, sans-serif" font-size="8">Scope Guard</text>
+  <text x="900" y="373" text-anchor="middle" fill="#ef4444" font-family="Arial, sans-serif" font-size="8">Bloom alignment</text>
+  <text x="900" y="385" text-anchor="middle" fill="#dc2626" font-family="Arial, sans-serif" font-size="8">Logic + Duplicates</text>
+  <text x="900" y="397" text-anchor="middle" fill="#b91c1c" font-family="Arial, sans-serif" font-size="8">Retry max 3×</text>
+
+  <!-- ============ HITL CHECKPOINT 2 ============ -->
+  <rect x="590" y="290" width="145" height="120" rx="10" fill="#451a03" stroke="#f59e0b" stroke-width="2"/>
+  <rect x="590" y="290" width="145" height="28" rx="10" fill="url(#hitlGrad)"/>
+  <rect x="590" y="310" width="145" height="8" fill="url(#hitlGrad)"/>
+  <text x="662" y="308" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="11" font-weight="bold">HITL Checkpoint 2</text>
+  <text x="662" y="333" text-anchor="middle" fill="#fde68a" font-family="Arial, sans-serif" font-size="9">ø FULL REVIEW</text>
+  <text x="662" y="347" text-anchor="middle" fill="#fcd34d" font-family="Arial, sans-serif" font-size="8">Xem toàn bÙ Á</text>
+  <text x="662" y="359" text-anchor="middle" fill="#fbbf24" font-family="Arial, sans-serif" font-size="8">Sía trñc ti¿p / feedback</text>
+  <text x="662" y="371" text-anchor="middle" fill="#f59e0b" font-family="Arial, sans-serif" font-size="8">Validation result</text>
+  <text x="662" y="383" text-anchor="middle" fill="#d97706" font-family="Arial, sans-serif" font-size="8">Quality score hiÃn thË</text>
+  <text x="662" y="395" text-anchor="middle" fill="#b45309" font-family="Arial, sans-serif" font-size="8">Publish / Regenerate</text>
+
+  <!-- Arrow: Validator ’ HITL2 -->
+  <line x1="830" y1="350" x2="735" y2="350" stroke="#dc2626" stroke-width="2" marker-end="url(#arrRed)"/>
+  <text x="782" y="342" text-anchor="middle" fill="#fca5a5" font-family="Arial, sans-serif" font-size="8">issues[]</text>
+
+  <!-- ============ HITL CHECKPOINT 3 ============ -->
+  <rect x="590" y="420" width="145" height="65" rx="10" fill="#451a03" stroke="#f59e0b" stroke-width="2"/>
+  <rect x="590" y="420" width="145" height="28" rx="10" fill="url(#hitlGrad)"/>
+  <rect x="590" y="440" width="145" height="8" fill="url(#hitlGrad)"/>
+  <text x="662" y="438" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="11" font-weight="bold">HITL Checkpoint 3</text>
+  <text x="662" y="456" text-anchor="middle" fill="#fde68a" font-family="Arial, sans-serif" font-size="9">Export Preview</text>
+  <text x="662" y="468" text-anchor="middle" fill="#fbbf24" font-family="Arial, sans-serif" font-size="8">PDF / DOCX</text>
+  <text x="662" y="480" text-anchor="middle" fill="#f59e0b" font-family="Arial, sans-serif" font-size="8">Final confirm</text>
+
+  <!-- Arrow: HITL2 ’ HITL3 -->
+  <line x1="662" y1="410" x2="662" y2="420" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#arrYellow)"/>
+
+  <!-- ============ OUTPUT ============ -->
+  <rect x="780" y="290" width="130" height="120" rx="10" fill="#022c22" stroke="#4ade80" stroke-width="2"/>
+  <rect x="780" y="290" width="130" height="28" rx="10" fill="#15803d"/>
+  <rect x="780" y="310" width="130" height="8" fill="#15803d"/>
+  <text x="845" y="308" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="11" font-weight="bold"> Final Output</text>
+  <text x="845" y="333" text-anchor="middle" fill="#86efac" font-family="Arial, sans-serif" font-size="9">questions[]</text>
+  <text x="845" y="347" text-anchor="middle" fill="#4ade80" font-family="Arial, sans-serif" font-size="8">+ source_evidence</text>
+  <text x="845" y="361" text-anchor="middle" fill="#22c55e" font-family="Arial, sans-serif" font-size="8">+ cost_report</text>
+  <text x="845" y="375" text-anchor="middle" fill="#16a34a" font-family="Arial, sans-serif" font-size="8">+ quality_score</text>
+  <text x="845" y="389" text-anchor="middle" fill="#15803d" font-family="Arial, sans-serif" font-size="8">+ warnings[]</text>
+  <text x="845" y="403" text-anchor="middle" fill="#14532d" font-family="Arial, sans-serif" font-size="8">Status: SUCCESS</text>
+
+  <!-- Arrow: Validator ’ Output -->
+  <line x1="970" y1="350" x2="910" y2="350" stroke="#4ade80" stroke-width="2" marker-end="url(#arrGreen)"/>
+
+  <!-- ============ STEP NUMBERS ============ -->
+  <circle cx="255" cy="55" r="14" fill="#0d9488"/>
+  <text x="255" y="59" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="bold">1</text>
+
+  <circle cx="435" cy="55" r="14" fill="#7c3aed"/>
+  <text x="435" y="59" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="bold">2</text>
+
+  <circle cx="662" cy="55" r="14" fill="#f59e0b"/>
+  <text x="662" y="59" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="bold">3</text>
+
+  <circle cx="780" cy="55" r="14" fill="#2563eb"/>
+  <text x="780" y="59" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="bold">4</text>
+
+  <circle cx="830" cy="285" r="14" fill="#dc2626"/>
+  <text x="830" y="289" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="bold">5</text>
+
+  <!-- ============ TIMELINE ============ -->
+  <text x="500" y="492" text-anchor="middle" fill="#475569" font-family="Arial, sans-serif" font-size="10">
+    Retrieval ’ Outline ’ ø HITL 1 (DuyÇt blueprint) ’ Builder ’ Validator ’ ø HITL 2 (Review §y ç) ’ ø HITL 3 (Export)
+  </text>
+
+  <!-- Planner path (complex cases) -->
+  <path d="M 115 60 Q 115 35 325 35 Q 430 35 430 60" fill="none" stroke="#a855f7" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrPurple)"/>
+  <text x="272" y="30" text-anchor="middle" fill="#c084fc" font-family="Arial, sans-serif" font-size="8">Complex? ’ Planner Agent</text>
+
+  <!-- Retry loop -->
+  <path d="M 970 400 Q 990 450 900 450 Q 830 450 830 420" fill="none" stroke="#f87171" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="950" y="438" text-anchor="middle" fill="#fca5a5" font-family="Arial, sans-serif" font-size="8">Retry</text>
+  <text x="960" y="450" text-anchor="middle" fill="#f87171" font-family="Arial, sans-serif" font-size="8">max 3×</text>
+</svg>

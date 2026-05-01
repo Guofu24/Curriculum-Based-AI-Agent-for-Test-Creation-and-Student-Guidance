@@ -1,0 +1,318 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 620" role="img" aria-label="ExamAI Data Flow">
+  <title>ExamAI Data Flow  Të Upload PDF ¿n Xu¥t Á</title>
+  <desc>Complete data flow from PDF upload to exam export, showing all data transformations</desc>
+
+  <defs>
+    <linearGradient id="dfBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <linearGradient id="pdfGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#dc2626"/><stop offset="100%" style="stop-color:#b91c1c"/></linearGradient>
+    <linearGradient id="chunkGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#0d9488"/><stop offset="100%" style="stop-color:#0f766e"/></linearGradient>
+    <linearGradient id="pineGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#d97706"/><stop offset="100%" style="stop-color:#b45309"/></linearGradient>
+    <linearGradient id="blueGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#7c3aed"/><stop offset="100%" style="stop-color:#6d28d9"/></linearGradient>
+    <linearGradient id="qGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#2563eb"/><stop offset="100%" style="stop-color:#1d4ed8"/></linearGradient>
+    <linearGradient id="wsGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#059669"/><stop offset="100%" style="stop-color:#047857"/></linearGradient>
+    <linearGradient id="exportGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#7c3aed"/><stop offset="100%" style="stop-color:#6d28d9"/></linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="3" result="coloredBlur"/><feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <marker id="dfArr" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#94a3b8"/></marker>
+    <marker id="dfArrGreen" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#4ade80"/></marker>
+    <marker id="dfArrBlue" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#60a5fa"/></marker>
+    <marker id="dfArrPurple" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#c084fc"/></marker>
+    <marker id="dfArrOrange" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#fb923c"/></marker>
+    <marker id="dfArrYellow" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto"><polygon points="0 0,7 2.5,0 5" fill="#fbbf24"/></marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="620" fill="url(#dfBg)" rx="12"/>
+  <pattern id="dfGrid" width="25" height="25" patternUnits="userSpaceOnUse"><path d="M 25 0 L 0 0 0 25" fill="none" stroke="#1e293b" stroke-width="0.5"/></pattern>
+  <rect width="960" height="620" fill="url(#dfGrid)" opacity="0.4"/>
+
+  <!-- Title -->
+  <text x="480" y="30" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="17" font-weight="bold">ExamAI  LuÓng dï liÇu: Të Upload PDF ¿n Xu¥t Á</text>
+
+  <!-- ========== PHASE 1: DOCUMENT UPLOAD ========== -->
+  <!-- Phase label -->
+  <rect x="20" y="50" width="920" height="100" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <rect x="20" y="50" width="100" height="100" rx="8" fill="#1e293b"/>
+  <rect x="20" y="50" width="8" height="100" rx="4" fill="#dc2626"/>
+  <text x="90" y="75" text-anchor="middle" fill="#fca5a5" font-family="Arial, sans-serif" font-size="10" font-weight="bold">GIAI O N 1</text>
+  <text x="90" y="92" text-anchor="middle" fill="#dc2626" font-family="Arial, sans-serif" font-size="9">Upload &amp;</text>
+  <text x="90" y="105" text-anchor="middle" fill="#dc2626" font-family="Arial, sans-serif" font-size="9">Processing</text>
+
+  <!-- PDF Upload node -->
+  <rect x="130" y="58" width="160" height="84" rx="8" fill="#450a0a" stroke="#dc2626" stroke-width="2"/>
+  <rect x="130" y="58" width="160" height="26" rx="8" fill="url(#pdfGrad)"/>
+  <rect x="130" y="76" width="160" height="8" fill="url(#pdfGrad)"/>
+  <text x="210" y="76" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="11" font-weight="bold">=Ä Upload PDF</text>
+  <text x="210" y="98" text-anchor="middle" fill="#fca5a5" font-family="Arial, sans-serif" font-size="9">Gi£ng viên upload file</text>
+  <text x="210" y="111" text-anchor="middle" fill="#fca5a5" font-family="Arial, sans-serif" font-size="9">Giáo trình V­t lý</text>
+  <text x="210" y="124" text-anchor="middle" fill="#ef4444" font-family="Arial, sans-serif" font-size="8">multipart/form-data</text>
+
+  <!-- Arrow -->
+  <line x1="290" y1="100" x2="310" y2="100" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#dfArr)"/>
+
+  <!-- Chunking node -->
+  <rect x="315" y="58" width="170" height="84" rx="8" fill="#134e4a" stroke="#0d9488" stroke-width="2"/>
+  <rect x="315" y="58" width="170" height="26" rx="8" fill="url(#chunkGrad)"/>
+  <rect x="315" y="76" width="170" height="8" fill="url(#chunkGrad)"/>
+  <text x="400" y="76" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="11" font-weight="bold">=* PDF Chunking</text>
+  <text x="400" y="98" text-anchor="middle" fill="#5eead4" font-family="Arial, sans-serif" font-size="9">PyMuPDF / pdfplumber</text>
+  <text x="400" y="111" text-anchor="middle" fill="#2dd4bf" font-family="Arial, sans-serif" font-size="9">Extract: text, tables, LaTeX</text>
+  <text x="400" y="124" text-anchor="middle" fill="#14b8a6" font-family="Arial, sans-serif" font-size="8">Chunk size: 512 tokens</text>
+
+  <!-- Arrow -->
+  <line x1="485" y1="100" x2="505" y2="100" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#dfArr)"/>
+
+  <!-- Embedding node -->
+  <rect x="510" y="58" width="170" height="84" rx="8" fill="#134e4a" stroke="#0d9488" stroke-width="2"/>
+  <rect x="510" y="58" width="170" height="26" rx="8" fill="url(#chunkGrad)"/>
+  <rect x="510" y="76" width="170" height="8" fill="url(#chunkGrad)"/>
+  <text x="595" y="76" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="11" font-weight="bold">>à Embedding</text>
+  <text x="595" y="98" text-anchor="middle" fill="#5eead4" font-family="Arial, sans-serif" font-size="9">OpenAI text-embedding-3</text>
+  <text x="595" y="111" text-anchor="middle" fill="#2dd4bf" font-family="Arial, sans-serif" font-size="9">Ï chunk ’ 1536-d vector</text>
+  <text x="595" y="124" text-anchor="middle" fill="#14b8a6" font-family="Arial, sans-serif" font-size="8">Metadata: chapter, page</text>
+
+  <!-- Arrow -->
+  <line x1="680" y1="100" x2="700" y2="100" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#dfArr)"/>
+
+  <!-- Pinecone storage -->
+  <rect x="705" y="58" width="160" height="84" rx="8" fill="#78350f" stroke="#d97706" stroke-width="2"/>
+  <rect x="705" y="58" width="160" height="26" rx="8" fill="url(#pineGrad)"/>
+  <rect x="705" y="76" width="160" height="8" fill="url(#pineGrad)"/>
+  <text x="785" y="76" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="11" font-weight="bold">=Ä Pinecone</text>
+  <text x="785" y="98" text-anchor="middle" fill="#fcd34d" font-family="Arial, sans-serif" font-size="9">Vector storage</text>
+  <text x="785" y="111" text-anchor="middle" fill="#fbbf24" font-family="Arial, sans-serif" font-size="9">Namespace: document_id</text>
+  <text x="785" y="124" text-anchor="middle" fill="#d97706" font-family="Arial, sans-serif" font-size="8">Semantic retrieval</text>
+
+  <!-- Arrow down from Pinecone -->
+  <line x1="785" y1="142" x2="785" y2="170" stroke="#d97706" stroke-width="1.5" marker-end="url(#dfArr)"/>
+
+  <!-- Curriculum Tree -->
+  <rect x="705" y="158" width="160" height="50" rx="6" fill="#1e3b2a" stroke="#65a30d" stroke-width="1.5"/>
+  <text x="785" y="173" text-anchor="middle" fill="#a3e635" font-family="Arial, sans-serif" font-size="9" font-weight="bold"><3 Curriculum Tree</text>
+  <text x="785" y="187" text-anchor="middle" fill="#84cc16" font-family="Arial, sans-serif" font-size="8">Heading extraction ’ Ch°¡ng</text>
+  <text x="785" y="199" text-anchor="middle" fill="#65a30d" font-family="Arial, sans-serif" font-size="8">Gi£ng viên chÍn scope</text>
+
+  <!-- Arrow from tree down -->
+  <line x1="785" y1="208" x2="785" y2="235" stroke="#65a30d" stroke-width="1.5" marker-end="url(#dfArr)"/>
+
+  <!-- ========== PHASE 2: CONFIG ========== -->
+  <!-- Phase 2 label -->
+  <rect x="20" y="235" width="920" height="75" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <rect x="20" y="235" width="8" height="75" rx="4" fill="#7c3aed"/>
+  <text x="90" y="255" text-anchor="middle" fill="#ddd6fe" font-family="Arial, sans-serif" font-size="10" font-weight="bold">GIAI O N 2</text>
+  <text x="90" y="272" text-anchor="middle" fill="#7c3aed" font-family="Arial, sans-serif" font-size="9">Configure</text>
+  <text x="90" y="285" text-anchor="middle" fill="#7c3aed" font-family="Arial, sans-serif" font-size="9">&amp; Start</text>
+
+  <!-- Exam config node -->
+  <rect x="130" y="245" width="250" height="58" rx="8" fill="#2e1065" stroke="#7c3aed" stroke-width="2"/>
+  <text x="255" y="263" text-anchor="middle" fill="#ddd6fe" font-family="Arial, sans-serif" font-size="11" font-weight="bold">=Ë exam_config</text>
+  <text x="255" y="278" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="8">{scope: [Ch°¡ng 1, 2],</text>
+  <text x="255" y="290" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="8">mcq_count: 40, bloom_dist, user_prompt}</text>
+
+  <!-- Arrow -->
+  <line x1="380" y1="274" x2="400" y2="274" stroke="#7c3aed" stroke-width="2" marker-end="url(#dfArr)"/>
+
+  <!-- Start generation -->
+  <rect x="405" y="245" width="160" height="58" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <text x="485" y="263" text-anchor="middle" fill="#94a3b8" font-family="Arial, sans-serif" font-size="11" font-weight="bold">=€ Start Generation</text>
+  <text x="485" y="278" text-anchor="middle" fill="#64748b" font-family="Arial, sans-serif" font-size="9">POST /generate/exam</text>
+  <text x="485" y="290" text-anchor="middle" fill="#475569" font-family="Arial, sans-serif" font-size="8">exam_id + websocket_url</text>
+
+  <!-- Arrow -->
+  <line x1="565" y1="274" x2="585" y2="274" stroke="#7c3aed" stroke-width="2" marker-end="url(#dfArr)"/>
+
+  <!-- WebSocket start -->
+  <rect x="590" y="245" width="200" height="58" rx="8" fill="#022c22" stroke="#4ade80" stroke-width="2"/>
+  <rect x="590" y="245" width="200" height="26" rx="8" fill="url(#wsGrad)"/>
+  <rect x="590" y="263" width="200" height="8" fill="url(#wsGrad)"/>
+  <text x="690" y="263" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="11" font-weight="bold">= WebSocket Open</text>
+  <text x="690" y="278" text-anchor="middle" fill="#86efac" font-family="Arial, sans-serif" font-size="9">ws://.../ws/exam/{id}</text>
+  <text x="690" y="290" text-anchor="middle" fill="#4ade80" font-family="Arial, sans-serif" font-size="8">Real-time streaming begins</text>
+
+  <!-- Arrow down -->
+  <line x1="690" y1="303" x2="690" y2="330" stroke="#4ade80" stroke-width="2" marker-end="url(#dfArrGreen)"/>
+
+  <!-- ========== PHASE 3: AGENT PIPELINE ========== -->
+  <!-- Phase 3 label -->
+  <rect x="20" y="330" width="920" height="100" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <rect x="20" y="330" width="8" height="100" rx="4" fill="#2563eb"/>
+  <text x="90" y="350" text-anchor="middle" fill="#bfdbfe" font-family="Arial, sans-serif" font-size="10" font-weight="bold">GIAI O N 3</text>
+  <text x="90" y="367" text-anchor="middle" fill="#2563eb" font-family="Arial, sans-serif" font-size="9">Agent</text>
+  <text x="90" y="380" text-anchor="middle" fill="#2563eb" font-family="Arial, sans-serif" font-size="9">Pipeline</text>
+
+  <!-- Step 1: Retrieval -->
+  <rect x="130" y="340" width="150" height="80" rx="8" fill="#134e4a" stroke="#0d9488" stroke-width="1.5"/>
+  <text x="205" y="357" text-anchor="middle" fill="#5eead4" font-family="Arial, sans-serif" font-size="10" font-weight="bold">` Retrieval</text>
+  <text x="205" y="372" text-anchor="middle" fill="#2dd4bf" font-family="Arial, sans-serif" font-size="8">scope ’ Pinecone</text>
+  <text x="205" y="385" text-anchor="middle" fill="#14b8a6" font-family="Arial, sans-serif" font-size="8">retrieved_chunks[]</text>
+  <text x="205" y="398" text-anchor="middle" fill="#0f766e" font-family="Arial, sans-serif" font-size="8">metadata: chapter, page</text>
+  <text x="205" y="410" text-anchor="middle" fill="#0d9488" font-family="Arial, sans-serif" font-size="7">(emit: plan_step)</text>
+
+  <!-- Arrow -->
+  <line x1="280" y1="380" x2="300" y2="380" stroke="#0d9488" stroke-width="1.5" marker-end="url(#dfArr)"/>
+
+  <!-- Step 2: Outline -->
+  <rect x="305" y="340" width="150" height="80" rx="8" fill="#2e1065" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="380" y="357" text-anchor="middle" fill="#ddd6fe" font-family="Arial, sans-serif" font-size="10" font-weight="bold">a Outline</text>
+  <text x="380" y="372" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="8">chunks ’ blueprint[]</text>
+  <text x="380" y="385" text-anchor="middle" fill="#a78bfa" font-family="Arial, sans-serif" font-size="8">{q_id, bloom, chapter}</text>
+  <text x="380" y="398" text-anchor="middle" fill="#8b5cf6" font-family="Arial, sans-serif" font-size="8">Bloom distribution</text>
+  <text x="380" y="410" text-anchor="middle" fill="#7c3aed" font-family="Arial, sans-serif" font-size="7">(emit: plan_step)</text>
+
+  <!-- Arrow -->
+  <line x1="455" y1="380" x2="475" y2="380" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#dfArr)"/>
+
+  <!-- HITL 1 checkpoint -->
+  <rect x="480" y="340" width="130" height="80" rx="8" fill="#451a03" stroke="#f59e0b" stroke-width="2"/>
+  <text x="545" y="357" text-anchor="middle" fill="#fbbf24" font-family="Arial, sans-serif" font-size="10" font-weight="bold">ø HITL 1</text>
+  <text x="545" y="372" text-anchor="middle" fill="#fde68a" font-family="Arial, sans-serif" font-size="8">Emit: hitl_checkpoint</text>
+  <text x="545" y="385" text-anchor="middle" fill="#fcd34d" font-family="Arial, sans-serif" font-size="8">WS paused, waiting</text>
+  <text x="545" y="398" text-anchor="middle" fill="#f59e0b" font-family="Arial, sans-serif" font-size="8">Redis pub/sub</text>
+  <text x="545" y="410" text-anchor="middle" fill="#d97706" font-family="Arial, sans-serif" font-size="7">teacher action</text>
+
+  <!-- Arrow -->
+  <line x1="610" y1="380" x2="630" y2="380" stroke="#22c55e" stroke-width="2" marker-end="url(#dfArrGreen)"/>
+  <text x="620" y="372" text-anchor="middle" fill="#4ade80" font-family="Arial, sans-serif" font-size="7">approve</text>
+
+  <!-- Step 3: Builder -->
+  <rect x="635" y="340" width="150" height="80" rx="8" fill="#1e3a8a" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="710" y="357" text-anchor="middle" fill="#bfdbfe" font-family="Arial, sans-serif" font-size="10" font-weight="bold">b Builder</text>
+  <text x="710" y="372" text-anchor="middle" fill="#93c5fd" font-family="Arial, sans-serif" font-size="8">slot ’ question</text>
+  <text x="710" y="385" text-anchor="middle" fill="#60a5fa" font-family="Arial, sans-serif" font-size="8">MCQ 4 opts / Essay</text>
+  <text x="710" y="398" text-anchor="middle" fill="#3b82f6" font-family="Arial, sans-serif" font-size="8">source_evidence[]</text>
+  <text x="710" y="410" text-anchor="middle" fill="#2563eb" font-family="Arial, sans-serif" font-size="7">(emit: question)</text>
+
+  <!-- Arrow -->
+  <line x1="785" y1="380" x2="805" y2="380" stroke="#2563eb" stroke-width="1.5" marker-end="url(#dfArr)"/>
+
+  <!-- Step 4: Validator -->
+  <rect x="810" y="340" width="120" height="80" rx="8" fill="#450a0a" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="870" y="357" text-anchor="middle" fill="#fecaca" font-family="Arial, sans-serif" font-size="10" font-weight="bold">c Validator</text>
+  <text x="870" y="372" text-anchor="middle" fill="#fca5a5" font-family="Arial, sans-serif" font-size="8">Check: scope,</text>
+  <text x="870" y="385" text-anchor="middle" fill="#f87171" font-family="Arial, sans-serif" font-size="8">bloom, logic</text>
+  <text x="870" y="398" text-anchor="middle" fill="#ef4444" font-family="Arial, sans-serif" font-size="8">issues[]</text>
+  <text x="870" y="410" text-anchor="middle" fill="#dc2626" font-family="Arial, sans-serif" font-size="7">retry max 3×</text>
+
+  <!-- Arrow down to HITL2 -->
+  <line x1="870" y1="420" x2="870" y2="445" stroke="#dc2626" stroke-width="1.5" marker-end="url(#dfArr)"/>
+
+  <!-- ========== PHASE 4: HITL REVIEW ========== -->
+  <!-- Phase 4 label -->
+  <rect x="20" y="445" width="920" height="70" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <rect x="20" y="445" width="8" height="70" rx="4" fill="#f59e0b"/>
+  <text x="90" y="465" text-anchor="middle" fill="#fde68a" font-family="Arial, sans-serif" font-size="10" font-weight="bold">GIAI O N 4</text>
+  <text x="90" y="482" text-anchor="middle" fill="#f59e0b" font-family="Arial, sans-serif" font-size="9">HITL Review</text>
+
+  <!-- HITL 2 -->
+  <rect x="130" y="453" width="200" height="54" rx="8" fill="#451a03" stroke="#f59e0b" stroke-width="2"/>
+  <text x="230" y="469" text-anchor="middle" fill="#fbbf24" font-family="Arial, sans-serif" font-size="10" font-weight="bold">ø HITL 2  Full Review</text>
+  <text x="230" y="484" text-anchor="middle" fill="#fde68a" font-family="Arial, sans-serif" font-size="8">Emit: hitl_checkpoint #2  validation result</text>
+  <text x="230" y="497" text-anchor="middle" fill="#fcd34d" font-family="Arial, sans-serif" font-size="8">Teacher: direct edit / feedback / approve</text>
+
+  <!-- HITL 2 actions -->
+  <rect x="345" y="453" width="80" height="28" rx="4" fill="#15803d" stroke="#22c55e" stroke-width="1"/>
+  <text x="385" y="467" text-anchor="middle" fill="#bbf7d0" font-family="Arial, sans-serif" font-size="8"> Publish</text>
+
+  <rect x="430" y="453" width="80" height="28" rx="4" fill="#1e40af" stroke="#60a5fa" stroke-width="1"/>
+  <text x="470" y="467" text-anchor="middle" fill="#bfdbfe" font-family="Arial, sans-serif" font-size="8">» Regen</text>
+
+  <!-- HITL 3 -->
+  <rect x="525" y="453" width="200" height="54" rx="8" fill="#451a03" stroke="#f59e0b" stroke-width="2"/>
+  <text x="625" y="469" text-anchor="middle" fill="#fbbf24" font-family="Arial, sans-serif" font-size="10" font-weight="bold">ø HITL 3  Export Preview</text>
+  <text x="625" y="484" text-anchor="middle" fill="#fde68a" font-family="Arial, sans-serif" font-size="8">Emit: hitl_checkpoint #3  cost_report,</text>
+  <text x="625" y="497" text-anchor="middle" fill="#fcd34d" font-family="Arial, sans-serif" font-size="8">questions[], blueprint, distribution_summary</text>
+
+  <!-- Teacher action -->
+  <rect x="740" y="453" width="60" height="28" rx="4" fill="#7c3aed" stroke="#a78bfa" stroke-width="1"/>
+  <text x="770" y="467" text-anchor="middle" fill="#e9d5ff" font-family="Arial, sans-serif" font-size="8">PDF</text>
+
+  <rect x="805" y="453" width="60" height="28" rx="4" fill="#7c3aed" stroke="#a78bfa" stroke-width="1"/>
+  <text x="835" y="467" text-anchor="middle" fill="#e9d5ff" font-family="Arial, sans-serif" font-size="8">DOCX</text>
+
+  <!-- Arrow down to output -->
+  <line x1="480" y1="507" x2="480" y2="530" stroke="#7c3aed" stroke-width="2" marker-end="url(#dfArrPurple)"/>
+
+  <!-- ========== PHASE 5: OUTPUT ========== -->
+  <!-- Phase 5 label -->
+  <rect x="20" y="530" width="920" height="72" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <rect x="20" y="530" width="8" height="72" rx="4" fill="#059669"/>
+  <text x="90" y="550" text-anchor="middle" fill="#bbf7d0" font-family="Arial, sans-serif" font-size="10" font-weight="bold">GIAI O N 5</text>
+  <text x="90" y="567" text-anchor="middle" fill="#059669" font-family="Arial, sans-serif" font-size="9">Output &amp;</text>
+  <text x="90" y="580" text-anchor="middle" fill="#059669" font-family="Arial, sans-serif" font-size="9">Persistence</text>
+
+  <!-- Output questions -->
+  <rect x="130" y="538" width="240" height="58" rx="8" fill="#022c22" stroke="#4ade80" stroke-width="2"/>
+  <rect x="130" y="538" width="240" height="26" rx="8" fill="#15803d"/>
+  <rect x="130" y="556" width="240" height="8" fill="#15803d"/>
+  <text x="250" y="556" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="11" font-weight="bold">=Ä Final questions[]</text>
+  <text x="250" y="574" text-anchor="middle" fill="#86efac" font-family="Arial, sans-serif" font-size="8">{stem, options, correct,</text>
+  <text x="250" y="586" text-anchor="middle" fill="#4ade80" font-family="Arial, sans-serif" font-size="8">bloom, chapter, source_evidence}</text>
+
+  <!-- Arrow -->
+  <line x1="370" y1="567" x2="390" y2="567" stroke="#4ade80" stroke-width="1.5" marker-end="url(#dfArrGreen)"/>
+
+  <!-- PostgreSQL -->
+  <rect x="395" y="538" width="130" height="58" rx="8" fill="#0c4a6e" stroke="#0891b2" stroke-width="1.5"/>
+  <rect x="395" y="538" width="130" height="24" rx="8" fill="#0891b2"/>
+  <rect x="395" y="554" width="130" height="8" fill="#0891b2"/>
+  <text x="460" y="554" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="10" font-weight="bold">PostgreSQL</text>
+  <text x="460" y="574" text-anchor="middle" fill="#67e8f9" font-family="Arial, sans-serif" font-size="8">Save exam</text>
+  <text x="460" y="586" text-anchor="middle" fill="#22d3ee" font-family="Arial, sans-serif" font-size="8">Save version history</text>
+
+  <!-- Arrow -->
+  <line x1="525" y1="567" x2="545" y2="567" stroke="#0891b2" stroke-width="1.5" marker-end="url(#dfArr)"/>
+
+  <!-- Export -->
+  <rect x="550" y="538" width="130" height="58" rx="8" fill="#2e1065" stroke="#7c3aed" stroke-width="1.5"/>
+  <rect x="550" y="538" width="130" height="24" rx="8" fill="#7c3aed"/>
+  <rect x="550" y="554" width="130" height="8" fill="#7c3aed"/>
+  <text x="615" y="554" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="10" font-weight="bold">Export</text>
+  <text x="615" y="574" text-anchor="middle" fill="#ddd6fe" font-family="Arial, sans-serif" font-size="8">PDF / DOCX</text>
+  <text x="615" y="586" text-anchor="middle" fill="#c4b5fd" font-family="Arial, sans-serif" font-size="8">include_answers=</text>
+
+  <!-- Arrow -->
+  <line x1="680" y1="567" x2="700" y2="567" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#dfArrPurple)"/>
+
+  <!-- Teacher Downloads -->
+  <rect x="705" y="538" width="160" height="58" rx="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <text x="785" y="556" text-anchor="middle" fill="#e2e8f0" font-family="Arial, sans-serif" font-size="11" font-weight="bold">=i<ë Gi£ng viên</text>
+  <text x="785" y="571" text-anchor="middle" fill="#94a3b8" font-family="Arial, sans-serif" font-size="8">T£i Á PDF / DOCX</text>
+  <text x="785" y="584" text-anchor="middle" fill="#64748b" font-family="Arial, sans-serif" font-size="8">Sµn sàng in &amp; phát Á</text>
+
+  <!-- ========== WEB SOCKET SIDEBAR ========== -->
+  <rect x="20" y="160" width="95" height="60" rx="8" fill="#022c22" stroke="#4ade80" stroke-width="1.5"/>
+  <text x="67" y="176" text-anchor="middle" fill="#4ade80" font-family="Arial, sans-serif" font-size="9" font-weight="bold">WS Events</text>
+  <text x="67" y="190" text-anchor="middle" fill="#86efac" font-family="Arial, sans-serif" font-size="7">plan_step</text>
+  <text x="67" y="201" text-anchor="middle" fill="#4ade80" font-family="Arial, sans-serif" font-size="7">question_generated</text>
+  <text x="67" y="212" text-anchor="middle" fill="#22c55e" font-family="Arial, sans-serif" font-size="7">validation_result</text>
+
+  <!-- Arrow: WS events ’ steps -->
+  <path d="M 115 190 Q 130 190 130 200 Q 130 330 130 340" fill="none" stroke="#4ade80" stroke-width="1" stroke-dasharray="3,2"/>
+  <path d="M 115 190 Q 130 190 130 200 Q 130 380 130 380" fill="none" stroke="#4ade80" stroke-width="1" stroke-dasharray="3,2"/>
+  <path d="M 115 190 Q 130 190 130 200 Q 130 380 130 420" fill="none" stroke="#4ade80" stroke-width="1" stroke-dasharray="3,2"/>
+
+  <!-- ========== LONG-TERM MEMORY ========== -->
+  <rect x="20" y="235" width="95" height="75" rx="6" fill="#0c4a6e" stroke="#0891b2" stroke-width="1"/>
+  <text x="67" y="251" text-anchor="middle" fill="#67e8f9" font-family="Arial, sans-serif" font-size="8" font-weight="bold">Memory</text>
+  <text x="67" y="264" text-anchor="middle" fill="#22d3ee" font-family="Arial, sans-serif" font-size="7">Long-term</text>
+  <text x="67" y="275" text-anchor="middle" fill="#06b6d4" font-family="Arial, sans-serif" font-size="7">(PostgreSQL)</text>
+  <text x="67" y="287" text-anchor="middle" fill="#0891b2" font-family="Arial, sans-serif" font-size="7">Teacher prefs:</text>
+  <text x="67" y="298" text-anchor="middle" fill="#0891b2" font-family="Arial, sans-serif" font-size="7">Bloom dist</text>
+  <text x="67" y="309" text-anchor="middle" fill="#0c4a6e" font-family="Arial, sans-serif" font-size="7">Exam types</text>
+
+  <!-- ========== CELERY ========== -->
+  <rect x="130" y="158" width="160" height="42" rx="6" fill="#365314" stroke="#65a30d" stroke-width="1"/>
+  <text x="210" y="173" text-anchor="middle" fill="#a3e635" font-family="Arial, sans-serif" font-size="9" font-weight="bold">Celery Worker</text>
+  <text x="210" y="187" text-anchor="middle" fill="#84cc16" font-family="Arial, sans-serif" font-size="8">generate_exam_task.delay()</text>
+  <text x="210" y="199" text-anchor="middle" fill="#65a30d" font-family="Arial, sans-serif" font-size="7">Redis broker  async</text>
+
+  <!-- Arrow: Celery ’ step 1 -->
+  <path d="M 210 200 Q 210 220 210 330 Q 210 340 210 340" fill="none" stroke="#65a30d" stroke-width="1" stroke-dasharray="3,2"/>
+
+  <!-- Footer -->
+  <text x="480" y="608" text-anchor="middle" fill="#475569" font-family="Arial, sans-serif" font-size="9">
+    ExamAI Data Flow: PDF Upload ’ Chunking ’ Embedding ’ Agent Pipeline (HITL) ’ Export PDF/DOCX
+  </text>
+</svg>

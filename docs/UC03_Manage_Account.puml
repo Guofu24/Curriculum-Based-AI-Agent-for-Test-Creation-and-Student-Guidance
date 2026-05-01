@@ -1,0 +1,49 @@
+@startuml UC03_Manage_Account
+!theme plain
+title UC03 - Manage Account
+
+actor "Teacher" as USER
+participant "Frontend" as FE
+participant "FastAPI exams_router" as ROUTE_EXAM
+participant "FastAPI auth_router" as ROUTE_AUTH
+participant "AuthService" as SVC
+database "PostgreSQL" as DB
+
+alt View account information
+  USER -> FE : Open Settings page
+  FE -> ROUTE_EXAM : GET /api/v1/auth/me
+  ROUTE_EXAM -> DB : SELECT users WHERE id (from JWT)
+  DB -> ROUTE_EXAM : UserResponse
+  ROUTE_EXAM -> FE : {full_name, email, role, created_at}
+  FE -> USER : Display profile information
+end
+
+alt Change UI theme
+  USER -> FE : Toggle light/dark mode
+  FE -> FE : Update localStorage theme preference
+  FE -> USER : Apply theme immediately (no API call)
+end
+
+alt Logout (confirm)
+  USER -> FE : Click Logout
+  FE -> USER : Show confirmation dialog
+  USER -> FE : Confirm logout
+  FE -> ROUTE_AUTH : POST /api/v1/auth/logout
+  alt Logout API succeeds
+    ROUTE_AUTH -> DB : UPDATE refresh_tokens SET revoked=true (for current user)
+    DB -> ROUTE_AUTH : OK
+    ROUTE_AUTH -> FE : 200 OK
+  else Logout API fails
+    FE -> FE : Client still clears local session tokens
+  end
+  FE -> FE : Clear access_token + refresh_token from localStorage
+  FE -> USER : Redirect to home page
+end
+
+alt Logout (cancel)
+  USER -> FE : Click Logout
+  FE -> USER : Show confirmation dialog
+  USER -> FE : Cancel
+  FE -> USER : Dismiss dialog, session continues
+end
+@enduml

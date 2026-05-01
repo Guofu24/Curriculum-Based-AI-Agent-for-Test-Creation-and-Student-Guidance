@@ -1,0 +1,88 @@
+@startuml UC09_Manage_Exams
+!theme plain
+title UC09 - Manage Exams
+
+actor "Teacher" as USER
+participant "Frontend" as FE
+participant "FastAPI exams_router" as ROUTE
+participant "ExamService" as SVC
+participant "ExamExporter" as EXP
+database "PostgreSQL" as DB
+
+alt View exam list
+  USER -> FE : Open Exams page (or History tab in dashboard)
+  FE -> ROUTE : GET /api/v1/exams/
+  ROUTE -> DB : SELECT exams WHERE user_id\nORDER BY updated_at DESC
+  DB -> ROUTE : ExamListItem[]
+  alt No exams exist
+    DB -> FE : Empty list
+    FE -> USER : Display empty-state "No exams yet"
+  end
+  FE -> USER : Display exam cards with status badges
+end
+
+alt Filter exams
+  USER -> FE : Select filter: All / Draft / Published / Regenerating
+  FE -> ROUTE : GET /api/v1/exams/?status={status}
+  ROUTE -> DB : SELECT exams WHERE user_id AND status=?
+  DB -> FE : Filtered list
+  FE -> USER : Update displayed list
+end
+
+alt Open exam detail
+  USER -> FE : Click exam card
+  FE -> USER : Navigate to /dashboard/exams/{id}
+  note right : Continues into UC08\n(Review and Edit Generated Exams)
+end
+
+alt Publish exam
+  USER -> FE : Click Publish on exam card or detail page
+  FE -> USER : Show confirmation dialog
+  USER -> FE : Confirm
+  FE -> ROUTE : POST /api/v1/exams/{id}/publish
+  alt Publish fails
+    ROUTE -> FE : 500 Error
+    FE -> USER : Error "Publish failed" + status unchanged
+  end
+  ROUTE -> DB : UPDATE exams SET status=published
+  ROUTE -> FE : 200 OK
+  FE -> USER : Update status badge to "Published"
+end
+
+alt Export exam
+  USER -> FE : Click Export -> PDF or DOCX
+  FE -> ROUTE : GET /api/v1/exams/{id}/export/pdf?include_answers=true
+  alt Export fails
+    ROUTE -> FE : 500 Error
+    FE -> USER : Error "Export failed, no file produced"
+  end
+  ROUTE -> DB : SELECT exams.questions WHERE id
+  DB -> EXP : Question list
+  EXP -> ROUTE : ExamExporter._render_html()
+  ROUTE -> ROUTE : weasyprint HTML -> binary (max 10MB)
+  ROUTE -> FE : application/pdf
+  FE -> USER : Download exam_{id}.pdf
+
+  alt Export DOCX
+    USER -> FE : Click Export -> DOCX
+    FE -> ROUTE : GET /api/v1/exams/{id}/export/docx
+    ROUTE -> EXP : python-docx builder
+    ROUTE -> FE : application/vnd.openxmlformats-officedocument.wordprocessingml.document
+    FE -> USER : Download exam_{id}.docx
+  end
+end
+
+alt Delete exam
+  USER -> FE : Click Delete on exam card
+  FE -> USER : Show confirmation dialog
+  USER -> FE : Confirm
+  FE -> ROUTE : DELETE /api/v1/exams/{id}
+  alt Delete fails
+    ROUTE -> FE : 500 Error
+    FE -> USER : Error "Delete failed" + exam remains
+  end
+  ROUTE -> DB : DELETE exams WHERE id
+  ROUTE -> FE : 204 No Content
+  FE -> USER : Remove from list + show success
+end
+@enduml
