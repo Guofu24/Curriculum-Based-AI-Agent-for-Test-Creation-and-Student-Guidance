@@ -118,6 +118,9 @@ backend/uploads/
 backend/temp/
 backend/evals/output/
 backend/.langfuse/
+backend/.gemini_keys
+test_openai_key.py
+*.env
 
 # Generated docs and local scratch workspaces
 docs/File markdown/
@@ -147,3 +150,5 @@ compose.override.yml
 *.temp
 *.orig
 *.rej
+
+kaggle/marker_server.ipynb

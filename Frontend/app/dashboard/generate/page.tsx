@@ -376,28 +376,99 @@ export default function GeneratePage() {
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      {chapters.map((chapter) => (
-                        <label
-                          key={chapter.id}
-                          className={cn(
-                            "flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors",
-                            config.scope.includes(chapter.title)
-                              ? "border-primary bg-primary/5"
-                              : "hover:bg-muted/50"
-                          )}
-                        >
-                          <Checkbox
-                            checked={config.scope.includes(chapter.title)}
-                            onCheckedChange={() => toggleChapter(chapter.title)}
-                          />
-                          <span className="flex-1 truncate">{chapter.title}</span>
-                          {chapter.chunk_count !== undefined && (
-                            <Badge variant="secondary">
-                              {chapter.chunk_count} chunks
-                            </Badge>
-                          )}
-                        </label>
-                      ))}
+                      {chapters.map((chapter) => {
+                        const sections = curriculum.filter(
+                          n => n.level === 2 && n.parent_id === chapter.id
+                        )
+                        const isChapterSelected = config.scope.includes(chapter.title)
+                        const selectedSections = sections.filter(s =>
+                          config.scope.includes(s.title)
+                        )
+                        const isExpanded = isChapterSelected || selectedSections.length > 0
+
+                        return (
+                          <div key={chapter.id} className="rounded-lg border overflow-hidden">
+                            {/* Chapter header */}
+                            <label
+                              className={cn(
+                                "flex items-center gap-3 p-3 cursor-pointer transition-colors",
+                                isChapterSelected
+                                  ? "border-primary bg-primary/5"
+                                  : "hover:bg-muted/50"
+                              )}
+                            >
+                              <Checkbox
+                                checked={isChapterSelected}
+                                onCheckedChange={() => {
+                                  if (isChapterSelected) {
+                                    // Deselect chapter + all its sections
+                                    const sectionTitles = sections.map(s => s.title)
+                                    setConfig(prev => ({
+                                      ...prev,
+                                      scope: prev.scope.filter(
+                                        t => t !== chapter.title && !sectionTitles.includes(t)
+                                      ),
+                                    }))
+                                  } else {
+                                    toggleChapter(chapter.title)
+                                  }
+                                }}
+                              />
+                              <BookOpen className="h-4 w-4 text-primary shrink-0" />
+                              <span className="flex-1 font-medium truncate">
+                                {chapter.title}
+                              </span>
+                              {sections.length > 0 && (
+                                <Badge variant="outline" className="text-xs">
+                                  {sections.length} mục
+                                </Badge>
+                              )}
+                              {chapter.chunk_count !== undefined && (
+                                <Badge variant="secondary">
+                                  {chapter.chunk_count} chunks
+                                </Badge>
+                              )}
+                            </label>
+
+                            {/* Sections dropdown — visible when chapter selected */}
+                            {isExpanded && sections.length > 0 && (
+                              <div className="border-t bg-muted/20 px-3 py-2 space-y-1">
+                                <p className="text-xs text-muted-foreground mb-1 pl-7">
+                                  Chọn mục cụ thể (không chọn = dùng cả chương):
+                                </p>
+                                {sections.map((sec) => {
+                                  const isSecSelected = config.scope.includes(sec.title)
+                                  return (
+                                    <label
+                                      key={sec.id}
+                                      className={cn(
+                                        "flex items-center gap-2 p-2 pl-7 rounded cursor-pointer transition-colors text-sm",
+                                        isSecSelected
+                                          ? "bg-primary/10 text-foreground"
+                                          : "hover:bg-muted/50 text-muted-foreground"
+                                      )}
+                                    >
+                                      <Checkbox
+                                        checked={isSecSelected}
+                                        onCheckedChange={() => {
+                                          setConfig(prev => {
+                                            const newScope = prev.scope.includes(sec.title)
+                                              ? prev.scope.filter(t => t !== sec.title)
+                                              : [...prev.scope, sec.title]
+                                            return { ...prev, scope: newScope }
+                                          })
+                                        }}
+                                      />
+                                      <FileText className="h-3 w-3 shrink-0" />
+                                      <span className="flex-1 truncate">{sec.title}</span>
+                                    </label>
+                                  )
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
                 </CardContent>

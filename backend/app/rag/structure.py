@@ -558,7 +558,8 @@ def flatten_heading_tree(tree: dict) -> list[dict]:
     Flatten heading tree into a list of all heading units (chapters, sections, subsections)
     for scope selection.
 
-    Each entry has: id, title, level (1=chapter, 2=section, 3=subsection), chapter_id, path
+    Each entry has: id, title, level (1=chapter, 2=section, 3=subsection),
+    chapter_id, parent_id, path
     """
     result: list[dict] = []
     for chapter in tree.get("chapters", []):
@@ -567,6 +568,7 @@ def flatten_heading_tree(tree: dict) -> list[dict]:
             "title": chapter["title"],
             "level": 1,
             "chapter_id": chapter["chapter_id"],
+            "parent_id": None,
             "path": chapter["title"],
         })
         for section in chapter.get("sections", []):
@@ -575,6 +577,7 @@ def flatten_heading_tree(tree: dict) -> list[dict]:
                 "title": section["title"],
                 "level": 2,
                 "chapter_id": chapter["chapter_id"],
+                "parent_id": chapter["chapter_id"],
                 "path": f"{chapter['title']} > {section['title']}",
             })
             for sub in section.get("subsections", []):
@@ -583,6 +586,7 @@ def flatten_heading_tree(tree: dict) -> list[dict]:
                     "title": sub["title"],
                     "level": 3,
                     "chapter_id": chapter["chapter_id"],
+                    "parent_id": section["section_id"],
                     "path": f"{chapter['title']} > {section['title']} > {sub['title']}",
                 })
     return result

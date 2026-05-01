@@ -1,0 +1,57 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{tabularx,array,booktabs}
+\geometry{margin=2.5cm}
+
+\begin{document}
+
+\section{Document Processing Pipeline -- From Upload to Vector Indexing}
+\label{sec:document_processing_pipeline}
+
+The document processing pipeline transforms raw teaching materials (PDF, DOCX, PPTX) into structured, vector-indexed knowledge chunks ready for RAG-based exam generation. The pipeline consists of seven sequential stages:
+
+\bigskip
+
+\textbf{Step 1: Upload \& Persistence.} The frontend sends the file via XHR (enabling upload progress tracking) and opens a WebSocket to \texttt{/ws/document/\{id\}}. The backend endpoint \texttt{POST /api/v1/documents/upload} validates file type and size, uploads to MinIO/S3, inserts a \texttt{Document} record in PostgreSQL with \texttt{processing\_status = "pending"}, broadcasts \texttt{step = "queued"} via WebSocket, and enqueues a FastAPI \texttt{BackgroundTasks} task. HTTP response is returned immediately.
+
+\bigskip
+
+\textbf{Step 2: Download.} The background worker re-fetches the file from object storage into \texttt{/tmp}.
+
+\bigskip
+
+\textbf{Step 3: Parse.} A 3-tier fallback strategy converts the file to Markdown. Tier 1 (Gemini API): the PDF is split into 10-page chunks; a \texttt{ThreadPoolExecutor} distributes chunks across API keys (60/40 primary/fallback split), each calling \texttt{files.upload()} $\rightarrow$ poll $\rightarrow$ \texttt{generate\_content()} to produce Markdown. Tier 2 (Marker): chunks that fail Gemini after 3 retries are sent to the Qwen Vision Marker server. Tier 3 (PyMuPDF): font-size heuristic extraction as final fallback. DOCX uses \texttt{python-docx}; PPTX uses \texttt{python-pptx}.
+
+\bigskip
+
+\textbf{Step 4: Clean.} \texttt{cleaner.py} applies 6 rules: remove noise (page numbers, headers, watermarks), promote ALL-CAPS / Roman-numeral / letter-prefix lines to level-1 headings, fix heading level jumps (\texttt{###} after \texttt{#}), convert bold subheadings to \texttt{####}, remove duplicate consecutive headings, normalize spacing.
+
+\bigskip
+
+\textbf{Step 5: Structure Detection.} \texttt{detect\_heading\_tree\_llm()} in \texttt{structure.py} sends all headings to the LLM with a prompt to filter non-academic headings (TOC, answers), merge exercise sections into chapters, and return JSON with \texttt{chapter\_id} and \texttt{section\_id}. The heuristic fallback \texttt{detect\_heading\_tree()} uses \texttt{\#} parsing and regex for non-standard formats. The result is stored as JSONB in \texttt{heading\_tree}.
+
+\bigskip
+
+\textbf{Step 6: Chunk.} \texttt{chunker.py} attempts \texttt{SemanticSplitterNodeParser} (LlamaIndex) first, falls back to \texttt{\_simple\_chunk}: accumulate lines by heading level, flushing at \texttt{\#} (new chapter) and \texttt{\#\#} (new section) with 200-character overlap. Each chunk receives \texttt{chunk\_id}, canonical \texttt{chapter\_id}, \texttt{section\_id}, \texttt{content\_type} (\texttt{text}/\texttt{formula}/\texttt{image\_description}), and \texttt{page\_number}.
+
+\bigskip
+
+\textbf{Step 7: Embed \& Index.} Before embedding, Redis is checked for a cached vector (\texttt{embed:\{doc\_id\}:\{chunk\_id\}}). Uncached chunks are encoded by \texttt{BAAI/bge-m3} (sentence-transformers, 1024-dim) in batches of 32 and stored in Redis with 7-day TTL. Vectors are upserted to Pinecone in batches of 100 (3 retries) under namespace \texttt{doc\_\{uuid\_stripped\_dashes\}}, with metadata (\texttt{chapter}, \texttt{section\_id}, \texttt{content\_type}, \texttt{latex\_repr}, \texttt{page\_number}). On success: \texttt{status = "indexed"}. On embedding failure: \texttt{status = "processed"} (browsable, not vector-searchable).
+
+\bigskip
+
+\textbf{Real-time feedback.} Each step broadcasts a WebSocket event (\texttt{step}, \texttt{message}, \texttt{percent}) to the frontend, rendering a live progress bar. If the WebSocket closes before a terminal event, the frontend falls back to HTTP polling of \texttt{GET /documents/\{id\}/status}.
+
+\bigskip
+
+\textbf{Graceful degradation.} All failures are contained at the stage level: parse fails $\rightarrow$ Marker or PyMuPDF; LLM heading tree fails $\rightarrow$ heuristic; Pinecone down $\rightarrow$ retry 3x then \texttt{processed} status.
+
+\bigskip
+
+\textbf{Reprocessing.} Three operations are available: \texttt{POST /reprocess} (full re-run), \texttt{POST /rescan-structure} (heading tree only), and \texttt{PATCH /curriculum-tree} (manual edit via frontend).
+
+\end{document}
