@@ -152,3 +152,4 @@ compose.override.yml
 *.rej
 
 kaggle/marker_server.ipynb
+gemini.txt
