@@ -1,0 +1,68 @@
+@startuml UC06_Generate_Exams
+!theme plain
+title UC06 - Generate Exams
+
+actor "Teacher" as USER
+participant "Frontend" as FE
+participant "WS Client" as WS
+participant "FastAPI generate_router" as ROUTE
+participant "FastAPI exams_router" as ROUTE_EXAM
+participant "OrchestratorAgent" as ORCH
+participant "ConnectionManager" as MGR
+database "PostgreSQL" as DB
+database "Redis" as REDIS
+
+USER -> FE : Open Generate Exam page
+FE -> ROUTE_EXAM : GET /api/v1/documents/
+ROUTE_EXAM -> DB : SELECT documents WHERE user_id AND status=completed
+DB -> ROUTE_EXAM : List of processed documents
+alt No processed documents
+  DB -> FE : Empty list
+  FE -> USER : Display "No processed documents available.\nPlease upload and process a document first."
+  note right: UC04 Manage Teaching Documents\nmust be completed first
+end
+FE -> USER : Display eligible documents
+
+USER -> FE : Select a document
+FE -> ROUTE_EXAM : GET /api/v1/documents/{id}/curriculum-tree
+ROUTE_EXAM -> DB : SELECT documents WHERE id
+DB -> ROUTE_EXAM : heading_tree
+ROUTE_EXAM -> FE : CurriculumNode[] (flattened)
+FE -> USER : Load curriculum tree -> prepare chapter scope
+
+USER -> FE : Configure exam:\n- Title\n- Scope (select chapters)\n- Exam type (mixed/mcq/essay)\n- Question counts\n- Bloom distribution\n- Strict-scope toggle\n- Additional instructions
+FE -> USER : Validate inputs?
+alt No scope selected
+  FE -> USER : Error "Please select at least one chapter"
+end
+alt Bloom total != 100%
+  FE -> USER : Error "Bloom distribution must total 100%"
+end
+alt No question count
+  FE -> USER : Error "At least one question is required"
+end
+
+USER -> FE : Click Generate
+FE -> ROUTE : POST /api/v1/generate/exam
+ROUTE -> ORCH : validate bloom sum = 100%
+ROUTE -> REDIS : rate_limit_check (max 10/day/user)
+alt Rate limit exceeded
+  ROUTE -> FE : 429 "Generation limit exceeded"
+  FE -> USER : Display error
+end
+ROUTE -> DB : INSERT exams (status=draft, exam_config JSONB)
+alt Request fails
+  ROUTE -> FE : 500 Error
+  FE -> USER : Display error "Generation failed"
+end
+ROUTE -> FE : {exam_id, websocket_url, scope_warning:null or warning}
+FE -> USER : Redirect to live generation screen
+FE -> WS : new WebSocket(ws_url)
+WS -> MGR : connect(exam_id)
+MGR -> REDIS : LRANGE ws_events:{exam_id} (replay missed events)
+MGR -> WS : replay
+WS -> USER : Catches up on existing events
+
+note over USER : UC07 Review Blueprint begins\n(HITL Checkpoint 1)
+note over USER : UC08 Review and Edit begins\n(HITL Checkpoint 2)
+@enduml

@@ -1,0 +1,285 @@
+@startuml
+title ExamAI - Entity Class Diagram (code-derived)
+
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+hide circle
+
+package "Persistent Entities" {
+  enum UserRole {
+    STUDENT
+    TEACHER
+    ADMIN
+  }
+
+  enum DocumentProcessingStatus {
+    PENDING
+    PROCESSING
+    COMPLETED
+    FAILED
+  }
+
+  enum ExamStatusEnum {
+    DRAFT
+    GENERATING
+    HITL_PENDING_1
+    HITL_PENDING_2
+    HITL_PENDING_3
+    COMPLETED
+    FAILED
+    CANCELLED
+    PUBLISHED
+    REGENERATING
+    READY_FOR_REVIEW
+  }
+
+  enum SignalType {
+    BLOOM_MISMATCH
+    OUT_OF_SCOPE
+    DUPLICATE
+    QUALITY_LOW
+    ANSWER_INCORRECT
+    VALIDATION_WARNING
+    GENERATION_ERROR
+    PUBLISH
+    EDIT_APPLIED
+  }
+
+  enum Severity {
+    INFO
+    WARNING
+    ERROR
+    CRITICAL
+  }
+
+  enum ReviewStatus {
+    PENDING
+    REVIEWED
+    ACCEPTED
+    REJECTED
+    CORRECTED
+  }
+
+  class User <<Entity>> {
+    +id : UUID
+    +email : string
+    +password_hash : string
+    +full_name : string?
+    +role : UserRole
+    +created_at : datetime
+    +updated_at : datetime
+  }
+
+  class RefreshToken <<Entity>> {
+    +id : UUID
+    +user_id : UUID
+    +token_hash : string
+    +expires_at : datetime
+    +revoked : boolean
+    +created_at : datetime
+  }
+
+  class TeacherPreference <<Entity>> {
+    +user_id : UUID
+    +preferred_bloom_distribution : JSONB?
+    +preferred_exam_types : JSONB?
+    +subject_focus : string?
+    +style_notes : text?
+    +updated_at : datetime
+  }
+
+  class Document <<Entity>> {
+    +id : UUID
+    +user_id : UUID
+    +course_id : UUID?
+    +file_size : int?
+    +original_filename : string
+    +file_type : string
+    +s3_key : string
+    +processing_status : DocumentProcessingStatus
+    +parse_error_message : string?
+    +heading_tree : JSONB?
+    +total_chapters : int?
+    +total_pages_or_slides : int?
+    +total_chunks : int?
+    +uploaded_at : datetime
+  }
+
+  class Exam <<Entity>> {
+    +id : UUID
+    +user_id : UUID
+    +document_id : UUID?
+    +title : string
+    +scope : JSONB?
+    +exam_config : JSONB?
+    +questions : JSONB?
+    +status : ExamStatusEnum
+    +cost_report : JSONB?
+    +total_tokens : int?
+    +total_cost_usd : decimal?
+    +blueprint : JSONB?
+    +checkpoint_state : JSONB?
+    +generation_metadata : JSONB?
+    +quality_metrics : JSONB?
+    +created_at : datetime
+    +updated_at : datetime
+    --
+    +exam_type() : string
+    +difficulty() : string
+    +chapters() : list<string>
+    +total_questions() : int
+    +strict_scope_flag() : boolean
+    +quality_score() : float?
+    +version_count() : int
+    +verifier_pass_rate() : float?
+    +evidence_coverage_rate() : float?
+    +warning_count() : int
+    +regenerate_count() : int
+    +human_edit_count() : int
+    +instructions() : string?
+    +output_language() : string
+  }
+
+  class ExamHistory <<Entity>> {
+    +id : UUID
+    +exam_id : UUID
+    +snapshot : JSONB?
+    +change_type : string
+    +change_description : text?
+    +created_at : datetime
+  }
+
+  class FeedbackEvent <<Entity>> {
+    +id : UUID
+    +exam_id : UUID
+    +exam_version_id : UUID?
+    +user_id : UUID
+    +question_id : string?
+    +signal_type : SignalType
+    +severity : Severity
+    +workflow_stage : string?
+    +event_source : string?
+    +source_type : string?
+    +source_ref : string?
+    +review_status : ReviewStatus?
+    +reviewed_by_human : boolean
+    +error_categories : JSONB?
+    +before_snapshot_ref : string?
+    +after_snapshot_ref : string?
+    +payload : JSONB?
+    +description : text?
+    +created_at : datetime
+    +updated_at : datetime
+    --
+    +is_resolved() : boolean
+  }
+}
+
+package "Embedded JSON Structures" {
+  class ExamConfig <<Embedded JSON>> {
+    +exam_type : string
+    +difficulty : string?
+    +strict_scope_flag : boolean
+    +instructions : string?
+    +output_language : string
+    +mcq_count : int?
+    +essay_count : int?
+    +bloom_distribution : map<string,int>?
+    +regenerate_count : int?
+  }
+
+  class BlueprintSlot <<Embedded JSON>> {
+    +question_id : string
+    +question_type : string?
+    +bloom_level : string?
+    +chapter : string?
+    +scope_tags : list<string>?
+    +topic_hint : string?
+    +content_type : string?
+    +estimated_difficulty : float?
+  }
+
+  class Question <<Embedded JSON>> {
+    +id : string
+    +question_number : int?
+    +question_type : string?
+    +content : text
+    +correct_answer : string?
+    +rubric : JSON?
+    +explanation : text?
+    +bloom_level : string?
+    +difficulty_score : float?
+    +chapter : string?
+    +scope_tags : list<string>?
+    +quality_score : float?
+    +source_citations : list<string>?
+    +warnings : list<string>?
+    +validation_warnings : list<string>?
+    +verification_status : string?
+    +is_human_edited : boolean?
+    +is_locked : boolean?
+    +is_validated : boolean?
+    +blueprint_cell_key : string?
+  }
+
+  class Option <<Embedded JSON>> {
+    +label : string
+    +text : text
+  }
+
+  class SourceEvidence <<Embedded JSON>> {
+    +chunk_id : string?
+    +document_id : string?
+    +section_id : string?
+    +chapter_number : int?
+    +page : int?
+    +parent_heading : string?
+    +text_preview : text?
+    +score : float?
+    +role : string?
+  }
+}
+
+UserRole .. User
+DocumentProcessingStatus .. Document
+ExamStatusEnum .. Exam
+SignalType .. FeedbackEvent
+Severity .. FeedbackEvent
+ReviewStatus .. FeedbackEvent
+
+User "1" *-- "0..*" Document : owns
+User "1" *-- "0..*" Exam : creates
+User "1" *-- "0..*" RefreshToken : has
+User "1" *-- "0..1" TeacherPreference : stores
+User "1" *-- "0..*" FeedbackEvent : receives/logs
+
+Document "1" o-- "0..*" Exam : source for
+Exam "1" *-- "0..*" ExamHistory : version history
+Exam "1" *-- "0..*" FeedbackEvent : quality signals
+ExamHistory "0..1" <-- "0..*" FeedbackEvent : related version
+
+Exam *-- "0..1" ExamConfig : exam_config
+Exam *-- "0..*" BlueprintSlot : blueprint
+Exam *-- "0..*" Question : questions
+Question *-- "0..*" Option : options
+Question *-- "0..*" SourceEvidence : source_evidence
+
+note right of Document
+  course_id exists as a nullable UUID field
+  but no Course entity / FK is implemented
+  in the current codebase.
+end note
+
+note bottom of Exam
+  Several exam business objects are stored as JSONB
+  instead of separate tables:
+  - scope
+  - exam_config
+  - questions
+  - blueprint
+  - checkpoint_state
+  - generation_metadata
+  - quality_metrics
+end note
+
+@enduml

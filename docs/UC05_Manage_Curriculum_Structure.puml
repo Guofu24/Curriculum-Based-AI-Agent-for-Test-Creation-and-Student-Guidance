@@ -1,0 +1,68 @@
+@startuml UC05_Manage_Curriculum_Structure
+!theme plain
+title UC05 - Manage Curriculum Structure
+
+actor "Teacher" as USER
+participant "Frontend" as FE
+participant "FastAPI documents_router" as ROUTE
+participant "DocumentService" as SVC
+database "PostgreSQL" as DB
+database "Pinecone" as PIN
+
+USER -> FE : Open document detail page
+FE -> ROUTE : GET /api/v1/documents/{id}
+ROUTE -> DB : SELECT documents WHERE id
+DB -> ROUTE : DocumentDetail (with heading_tree)
+ROUTE -> FE : DocumentDetail
+alt heading_tree is null/empty
+  FE -> USER : Display empty-state "No curriculum structure detected"
+end
+FE -> USER : Display detected curriculum tree (chapters > sections > subsections)
+
+alt Edit node titles
+  USER -> FE : Click Edit on tree node
+  FE -> USER : Show inline text field
+  USER -> FE : Edit node title
+  USER -> FE : Click Save
+  FE -> ROUTE : PATCH /api/v1/documents/{id}/curriculum-tree
+  ROUTE -> SVC : update_curriculum_tree(id, flat_nodes)
+  SVC -> SVC : Rebuild nested tree from flat list
+  SVC -> DB : UPDATE documents SET heading_tree
+  alt Update fails
+    DB -> SVC : Error
+    SVC -> FE : 500 Error
+    FE -> USER : Display error, keep previous state
+  end
+  SVC -> FE : 200 OK
+  FE -> USER : Show updated tree
+end
+
+alt Rescan structure
+  USER -> FE : Click "Rescan Structure"
+  FE -> ROUTE : POST /api/v1/documents/{id}/rescan-structure
+  ROUTE -> SVC : Re-detect headings from original file
+  SVC -> DB : UPDATE heading_tree
+  alt Rescan fails
+    SVC -> FE : 500 Error
+    FE -> USER : Display error, keep previous state
+  end
+  SVC -> FE : Updated DocumentDetail
+  FE -> USER : Reload curriculum tree
+end
+
+alt Reprocess
+  USER -> FE : Click "Reprocess"
+  FE -> USER : Show confirmation dialog
+  USER -> FE : Confirm
+  FE -> ROUTE : POST /api/v1/documents/{id}/reprocess
+  ROUTE -> SVC : Re-chunk + re-upsert to Pinecone
+  SVC -> PIN : upsert_chunks (overwrite existing)
+  SVC -> DB : UPDATE documents SET status=processing -> completed
+  alt Reprocess fails
+    SVC -> FE : 500 Error
+    FE -> USER : Display error, keep previous state
+  end
+  SVC -> FE : 200 OK
+  FE -> USER : Show updated document + status badge
+end
+@enduml

@@ -1,0 +1,58 @@
+@startuml UC11_View_Feedback
+!theme plain
+title UC11 - View Feedback
+
+actor "Teacher" as USER
+participant "Frontend" as FE
+participant "FastAPI exams_router" as ROUTE
+participant "ExamService" as SVC
+database "PostgreSQL" as DB
+
+alt Load feedback page
+  USER -> FE : Open Feedback page
+  FE -> ROUTE : GET /api/v1/exams/feedback-summary
+  ROUTE -> DB : SELECT feedback_events WHERE user_id
+  DB -> ROUTE : Aggregated summary
+  ROUTE -> FE : {signal_counts, resolved_counts, total}
+  FE -> USER : Display summary statistics cards
+
+  FE -> ROUTE : GET /api/v1/exams/feedback-store?page=1
+  ROUTE -> DB : SELECT feedback_events WHERE user_id\nORDER BY created_at DESC
+  DB -> ROUTE : Paginated feedback events
+  alt No feedback events exist
+    DB -> FE : Empty list
+    FE -> USER : Display empty-state "No feedback signals yet"
+  end
+  FE -> USER : Display paginated feedback event list
+end
+
+alt Filter feedback by signal type
+  USER -> FE : Select filter: All / BLOOM_MISMATCH / OUT_OF_SCOPE / DUPLICATE / etc.
+  FE -> ROUTE : GET /api/v1/exams/feedback-store?signal_type={type}
+  ROUTE -> DB : SELECT feedback_events WHERE user_id AND signal_type=?
+  DB -> FE : Filtered list
+  FE -> USER : Update displayed list
+end
+
+alt Filter feedback by status
+  USER -> FE : Select filter: Resolved / Unresolved / All
+  FE -> ROUTE : GET /api/v1/exams/feedback-store?status={status}
+  ROUTE -> DB : SELECT feedback_events WHERE user_id AND resolved=?
+  DB -> FE : Filtered list
+  FE -> USER : Update displayed list
+end
+
+alt Open related exam from feedback item
+  USER -> FE : Click exam reference on a feedback item
+  FE -> USER : Navigate to /dashboard/exams/{exam_id}
+  note right : Continues into UC08\n(Review and Edit Generated Exams)
+end
+
+alt Loading fails
+  FE -> ROUTE : GET /api/v1/exams/feedback-store
+  ROUTE -> FE : 500 Error
+  FE -> USER : Display error "Failed to load feedback" + Retry button
+  USER -> FE : Click Retry
+  FE -> ROUTE : Re-request feedback data
+end
+@enduml

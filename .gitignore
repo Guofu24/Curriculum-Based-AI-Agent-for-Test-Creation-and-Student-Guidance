@@ -1,45 +1,14 @@
-# =========================================
-# ExamAI Project — .gitignore
-# =========================================
+# ExamAI monorepo
 
-# ─── Environment & Secrets ──────────────────
-.env
-.env.local
-.env.*.local
-backend/.env
-backend/.env.local
+# OS and editor files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
 
-# ─── Python ─────────────────────────────────
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg-info/
-*.egg
-dist/
-build/
-.eggs/
-*.whl
-
-# ─── Virtual Environments ───────────────────
-venv/
-.venv/
-env/
-.conda/
-
-# ─── Node.js / Next.js ─────────────────────
-node_modules/
-UI/node_modules/
-UI/.next/
-UI/out/
-UI/.turbo/
-.pnp
-.pnp.js
-.pnp.cjs
-
-# ─── IDE & Editors ─────────────────────────
 .vscode/
 .idea/
+*.iml
 *.swp
 *.swo
 *~
@@ -47,37 +16,153 @@ UI/.turbo/
 .classpath
 .settings/
 
-# ─── OS Files ──────────────────────────────
-.DS_Store
-Thumbs.db
-ehthumbs.db
-Desktop.ini
+# Environment and local secrets
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.env.staging
+.env.*
+.env.*.local
+.envrc
+!.env.example
+!**/.env.example
+!**/.env.sample
+.gemini_keys
+backend/.gemini_keys
 
-# ─── Data & Uploads ────────────────────────
-backend/data/uploads/
-*.pdf
-*.docx
-*.pptx
-
-# ─── Database ──────────────────────────────
-*.db
-*.sqlite3
-
-# ─── Logs ──────────────────────────────────
-*.log
-logs/
-
-# ─── Testing & Coverage ───────────────────
-.coverage
-htmlcov/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+*.whl
+.Python
+.python-version
+.venv/
+venv/
+env/
+ENV/
+.conda/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.pyre/
+.pytype/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.cover
+*.py,cover
+.ipynb_checkpoints/
+build/
+dist/
+pip-wheel-metadata/
 
-# ─── Docker ────────────────────────────────
+# Node / Next.js / v0
+node_modules/
+.next/
+out/
+.turbo/
+.vercel/
+.snowflake/
+.v0-trash/
+.pnpm-store/
+.npm/
+.parcel-cache/
+.eslintcache
+coverage/
+*.tsbuildinfo
+.pnp
+.pnp.js
+.pnp.cjs
+next.user-config.*
+__v0_runtime_loader.js
+__v0_devtools.tsx
+__v0_jsx-dev-runtime.ts
+
+# Logs and runtime state
+*.log
+*.err
+*.out
+*.pid
+*.pid.lock
+*.seed
+logs/
+log/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+celerybeat-schedule
+celerybeat.pid
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# Backend runtime data
+backend/data/uploads/
+backend/uploads/
+backend/temp/
+backend/evals/output/
+backend/.langfuse/
+
+# Test files and experiments (may contain API keys for testing)
+test.py
+backend/test_config_check.py
+backend/test_e2e.py
+backend/tests/
+
+# Chunking experiments and demos
+Chunking/
+chunking_demo/
+kaggle/
+
+# Generated docs and local scratch workspaces
+docs/File markdown/
+docs/chunks.md
+docs/*.md
+docs/plan.todo.md
+docs/*.tex
+docs/*.puml
+
+# Local reference/source drops (books data)
+Data sách/
+"Data sách"/
+
+# Output files with potential secrets
+gemini.txt
+checked_keys_result.txt
+
+# Misc reports and local docs (not needed in repo)
+OPTIMIZATION_REPORT.md
+BUG_REPORT.md
+READY_TO_RUN.md
+spec.md
+run_guide.md
+tutorial.md
+entity_diagram.tex
+
+# Docker local overrides
 docker-compose.override.yml
+compose.override.yml
 
-# ─── Misc ──────────────────────────────────
+# Misc caches and temp files
+.cache/
 *.bak
 *.tmp
 *.temp
-.cache/
+*.orig
+*.rej
