@@ -178,6 +178,18 @@ async def _run_generation_inline(
             resolved_config = dict(exam_config or {})
             resolved_config["scope"] = normalized_scope
 
+            # Extract section titles from scope strings ("Chương > Phần" → "Phần")
+            if scope and isinstance(scope, list):
+                section_titles: list[str] = []
+                for s in scope:
+                    if isinstance(s, str) and " > " in s:
+                        section_part = s.split(" > ", 1)[1].strip()
+                        if section_part:
+                            section_titles.append(section_part)
+                if section_titles:
+                    resolved_config["scope_sections"] = section_titles
+                    logger.info("Extracted scope_sections: %s", section_titles)
+
             orchestrator = OrchestratorAgent(redis=redis_client, db_session=db)
             orchestrator.set_stream_callback(stream_callback)
             result = await orchestrator.generate_exam(
@@ -351,6 +363,15 @@ async def generate_exam_fe(
     # Rate limit check
     await check_generate_rate_limit(redis, str(current_user.id))
 
+    # Extract section titles from scope strings ("Chương > Phần" → "Phần")
+    scope_sections: list[str] = []
+    if config.scope and isinstance(config.scope, list):
+        for s in config.scope:
+            if isinstance(s, str) and " > " in s:
+                section_part = s.split(" > ", 1)[1].strip()
+                if section_part:
+                    scope_sections.append(section_part)
+
     service = ExamService(db, redis)
     try:
         exam = await service.create_exam(
@@ -365,6 +386,7 @@ async def generate_exam_fe(
                 "bloom_distribution": config.bloom_distribution.model_dump(),
                 "user_prompt": config.user_prompt,
                 "extra_instructions": config.extra_instructions,
+                "scope_sections": scope_sections if scope_sections else None,
             },
         )
     except Exception as e:

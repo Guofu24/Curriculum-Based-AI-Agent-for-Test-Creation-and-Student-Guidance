@@ -106,6 +106,7 @@ class RetrievalAgent:
         bloom_targets: list[str] | None = None,
         query_hints: list[str] | None = None,
         trace_id: str = "",
+        scope_sections: list[str] | None = None,
     ) -> RetrievalOutput:
         """Main retrieval method."""
         start_time = time.time()
@@ -267,6 +268,23 @@ class RetrievalAgent:
             )
             if token_warning:
                 warnings.append(token_warning)
+
+            # ── Section filter: keep only chunks whose section matches scope_sections ──
+            if scope_sections:
+                scope_sec_set = set(s.strip().lower() for s in scope_sections if s.strip())
+                if scope_sec_set:
+                    filtered_chunks: list[dict] = []
+                    for chunk in all_chunks:
+                        chunk_sec = (chunk.get("metadata", {}).get("section") or "").strip().lower()
+                        if chunk_sec and chunk_sec in scope_sec_set:
+                            filtered_chunks.append(chunk)
+                    logger.info(
+                        "[retrieve] scope_sections=%r → filtered %d chunks (from %d)",
+                        list(scope_sec_set), len(filtered_chunks), len(all_chunks),
+                    )
+                    if filtered_chunks:
+                        all_chunks = filtered_chunks
+                    # If filtering removed everything, warn but keep chunks (fallback)
 
             # Build coverage map
             coverage_map: dict[str, list[str]] = {}

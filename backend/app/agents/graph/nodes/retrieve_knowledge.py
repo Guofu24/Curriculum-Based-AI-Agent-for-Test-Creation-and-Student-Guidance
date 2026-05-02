@@ -52,6 +52,7 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
         scope_chapters=scope,
         bloom_targets=bloom_targets,
         trace_id=exam_id,
+        scope_sections=list(exam_config.get("scope_sections") or []),
     )
 
     retrieved_chunks = getattr(retrieval_result, "retrieved_chunks", [])

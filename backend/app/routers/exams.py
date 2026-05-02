@@ -355,6 +355,15 @@ async def generate_exam(
     # G13: Check rate limit before creating exam
     await check_generate_rate_limit(redis, str(current_user.id))
 
+    # Extract section titles from scope strings ("Chương > Phần" → "Phần")
+    scope_sections: list[str] = []
+    if config.scope and isinstance(config.scope, list):
+        for s in config.scope:
+            if isinstance(s, str) and " > " in s:
+                section_part = s.split(" > ", 1)[1].strip()
+                if section_part:
+                    scope_sections.append(section_part)
+
     # Create exam record
     exam = await service.create_exam(
         user_id=current_user.id,
@@ -368,6 +377,7 @@ async def generate_exam(
             "bloom_distribution": config.bloom_distribution.model_dump(),
             "user_prompt": config.user_prompt,
             "extra_instructions": config.extra_instructions,
+            "scope_sections": scope_sections if scope_sections else None,
         },
     )
 
