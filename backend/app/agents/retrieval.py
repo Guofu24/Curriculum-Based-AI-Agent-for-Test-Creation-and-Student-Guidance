@@ -386,29 +386,47 @@ Trả về JSON:
         G10: Uses asyncio.gather(return_exceptions=True) so 1 chapter failure
         doesn't fail the entire retrieval — logs warning and continues.
         Domain 2B: Each chapter query has a hard 5-second timeout.
+
+        Special case: if chapters=["_all"], skip filter to retrieve from entire doc.
         """
         CHAPTER_TIMEOUT = 30.0  # seconds — needs headroom for embedding + Pinecone query
 
-        async def _query_one_with_timeout(chapter: str) -> tuple[str, list[dict] | Exception]:
+        is_all = len(chapters) == 1 and chapters[0] == "_all"
+
+        async def _query_one_with_timeout(chapter: str, position: int) -> tuple[str, list[dict] | Exception]:
             """Query one chapter with hard timeout."""
             try:
-                result = await asyncio.wait_for(
-                    self._retrieve_for_chapter(
-                        document_id=document_id,
-                        chapter=chapter,
-                        queries=expanded_queries,
+                if is_all:
+                    # _all: query entire document without chapter filter
+                    query_text = " ".join(expanded_queries[:3])
+                    embedding = await self.embedder.embed_text(query_text)
+                    results = await self.vector_store.query_namespace(
+                        doc_id=document_id,
+                        chapter_id="_all",
+                        query_embedding=embedding,
                         top_k=top_k,
                         content_types=content_types,
-                    ),
-                    timeout=CHAPTER_TIMEOUT,
-                )
-                return chapter, result
+                    )
+                    return chapter, results
+                else:
+                    result = await asyncio.wait_for(
+                        self._retrieve_for_chapter(
+                            document_id=document_id,
+                            chapter=chapter,
+                            queries=expanded_queries,
+                            top_k=top_k,
+                            content_types=content_types,
+                            position=position,
+                        ),
+                        timeout=CHAPTER_TIMEOUT,
+                    )
+                    return chapter, result
             except asyncio.TimeoutError:
                 return chapter, TimeoutError(f"Chapter '{chapter}' retrieval timed out after {CHAPTER_TIMEOUT}s")
             except Exception as e:
                 return chapter, e
 
-        tasks = [_query_one_with_timeout(ch) for ch in chapters]
+        tasks = [_query_one_with_timeout(ch, i) for i, ch in enumerate(chapters)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_chunks: list[dict] = []
@@ -475,7 +493,7 @@ Trả về JSON:
             # Use chapter-specific embedding for better relevance
             chapter_query = f"{chapter} {' '.join(expanded_queries[:2])}"
             try:
-                ch_embedding = await self.embedder.embed_text(chapter_query)
+                        ch_embedding = await self.embedder.embed_text(chapter_query)
             except Exception:
                 ch_embedding = embedding  # Fallback to generic embedding
 
@@ -497,7 +515,8 @@ Trả về JSON:
                 else:
                     # 0 results — possibly indexed with a different chapter_id
                     # (e.g. "ch_e" instead of "ch6" due to heading tree renumbering).
-                    fallback_ids = _build_chapter_id_variants(ch_id, scope_chapters.index(chapter))
+                    pos = scope_chapters.index(chapter) if chapter in scope_chapters else 0
+                    fallback_ids = _build_chapter_id_variants(ch_id, pos)
                     logger.info(
                         "[supplement] chapter=%r → 0 results, trying variants: %s",
                         chapter, fallback_ids,
@@ -614,11 +633,14 @@ Trả về JSON:
         queries: list[str],
         top_k: int = 20,
         content_types: list[str] | None = None,
+        position: int = 0,
     ) -> list[dict]:
-        """Retrieve chunks for a specific chapter."""
+        """Retrieve chunks for a specific chapter using Pinecone metadata filter + variants fallback."""
         chapter_chunks = []
 
         chapter_id = normalize_chapter_id(chapter)
+
+        # Check if chapter is in scope_chapters for position lookup
         logger.info(
             "[_retrieve_for_chapter] doc=%s, chapter_input='%s', chapter_id='%s'",
             document_id, chapter, chapter_id,
@@ -635,20 +657,47 @@ Trả về JSON:
             )
             return []
 
-        # Query Pinecone — use query_namespace (doc_id + chapter_id, not document_id + chapter_ids)
+        # ── Primary query with Pinecone chapter_id filter ──
         results = await self.vector_store.query_namespace(
             doc_id=document_id,
             chapter_id=chapter_id,
             query_embedding=embedding,
             top_k=top_k,
             content_types=content_types,
+            filter_metadata={"chapter_id": {"$eq": chapter_id}},
         )
 
-        logger.info(
-            "[_retrieve_for_chapter] doc=%s, chapter_id='%s' → %d results",
-            document_id, chapter_id, len(results),
-        )
-        chapter_chunks.extend(results)
+        if results:
+            logger.info(
+                "[_retrieve_for_chapter] doc=%s, chapter_id='%s' → %d results (filtered)",
+                document_id, chapter_id, len(results),
+            )
+            chapter_chunks.extend(results)
+        else:
+            # ── Fallback: try chapter_id variants (renumbering mismatch) ──
+            variants = _build_chapter_id_variants(chapter_id, position)
+            logger.info(
+                "[_retrieve_for_chapter] chapter_id='%s' → 0 results, trying variants: %s",
+                chapter_id, variants,
+            )
+            for alt_id in variants:
+                if alt_id == chapter_id:
+                    continue
+                alt_results = await self.vector_store.query_namespace(
+                    doc_id=document_id,
+                    chapter_id=alt_id,
+                    query_embedding=embedding,
+                    top_k=top_k,
+                    content_types=content_types,
+                    filter_metadata={"chapter_id": {"$eq": alt_id}},
+                )
+                if alt_results:
+                    logger.info(
+                        "[_retrieve_for_chapter] alt_id='%s' → %d results",
+                        alt_id, len(alt_results),
+                    )
+                    chapter_chunks.extend(alt_results)
+                    break
 
         return chapter_chunks
 
