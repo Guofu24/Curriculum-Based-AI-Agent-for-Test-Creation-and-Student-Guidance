@@ -182,6 +182,7 @@ class VectorStore:
         query_embedding: list[float],
         top_k: int = 20,
         content_types: list[str] | None = None,
+        filter_metadata: dict | None = None,
     ) -> list[dict]:
         """
         Query chunks from a document namespace, filtered by chapter_id.
@@ -189,6 +190,11 @@ class VectorStore:
         Namespace: doc_{document_id} (single namespace per document).
         Uses Pinecone metadata filter: {"chapter_id": chapter_id}
         Returns top_k results sorted by score (descending).
+
+        Args:
+            filter_metadata: Optional Pinecone metadata filter dict.
+                             e.g. {"chapter_id": {"$eq": "ch6"}} to force-fetch
+                             chunks from a specific chapter.
         """
         try:
             index = await self._get_index()
@@ -208,12 +214,15 @@ class VectorStore:
         # With single namespace (~300-600 vectors), this is fast.
         # Chapter relevance is handled by query embedding + reranking.
         try:
-            result = index.query(
+            query_kwargs: dict = dict(
                 vector=query_embedding,
                 top_k=top_k,
                 namespace=namespace,
                 include_metadata=True,
             )
+            if filter_metadata:
+                query_kwargs["filter"] = filter_metadata
+            result = index.query(**query_kwargs)
 
             all_results = []
             for match in result.get("matches", []):

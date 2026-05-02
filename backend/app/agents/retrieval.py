@@ -28,6 +28,55 @@ except Exception:
     _ENCODING = None
 
 
+def _build_chapter_id_variants(ch_id: str, position: int) -> list[str]:
+    """
+    Build a list of alternative chapter_id strings to try when the primary
+    ch_id returns 0 results from Pinecone (due to indexing/renumbering mismatch).
+
+    Strategies:
+      - If ch_id is numeric (e.g. "ch6"), try the letter form at that position
+        (e.g. "ch_e" for 5th scope chapter, position=4).
+      - If ch_id is letter-based (e.g. "ch_e"), try numeric variants.
+      - Always include ±1 numeric variants in case off-by-one from re-numbering.
+    """
+    variants: list[str] = [ch_id]
+
+    import re
+    num_m = re.match(r"^ch(\d+)$", ch_id)
+    letter_m = re.match(r"^ch_([a-z])$", ch_id)
+
+    if num_m:
+        n = int(num_m.group(1))
+        # ±1 off-by-one from clean_heading_tree re-numbering
+        for delta in (-1, 1, -2, 2):
+            v = f"ch{n + delta}"
+            if v not in variants and int(v[2:]) > 0:
+                variants.append(v)
+        # Letter form based on position in scope (0-indexed A=ch_a, B=ch_b, …)
+        if 0 <= position < 26:
+            letter = chr(ord('a') + position)
+            variants.append(f"ch_{letter}")
+        # Also try letter based on the chapter number itself (1=a, 2=b, …)
+        if 1 <= n <= 26:
+            letter = chr(ord('a') + n - 1)
+            variants.append(f"ch_{letter}")
+
+    elif letter_m:
+        letter = letter_m.group(1)
+        n = ord(letter) - ord('a') + 1
+        variants.append(f"ch{n}")
+        # ±1
+        for delta in (-1, 1):
+            v = f"ch{n + delta}"
+            if v not in variants and n + delta > 0:
+                variants.append(v)
+        # Position-based numeric
+        variants.append(f"ch{position + 1}")
+
+    return variants
+
+
+
 class RetrievalAgent:
     """
     Agent 1: Retrieval Agent
@@ -103,6 +152,29 @@ class RetrievalAgent:
                 content_types=content_types,
             )
             warnings.extend(retrieval_warnings)
+
+            # Step 2b: Supplement chapters that got 0 chunks from the _all query.
+            # This guarantees every scope chapter has at least MIN_CHUNKS_PER_CHAPTER
+            # chunks even if they didn't surface in the top-100 semantic results.
+            MIN_CHUNKS_PER_CHAPTER = 5
+            supplement_chunks, supplement_warnings = await self._supplement_missing_chapters(
+                document_id=document_id,
+                scope_chapters=scope_chapters,
+                existing_chunks=all_chunks,
+                expanded_queries=expanded_queries,
+                min_per_chapter=MIN_CHUNKS_PER_CHAPTER,
+                content_types=content_types,
+            )
+            if supplement_chunks:
+                # Deduplicate by chunk_id before merging
+                existing_ids = {c["chunk_id"] for c in all_chunks}
+                new_chunks = [c for c in supplement_chunks if c["chunk_id"] not in existing_ids]
+                all_chunks.extend(new_chunks)
+                logger.info(
+                    "Supplemented %d chunks for under-represented scope chapters",
+                    len(new_chunks),
+                )
+            warnings.extend(supplement_warnings)
 
             # Step 3: Per-chapter rerank — ensures every chapter retains context.
             # Global rerank would let dominant chapters crowd out others.
@@ -303,6 +375,112 @@ Trả về JSON:
             all_chunks.extend(chunks_or_error)
 
         return all_chunks, warnings
+
+    async def _supplement_missing_chapters(
+        self,
+        document_id: str,
+        scope_chapters: list[str],
+        existing_chunks: list[dict],
+        expanded_queries: list[str],
+        min_per_chapter: int = 5,
+        content_types: list[str] | None = None,
+    ) -> tuple[list[dict], list[str]]:
+        """
+        For each scope chapter that has fewer than min_per_chapter chunks in
+        existing_chunks, do a targeted Pinecone query filtered by chapter_id
+        to guarantee coverage.
+
+        Uses Pinecone metadata filter {"chapter_id": {"$eq": ch_id}} so only
+        vectors from that specific chapter are returned.
+        """
+        warnings: list[str] = []
+        supplement: list[dict] = []
+
+        # Count existing coverage per normalized chapter_id
+        coverage: dict[str, int] = {}
+        for chunk in existing_chunks:
+            ch_id = chunk.get("metadata", {}).get("chapter_id", "")
+            coverage[ch_id] = coverage.get(ch_id, 0) + 1
+
+        # Generate embedding once (reused for all missing chapters)
+        query_text = " ".join(expanded_queries[:3])
+        try:
+            embedding = await self.embedder.embed_text(query_text)
+        except Exception as exc:
+            warnings.append(f"Supplement embedding failed: {exc}")
+            return supplement, warnings
+
+        for chapter in scope_chapters:
+            ch_id = normalize_chapter_id(chapter)
+            existing_count = coverage.get(ch_id, 0)
+            if existing_count >= min_per_chapter:
+                continue  # Already has enough chunks
+
+            need = min_per_chapter - existing_count
+            logger.info(
+                "[supplement] chapter=%r (ch_id=%r) has %d chunks, fetching %d more",
+                chapter, ch_id, existing_count, need,
+            )
+
+            # Use chapter-specific embedding for better relevance
+            chapter_query = f"{chapter} {' '.join(expanded_queries[:2])}"
+            try:
+                ch_embedding = await self.embedder.embed_text(chapter_query)
+            except Exception:
+                ch_embedding = embedding  # Fallback to generic embedding
+
+            try:
+                results = await self.vector_store.query_namespace(
+                    doc_id=document_id,
+                    chapter_id=ch_id,
+                    query_embedding=ch_embedding,
+                    top_k=max(need * 2, 10),
+                    content_types=content_types,
+                    filter_metadata={"chapter_id": {"$eq": ch_id}},
+                )
+                if results:
+                    supplement.extend(results)
+                    logger.info(
+                        "[supplement] chapter=%r → fetched %d chunks via chapter_id filter",
+                        chapter, len(results),
+                    )
+                else:
+                    # 0 results — possibly indexed with a different chapter_id
+                    # (e.g. "ch_e" instead of "ch6" due to heading tree renumbering).
+                    fallback_ids = _build_chapter_id_variants(ch_id, scope_chapters.index(chapter))
+                    logger.info(
+                        "[supplement] chapter=%r → 0 results, trying variants: %s",
+                        chapter, fallback_ids,
+                    )
+                    found_alt = False
+                    for alt_id in fallback_ids:
+                        if alt_id == ch_id:
+                            continue
+                        alt_results = await self.vector_store.query_namespace(
+                            doc_id=document_id,
+                            chapter_id=alt_id,
+                            query_embedding=ch_embedding,
+                            top_k=max(need * 2, 10),
+                            content_types=content_types,
+                            filter_metadata={"chapter_id": {"$eq": alt_id}},
+                        )
+                        if alt_results:
+                            supplement.extend(alt_results)
+                            logger.info(
+                                "[supplement] chapter=%r → fetched %d chunks via alt_id=%r",
+                                chapter, len(alt_results), alt_id,
+                            )
+                            found_alt = True
+                            break
+                    if not found_alt:
+                        warnings.append(
+                            f"Chapter '{chapter}' (ch_id={ch_id!r}) returned 0 chunks even with "
+                            "targeted filter — may not be indexed."
+                        )
+            except Exception as exc:
+                warnings.append(f"Supplement query failed for chapter '{chapter}': {exc}")
+
+        return supplement, warnings
 
     # ── Token budget guard ─────────────────────────────────────────────────────
 

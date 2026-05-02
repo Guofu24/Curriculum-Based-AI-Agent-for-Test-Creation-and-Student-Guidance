@@ -332,6 +332,32 @@ def _run_async_task(
                                 blueprint=result.get("blueprint") if isinstance(result.get("blueprint"), list) else None,
                             )
 
+                            # Log validation issues as FeedbackEvent rows
+                            if user_id:
+                                validation_issues = result.get("validation_issues") or []
+                                # Also synthesize quality_low events for questions with score < 0.6
+                                for q in result.get("questions", []):
+                                    if isinstance(q, dict) and (q.get("quality_score") or 1.0) < 0.6:
+                                        validation_issues.append({
+                                            "issue_type": "quality_low",
+                                            "question_id": q.get("id") or q.get("question_id"),
+                                            "detail": f"Quality score {q.get('quality_score', 0):.2f} below threshold.",
+                                        })
+                                if validation_issues:
+                                    try:
+                                        await exam_service.log_feedback_events(
+                                            exam_id=uuid.UUID(exam_id),
+                                            user_id=uuid.UUID(user_id),
+                                            issues=validation_issues,
+                                            workflow_stage="validation",
+                                            event_source="validator_agent",
+                                        )
+                                    except Exception as _fe_err:
+                                        logger.warning(
+                                            "Failed to log validation FeedbackEvents for exam %s: %s",
+                                            exam_id, _fe_err,
+                                        )
+
                         status_val = result.get("status")
                         is_success = (
                             status_val == "success"

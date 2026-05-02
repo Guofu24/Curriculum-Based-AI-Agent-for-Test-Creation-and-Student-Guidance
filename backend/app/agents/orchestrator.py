@@ -261,6 +261,12 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             "cost_report": result.get("cost_report") or {},
             "status": result.get("pipeline_status") == "completed" and AgentStatus.SUCCESS or AgentStatus.PARTIAL,
             "warnings": result.get("warnings", []),
+            # Forward validation issues so exam_task can persist FeedbackEvents
+            "validation_issues": (
+                (result.get("validation_result") or {}).get("issues") or
+                result.get("retry_issues") or
+                []
+            ),
         }
 
     def _rewrite_requirements(self, exam_config: dict, teacher_prefs: dict) -> dict:
@@ -631,6 +637,25 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                     f"Failed to persist questions after CP2 approval for exam {exam_id}: {persist_err}"
                 )
 
+            # Log publish FeedbackEvent
+            try:
+                import uuid as _uuid
+                from app.services.exam_service import ExamService
+                _svc = ExamService(self.db_session, self.redis) if self.db_session else None
+                if _svc:
+                    await _svc.log_feedback_events(
+                        exam_id=_uuid.UUID(exam_id),
+                        user_id=_uuid.UUID(user_id),
+                        issues=[{
+                            "issue_type": "publish",
+                            "detail": "Exam approved and published by teacher at HITL checkpoint 2.",
+                        }],
+                        workflow_stage="hitl_cp2",
+                        event_source="teacher_review",
+                    )
+            except Exception as _pub_err:
+                logger.warning("Failed to log publish FeedbackEvent for exam %s: %s", exam_id, _pub_err)
+
             return {
                 "status": "approved",
                 "message": "Đề đã được phê duyệt và sẵn sàng xuất.",
@@ -670,6 +695,25 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 )
             except Exception:
                 pass  # Non-blocking
+
+            # Log rejection FeedbackEvent
+            try:
+                import uuid as _uuid
+                from app.services.exam_service import ExamService
+                _svc = ExamService(self.db_session, self.redis) if self.db_session else None
+                if _svc:
+                    await _svc.log_feedback_events(
+                        exam_id=_uuid.UUID(exam_id),
+                        user_id=_uuid.UUID(user_id),
+                        issues=[{
+                            "issue_type": "validation_warning",
+                            "detail": f"Exam rejected at HITL checkpoint 2. Feedback: {feedback or 'none'}.",
+                        }],
+                        workflow_stage="hitl_cp2",
+                        event_source="teacher_review",
+                    )
+            except Exception as _rej_err:
+                logger.warning("Failed to log rejection FeedbackEvent for exam %s: %s", exam_id, _rej_err)
 
             return {
                 "status": "regenerating",

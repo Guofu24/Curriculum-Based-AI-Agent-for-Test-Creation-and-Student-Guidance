@@ -1,1313 +1,878 @@
-# ExamAI - Hệ thống tạo đề thi tự động bằng AI
+# Curriculum AI Agent - System Specification (SPEC)
 
-> **Trạng thái**: Đang phát triển (`feature/building_new_frontend`)
-> **Ngày cập nhật**: 2026-04-27
-
----
-
-## Mục lục
-
-1. [Tổng quan](#1-tổng-quan)
-2. [Kiến trúc hệ thống](#2-kiến-trúc-hệ-thống)
-3. [Cấu trúc thư mục](#3-cấu-trúc-thư-mục)
-4. [Frontend (Next.js)](#4-frontend-nextjs)
-5. [Backend (FastAPI)](#5-backend-fastapi)
-6. [Hệ thống Multi-Agent](#6-hệ-thống-multi-agent)
-7. [LangGraph Pipeline](#7-langgraph-pipeline)
-8. [RAG Pipeline](#8-rag-pipeline)
-9. [Cơ sở dữ liệu & Lưu trữ](#9-cơ-sở-dữ-liệu--lưu-trữ)
-10. [WebSocket & Thời gian thực](#10-websocket--thời-gian-thực)
-11. [Background Tasks (Celery)](#11-background-tasks-celery)
-12. [API Reference](#12-api-reference)
-13. [Cấu hình môi trường](#13-cấu-hình-môi-trường)
-14. [Lưu ý quan trọng](#14-lưu-ý-quan-trọng)
+> **Ngày viết:** 02/05/2026  
+> **Nguồn:** Phân tích code thực tế từ Backend (`e:\Đồ án\Project\backend`) và Frontend (`e:\Đồ án\Project\Frontend`)  
+> **Lưu ý:** Chỉ mô tả những gì đang chạy được thực tế, không dựa vào docs hay file md có sẵn.
 
 ---
 
-## 1. Tổng quan
+## 1. Tổng Quan Hệ Thống
 
-### 1.1 Mô tả dự án
+### 1.1 Kiến trúc tổng thể
 
-**ExamAI** là một hệ thống tạo đề thi tự động sử dụng AI đa tác tử (Multi-Agent). Người dùng tải lên tài liệu giảng dạy (PDF/DOCX/PPTX), hệ thống sẽ phân tích nội dung, tạo đề thi với các câu hỏi trắc nghiệm và tự luận theo yêu cầu, có sự can thiệp của con người (HITL - Human-in-the-Loop) tại các bước quan trọng.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              FRONTEND (Next.js 16.2.0)                     │
+│  http://localhost:3000                                                     │
+│  ├── / (Auth: Login/Register)                                              │
+│  └── /dashboard/* (Protected routes với sidebar)                           │
+│       ├── /dashboard (Home: stats, charts, recent exams)                   │
+│       ├── /dashboard/generate (3-step exam generation wizard)             │
+│       ├── /dashboard/exams/* (List, Detail, History)                      │
+│       ├── /dashboard/documents/* (Upload, List, Detail)                    │
+│       ├── /dashboard/feedback (Feedback store viewer)                      │
+│       └── /dashboard/settings (User settings)                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │ HTTP REST + WebSocket
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              BACKEND (FastAPI)                              │
+│  http://localhost:8000                                                     │
+│  ├── /api/v1/auth/* (JWT Authentication)                                   │
+│  ├── /api/v1/documents/* (Document CRUD + RAG pipeline)                   │
+│  ├── /api/v1/exams/* (Exam CRUD + Generation + HITL)                     │
+│  ├── /api/v1/generate/* (Generation triggers)                              │
+│  ├── /ws/exam/{id} (Real-time generation streaming)                      │
+│  └── /ws/document/{id} (Real-time upload progress)                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+         │                    │                    │                    │
+         ▼                    ▼                    ▼                    ▼
+┌─────────────┐    ┌─────────────────┐   ┌─────────────┐   ┌─────────────────┐
+│ PostgreSQL  │    │     Redis       │   │   Pinecone   │   │   MinIO (S3)    │
+│ (asyncpg)  │    │ (caching/pubsub)│   │ (vector DB)  │   │  (file storage) │
+└─────────────┘    └─────────────────┘   └─────────────┘   └─────────────────┘
+```
 
-### 1.2 Tính năng chính
+### 1.2 Technology Stack
 
-| Tính năng | Mô tả |
-|-----------|--------|
-| **Tải lên tài liệu** | Hỗ trợ PDF, DOCX, PPTX (tối đa 100MB) |
-| **Xử lý RAG** | Phân tích, chunk, embedding và lưu vào vector DB |
-| **Tạo đề thi tự động** | Sinh câu hỏi từ blueprint theo phân bố Bloom |
-| **HITL Checkpoints** | 3 điểm dừng để người dùng xác nhận/chỉnh sửa |
-| **Xem trước thời gian thực** | WebSocket streaming tiến trình tạo đề |
-| **Xuất đề thi** | PDF và DOCX với/không đáp án |
-| **Điều chỉnh đề thi** | Chỉnh sửa câu hỏi, khóa/xóa câu, tái sinh một phần |
-| **Bảng điều khiển** | Thống kê số lượng tài liệu, đề thi, chi phí |
-
-### 1.3 Người dùng mục tiêu
-
-- **Giáo viên/Giảng viên**: Tạo đề thi nhanh chóng từ tài liệu có sẵn
-- **Quản lý giáo dục**: Quản lý ngân hàng câu hỏi và đề thi
+| Layer | Technology |
+|-------|------------|
+| **Frontend** | Next.js 16.2.0, React 19, TypeScript, Tailwind CSS 4.2 |
+| **Backend** | FastAPI, Python 3.11+, SQLAlchemy 2.0 (async) |
+| **Database** | PostgreSQL (async via asyncpg) |
+| **Cache/PubSub** | Redis 5.x |
+| **Vector Store** | Pinecone 5.x |
+| **LLM Providers** | Groq (primary), OpenAI, Anthropic Claude, Ollama, g4f, Google Gemini |
+| **Embeddings** | Sentence Transformers (BAAI/bge-m3) - local |
+| **Task Queue** | Celery 5.x (optional, background tasks) |
+| **Storage** | MinIO (local S3) or AWS S3 |
+| **Agent Framework** | LangGraph 0.2+ |
+| **Observability** | LangFuse, Sentry |
 
 ---
 
-## 2. Kiến trúc hệ thống
+## 2. BACKEND API ENDPOINTS
 
-### 2.1 Sơ đồ kiến trúc tổng thể
+### 2.1 Authentication `/api/v1/auth`
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           BROWSER (Next.js)                              │
-│                    localhost:3000 / examai.topdomain.com                  │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                    HTTP/REST ◄─────► WebSocket (WSS)
-                                    │
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         BACKEND (FastAPI)                                │
-│                     localhost:8000 / api.examai.topdomain.com             │
-│                                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐               │
-│  │  Routers │  │  Agents  │  │   RAG    │  │  Tasks   │               │
-│  │  (REST)  │  │(LangGraph)│  │ Pipeline │  │ (Celery) │               │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘               │
-│       │             │             │             │                      │
-│       └─────────────┴─────────────┴─────────────┘                      │
-│                           │                                              │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐               │
-│  │  WebSocket│  │  Redis   │  │  Postgres │  │  MinIO/S3 │               │
-│  │  Manager  │  │ (Cache)  │  │  (Data)   │  │  (Files)  │               │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘               │
-│                                    │             │                      │
-│                                    ▼             ▼                      │
-│                           ┌──────────────┐  ┌────────────┐             │
-│                           │   Pinecone   │  │  Groq/Gemini│             │
-│                           │ (Vector DB)  │  │  (LLM API) │             │
-│                           └──────────────┘  └────────────┘             │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/register` | Register teacher account (email, password, full_name) |
+| POST | `/login` | Login with email/password, returns JWT access + refresh tokens |
+| POST | `/refresh` | Refresh access token using refresh token rotation |
+| POST | `/logout` | Revoke refresh token |
+| GET | `/me` | Get current user profile |
 
-### 2.2 Luồng dữ liệu chính
+**JWT Config:**
+- Access token TTL: 15 minutes
+- Refresh token TTL: 7 days
+- Algorithm: HS256
+- Refresh token rotation: enabled
 
-#### Luồng 1: Tải lên và xử lý tài liệu
+### 2.2 Documents `/api/v1/documents`
 
-```
-FE Upload → POST /documents/upload → S3/MinIO → Background Task (Celery)
-                                              ↓
-                                    RAG Pipeline (Parser → Cleaner → Chunker → Embedder → Vector Store)
-                                              ↓
-                                    Pinecone (Upsert vectors) + Redis (Status cache)
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/upload` | Upload PDF/DOCX/PPTX file (max 100MB) |
+| GET | `/` | List user's documents (paginated) |
+| GET | `/{document_id}` | Get document details with heading_tree |
+| GET | `/{document_id}/status` | Get processing status (cached 1s) |
+| DELETE | `/{document_id}` | Delete document (DB + S3 + Pinecone) |
+| GET | `/{document_id}/refresh-url` | Generate presigned download URL |
+| GET | `/{document_id}/curriculum-tree` | Get flattened curriculum tree |
+| PATCH | `/{document_id}/curriculum-tree` | Update curriculum tree |
+| POST | `/{document_id}/rescan-structure` | Re-detect heading tree |
+| POST | `/{document_id}/reprocess` | Re-chunk and re-index to Pinecone |
 
-#### Luồng 2: Tạo đề thi
+**Document Processing Pipeline (RAG):**
+1. Upload to MinIO/S3
+2. Parse document (PDF → markdown via PyMuPDF, DOCX → markdown, PPTX → markdown)
+3. Detect heading tree (LLM-based with pattern fallback)
+4. Semantic chunking (by headings, max 1200 tokens, 200 overlap)
+5. Embed chunks (BAAI/bge-m3, 1024 dimensions)
+6. Upsert to Pinecone (per-chapter namespace)
 
-```
-FE Request → POST /generate/exam → Create Exam DB record
-                                    ↓
-                            LangGraph Pipeline (27 nodes)
-                                    ↓
-                            HITL Checkpoint 1 (Blueprint) → Teacher approves
-                                    ↓
-                            HITL Checkpoint 2 (Questions) → Teacher reviews
-                                    ↓
-                            HITL Checkpoint 3 (Preview) → Finalize
-                                    ↓
-                            WebSocket stream (progress) + DB (questions)
-```
+**Processing Status:** `pending` → `processing` → `completed` → `indexed`
 
-### 2.3 Công nghệ sử dụng
+### 2.3 Exams `/api/v1/exams`
 
-| Layer | Công nghệ | Vai trò |
-|-------|-----------|---------|
-| **Frontend** | Next.js 16, React 19, TypeScript | Giao diện người dùng |
-| **UI** | Tailwind CSS 4, Radix UI, Lucide Icons, Recharts | Thiết kế & biểu đồ |
-| **Backend** | FastAPI, Pydantic, SQLAlchemy (async) | REST API |
-| **AI Agents** | LangGraph, Groq/Anthropic/OpenAI/Gemini | Multi-agent orchestration |
-| **Vector DB** | Pinecone | Semantic search |
-| **Embeddings** | Sentence Transformers (BAAI/bge-m3) | Text embedding |
-| **Database** | PostgreSQL (asyncpg) | Dữ liệu quan hệ |
-| **Cache/PubSub** | Redis | Cache, session, pub/sub |
-| **File Storage** | MinIO / AWS S3 | Lưu file tài liệu |
-| **Background** | Celery + Redis | Async task queue |
-| **Auth** | JWT (access + refresh tokens) | Xác thực |
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/generate` | Start exam generation (rate-limited: 10/day) |
+| GET | `/` | List user's exams (paginated, filterable by status) |
+| GET | `/quality-summary` | Aggregated quality metrics |
+| GET | `/feedback-summary` | Feedback store summary |
+| GET | `/feedback-store` | Paginated feedback events |
+| GET | `/{exam_id}` | Full exam details |
+| GET | `/{exam_id}/versions` | Version history |
+| GET | `/{exam_id}/feedback` | Exam's feedback events |
+| POST | `/{exam_id}/publish` | Publish exam |
+| DELETE | `/{exam_id}` | Delete exam |
+| POST | `/{exam_id}/backfill-blueprint` | Synthesize blueprint from questions |
+| POST | `/{exam_id}/backfill-quality` | Recompute quality metrics |
+| PATCH | `/{exam_id}/questions/{qid}` | Edit question inline |
+| POST | `/{exam_id}/edit-prompt` | Edit via natural language |
+| POST | `/{exam_id}/regenerate` | Regenerate questions |
+| GET | `/{exam_id}/export/pdf` | Export PDF (include_answers, include_blueprint) |
+| GET | `/{exam_id}/export/docx` | Export DOCX |
+| GET | `/{exam_id}/history` | Version snapshots |
+| POST | `/{exam_id}/history/{hid}/restore` | Restore snapshot |
+| POST | `/{exam_id}/approve-blueprint` | HITL CP1: Approve blueprint |
+| POST | `/{exam_id}/reject-blueprint` | HITL CP1: Reject with feedback |
+| GET | `/{exam_id}/review-data` | Full review data for HITL CP2 |
+| GET | `/{exam_id}/preview` | HTML export preview |
+| POST | `/{exam_id}/submit-review` | HITL CP2: Submit review |
 
----
+### 2.4 Generation `/api/v1/generate`
 
-## 3. Cấu trúc thư mục
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/exam` | Start generation (FE-compatible, async) |
+| POST | `/partial-regenerate` | Partial regeneration with edits |
 
-```
-E:/Đồ án/Project/
-│
-├── SPEC.md                          # File spec này
-├── README.md
-│
-├── Frontend/                        # Next.js Frontend
-│   ├── app/                         # App Router
-│   │   ├── layout.tsx               # Root layout (ThemeProvider, AuthProvider)
-│   │   ├── page.tsx                # Login/Register page
-│   │   ├── globals.css             # Global styles
-│   │   ├── dashboard/              # Protected dashboard routes
-│   │   │   ├── layout.tsx          # Dashboard layout (sidebar)
-│   │   │   ├── page.tsx            # Dashboard home
-│   │   │   ├── documents/
-│   │   │   │   └── page.tsx        # Document management
-│   │   │   ├── exams/
-│   │   │   │   ├── page.tsx        # Exam list
-│   │   │   │   └── [id]/page.tsx   # Exam detail
-│   │   │   ├── generate/
-│   │   │   │   └── page.tsx        # Exam generation wizard
-│   │   │   └── feedback/
-│   │   │       └── page.tsx        # Feedback page
-│   │   └── api/                    # Next.js API routes (proxy)
-│   │
-│   ├── components/                  # React components
-│   │   ├── generation-live-viewer.tsx  # Real-time generation viewer (1400+ lines)
-│   │   ├── auth-provider.tsx       # Auth context provider
-│   │   ├── upload-notification-provider.tsx # Upload progress notifications
-│   │   └── ui/                     # Radix UI components
-│   │       ├── button.tsx
-│   │       ├── input.tsx
-│   │       ├── card.tsx
-│   │       ├── sidebar.tsx         # Main sidebar
-│   │       ├── curriculum-tree.tsx # Document chapter tree
-│   │       ├── exam-form.tsx       # Exam creation form
-│   │       ├── question-card.tsx   # Question display/edit
-│   │       ├── question-editor.tsx # Question editing modal
-│   │       ├── tabs.tsx
-│   │       ├── toast.tsx
-│   │       ├── dialog.tsx
-│   │       ├── dropdown-menu.tsx
-│   │       ├── label.tsx
-│   │       ├── select.tsx
-│   │       ├── slider.tsx
-│   │       ├── textarea.tsx
-│   │       ├── table.tsx
-│   │       ├── badge.tsx
-│   │       ├── progress.tsx
-│   │       ├── scroll-area.tsx
-│   │       ├── separator.tsx
-│   │       ├── tooltip.tsx
-│   │       ├── sheet.tsx
-│   │       ├── skeleton.tsx
-│   │       └── index.ts            # Re-export all UI components
-│   │
-│   └── lib/                        # Utilities
-│       └── api.ts                  # API client (800+ lines)
-│
-├── backend/                        # FastAPI Backend
-│   ├── app/
-│   │   ├── main.py                 # FastAPI app entry point
-│   │   │
-│   │   ├── core/                   # Core infrastructure
-│   │   │   ├── config.py           # Pydantic Settings (50+ env vars)
-│   │   │   ├── database.py         # SQLAlchemy async setup
-│   │   │   └── redis_client.py     # Redis async client
-│   │   │
-│   │   ├── routers/               # API routers
-│   │   │   ├── auth.py             # Authentication endpoints
-│   │   │   ├── documents.py        # Document upload/management
-│   │   │   ├── exams.py            # Exam CRUD & export
-│   │   │   ├── generate.py         # Exam generation bridge
-│   │   │   ├── courses.py          # Course management
-│   │   │   └── playbook.py         # Teacher preferences
-│   │   │
-│   │   ├── models/                 # SQLAlchemy models
-│   │   │   ├── user.py
-│   │   │   ├── document.py
-│   │   │   ├── exam.py
-│   │   │   └── teacher_preference.py
-│   │   │
-│   │   ├── services/               # Business logic
-│   │   │   ├── exam_service.py
-│   │   │   ├── document_service.py
-│   │   │   └── auth_service.py
-│   │   │
-│   │   ├── agents/                 # Multi-agent AI system
-│   │   │   ├── orchestrator.py     # Master orchestrator (Agent 0)
-│   │   │   ├── llm.py              # Unified LLM client
-│   │   │   ├── retrieval.py         # RAG retrieval agent (Agent 1)
-│   │   │   ├── outline.py          # Blueprint generator (Agent 2)
-│   │   │   ├── builder.py          # Question builder (Agent 3)
-│   │   │   ├── validator.py        # Question validator (Agent 4)
-│   │   │   ├── planner.py          # Dynamic planner
-│   │   │   ├── guardrails.py       # Input safety
-│   │   │   ├── base.py             # Shared types & enums
-│   │   │   │
-│   │   │   ├── graph/              # LangGraph pipeline
-│   │   │   │   ├── state.py        # Graph state schema
-│   │   │   │   ├── builder.py      # Graph compilation
-│   │   │   │   └── nodes/          # 27 graph nodes
-│   │   │   │       ├── initialize.py
-│   │   │   │       ├── clarification_check.py
-│   │   │   │       ├── load_long_term_memory.py
-│   │   │   │       ├── decide_plan.py
-│   │   │   │       ├── plan_complex.py
-│   │   │   │       ├── retrieve_knowledge.py
-│   │   │   │       ├── create_outline.py
-│   │   │   │       ├── emit_checkpoint_1.py
-│   │   │   │       ├── wait_for_blueprint_approval.py
-│   │   │   │       ├── build_questions.py
-│   │   │   │       ├── validate_questions.py
-│   │   │   │       ├── check_validation_result.py
-│   │   │   │       ├── retry_builder.py
-│   │   │   │       ├── emit_checkpoint_2.py
-│   │   │   │       ├── wait_for_review.py
-│   │   │   │       ├── save_teacher_preferences.py
-│   │   │   │       ├── emit_checkpoint_3.py
-│   │   │   │       ├── finalize_output.py
-│   │   │   │       ├── handle_*.py   # Error handlers
-│   │   │   │       └── __init__.py  # ALL_NODES constant
-│   │   │   │
-│   │   │   └── memory/             # Memory management
-│   │   │       ├── short_term.py   # Redis session memory
-│   │   │       └── long_term.py    # PostgreSQL teacher preferences
-│   │   │
-│   │   ├── rag/                    # RAG pipeline
-│   │   │   ├── parser.py           # Multi-format document parsing
-│   │   │   ├── cleaner.py          # Text cleaning
-│   │   │   ├── structure.py        # Heading tree detection
-│   │   │   ├── chunker.py          # Semantic chunking
-│   │   │   ├── embedder.py         # Sentence embeddings
-│   │   │   └── vector_store.py     # Pinecone operations
-│   │   │
-│   │   ├── tasks/                 # Celery background tasks
-│   │   │   ├── celery_app.py       # Celery configuration
-│   │   │   ├── exam_task.py        # Async exam generation
-│   │   │   └── document_task.py    # Async document processing
-│   │   │
-│   │   ├── websocket/            # WebSocket management
-│   │   │   └── manager.py          # Connection manager + SSE events
-│   │   │
-│   │   └── utils/                # Utilities
-│   │       └── export.py          # PDF/DOCX export
-│   │
-│   ├── requirements.txt           # Python dependencies
-│   ├── .env                       # Environment variables
-│   ├── alembic.ini               # DB migration config
-│   └── docker-compose.yml       # Local dev services
-│
-├── run_guide.md                  # Hướng dẫn chạy dự án
-└── package.json                  # Workspace root (nếu có)
-```
+### 2.5 WebSocket Endpoints
+
+| Path | Description |
+|------|-------------|
+| `/ws/exam/{exam_id}` | Real-time exam generation streaming |
+| `/ws/document/{document_id}` | Real-time upload/processing progress |
+
+### 2.6 Health Checks
+
+| Path | Description |
+|------|-------------|
+| GET | `/health` | Liveness probe |
+| GET | `/ready` | Readiness check (postgres + redis + pinecone) |
 
 ---
 
-## 4. Frontend (Next.js)
+## 3. FRONTEND ROUTES & FEATURES
 
-### 4.1 Cấu hình
+### 3.1 Route Structure
 
-- **Framework**: Next.js 16 (App Router)
-- **Language**: TypeScript 5
-- **Styling**: Tailwind CSS 4
-- **UI Library**: Radix UI primitives
-- **State**: React Context (Auth, Theme, Upload)
-- **HTTP Client**: Native fetch với wrapper trong `lib/api.ts`
-- **Real-time**: Native WebSocket API
-
-### 4.2 Routes
-
-| Route | Component | Mô tả |
-|-------|-----------|--------|
-| `/` | `page.tsx` | Login/Register với Tabs |
-| `/dashboard` | `page.tsx` | Trang chủ với thống kê |
-| `/dashboard/documents` | `page.tsx` | Quản lý tài liệu |
-| `/dashboard/exams` | `page.tsx` | Danh sách đề thi |
-| `/dashboard/exams/[id]` | `page.tsx` | Chi tiết đề thi |
-| `/dashboard/generate` | `page.tsx` | Trình tạo đề thi (wizard) |
-| `/dashboard/feedback` | `page.tsx` | Trang phản hồi |
-
-### 4.3 API Client (`lib/api.ts`)
-
-File API client chính (800+ dòng) cung cấp các đối tượng API:
-
-```typescript
-// Auth
-authApi.login(email, password) → JWT tokens
-authApi.register(email, password, fullName) → User
-authApi.logout()
-authApi.refreshToken()
-
-// Documents
-documentsApi.upload(file, onProgress) → Document
-documentsApi.list(params) → PaginatedResponse<Document>
-documentsApi.getById(id) → Document
-documentsApi.getStatus(id) → ProcessingStatus
-documentsApi.getCurriculumTree(id) → CurriculumTree
-documentsApi.delete(id)
-documentsApi.rescanStructure(id)
-documentsApi.reprocess(id)
-
-// Exams
-examsApi.list(params) → PaginatedResponse<Exam>
-examsApi.getById(id) → Exam
-examsApi.updateQuestion(examId, questionId, data)
-examsApi.partialRegenerate(examId, changes)
-examsApi.approveBlueprint(id)
-examsApi.rejectBlueprint(id, feedback)
-examsApi.submitReview(id, data)
-examsApi.exportPdf(id, params) → Blob
-examsApi.exportDocx(id, params) → Blob
-examsApi.preview(id) → HTML
-
-// Generation
-generateApi.createExam(config) → Exam
-generateApi.getReviewData(examId) → ReviewData
-
-// WebSocket
-createExamWebSocket(examId, callbacks) → WebSocket
+```
+/ (AuthPage)
+├── /dashboard (DashboardPage)
+│   ├── /dashboard/generate (GeneratePage)
+│   ├── /dashboard/exams (ExamListPage)
+│   ├── /dashboard/exams/[id] (ExamDetailPage)
+│   ├── /dashboard/exams/[id]/history (ExamHistoryPage)
+│   ├── /dashboard/documents (DocumentListPage)
+│   ├── /dashboard/documents/[id] (DocumentDetailPage)
+│   ├── /dashboard/feedback (FeedbackPage)
+│   └── /dashboard/settings (SettingsPage)
 ```
 
-### 4.4 WebSocket Events
+### 3.2 Auth (`/`)
+- Login form (email + password)
+- Register form (email + password + full_name)
+- JWT token storage in localStorage
+- Auto-redirect to `/dashboard` if authenticated
+- Token refresh on 401 response
 
-Frontend lắng nghe các event từ backend:
+### 3.3 Dashboard Layout
+- Protected by auth guard (redirect to `/` if not authenticated)
+- Collapsible sidebar with user profile
+- Dark/light mode toggle (next-themes)
+- Toast notifications (sonner)
 
-| Event | Dữ liệu | Xử lý |
-|-------|---------|--------|
-| `generation_started` | `{exam_id, config}` | Reset viewer |
-| `retrieval_progress` | `{retrieved_chunks}` | Hiển thị chunks đã truy xuất |
-| `outline_created` | `{blueprint, stats}` | Hiển thị blueprint |
-| `checkpoint_1` | `{blueprint, requires_approval}` | Mở modal duyệt blueprint |
-| `questions_building` | `{total, done, questions}` | Cập nhật progress bar |
-| `questions_built` | `{questions, stats}` | Hiển thị danh sách câu hỏi |
-| `validation_progress` | `{issues_count}` | Hiển thị validation |
-| `validation_done` | `{passed, issues}` | Hiển thị kết quả validation |
-| `checkpoint_2` | `{questions, stats}` | Mở modal duyệt câu hỏi |
-| `checkpoint_3` | `{final_exam, stats}` | Hiển thị preview cuối |
-| `generation_complete` | `{exam_id, questions}` | Điều hướng đến trang chi tiết |
-| `generation_error` | `{error}` | Hiển thị lỗi |
-| `generation_cancelled` | `{}` | Reset UI |
-| `heartbeat` | `{timestamp}` | Keep-alive |
+### 3.4 Dashboard Home (`/dashboard`)
+- Statistics cards (total exams, quality score, etc.)
+- Quality metrics charts (Recharts)
+- Recent exams list
+- Quick actions
 
-### 4.5 Các Component quan trọng
+### 3.5 Generate Page (`/dashboard/generate`)
 
-#### `generation-live-viewer.tsx` (1400+ lines)
+**3-step wizard:**
 
-Component chính cho việc xem và tương tác với quá trình tạo đề thi:
+**Step 1 - Select Document:**
+- Grid of completed documents (status: completed/indexed)
+- Document cards showing filename, chapter count, chunk count
+- Select to proceed
 
-- **Phần hiển thị**: Progress bar, step indicator, real-time log
-- **Blueprint Review**: Danh sách câu hỏi theo chương và Bloom level
-- **Questions Review**: Danh sách câu hỏi với chỉnh sửa inline
-- **Modal duyệt**: Dialog để approve/reject tại các checkpoint
-- **Preview Panel**: Xem trước đề thi dạng HTML
+**Step 2 - Configure Exam:**
+- Scope selection (checkboxes for chapters from curriculum tree)
+- Title input (optional)
+- Exam type: MCQ / Essay / Mixed
+- MCQ count (1-50) and Essay count (0-10)
+- Bloom Taxonomy distribution sliders:
+  - Nhận biết (nhan_biet)
+  - Thông hiểu (thong_hieu)
+  - Vận dụng (van_dung)
+  - Vận dụng cao (van_dung_cao)
+  - Total must equal 100%
+- Strict scope flag (checkbox)
+- Additional instructions textarea (500 char max)
 
-#### `curriculum-tree.tsx`
+**Step 3 - Generation Live Viewer:**
+- Real-time pipeline progress (6 steps)
+- WebSocket connection status indicator
+- Blueprint review panel (HITL CP1)
+- Question streaming display
+- Validation issues display
+- HITL checkpoint approval/rejection dialogs
+- Completion celebration
 
-Cây chương từ heading tree của tài liệu, cho phép:
-- Chọn/bỏ chọn chương để tạo đề thi
-- Collapsible tree view
-- Checkbox với trạng thái mixed
+### 3.6 Exam List (`/dashboard/exams`)
+- Paginated exam list
+- Status filter
+- Columns: title, type, difficulty, status, questions, quality score, created date
+- Delete action
 
-#### `exam-form.tsx`
+### 3.7 Exam Detail (`/dashboard/exams/[id]`)
+- Exam metadata display
+- Blueprint table (question slots with Bloom levels)
+- Questions display with:
+  - Type badge (MCQ/Essay)
+  - Bloom level badge
+  - Question content
+  - MCQ options with correct answer highlight
+  - Essay rubric
+  - Quality metrics
+  - Source citations
+  - Validation warnings
+- Inline question editing
+- Export buttons (PDF/DOCX with answers toggle)
+- Version history access
+- HITL review actions
 
-Form tạo đề thi với:
-- Chọn tài liệu nguồn
-- Chọn phạm vi (chương)
-- Cấu hình: số lượng câu, phân bố Bloom, loại câu hỏi
-- Tùy chọn nâng cao
+### 3.8 Document List (`/dashboard/documents`)
+- Paginated document list
+- Upload button (PDF/DOCX/PPTX, max 100MB)
+- Document cards with:
+  - Filename, type, size
+  - Processing status
+  - Chapter count, chunk count
+- Delete action
+- Real-time upload progress via WebSocket
 
-#### `question-card.tsx` / `question-editor.tsx`
+### 3.9 Document Detail (`/dashboard/documents/[id]`)
+- Document metadata
+- Processing status with steps
+- Curriculum tree visualization
+- Actions: Refresh URL, Rescan Structure, Reprocess
 
-Hiển thị và chỉnh sửa câu hỏi:
-- Loại: Trắc nghiệm (4 lựa chọn), Tự luận
-- Các trường: Nội dung, đáp án, giải thích, Bloom level
-- Hành động: Khóa, xóa, tái sinh
+### 3.10 Feedback Page (`/dashboard/feedback`)
+- Aggregated feedback summary
+- Paginated feedback events list
+- Filter by severity, review_status, signal_type
+- Signal types: bloom_mismatch, out_of_scope, duplicate, quality_low, answer_incorrect, validation_warning, generation_error, publish, edit_applied
+
+### 3.11 Settings (`/dashboard/settings`)
+- User profile form
+- Theme toggle
+- Preferences
 
 ---
 
-## 5. Backend (FastAPI)
+## 4. DATABASE MODELS
 
-### 5.1 Entry Point (`app/main.py`)
-
+### 4.1 User
 ```python
-# Lifespan: Khởi tạo và dọn dẹp tài nguyên
-# Routers: auth, courses, documents, exams, generate, playbook
-# WebSocket: /ws/exam/{exam_id}, /ws/document/{document_id}
-# Health: /health, /ready
+id: UUID (PK)
+email: str (unique, indexed)
+password_hash: str
+full_name: str (nullable)
+role: str (default: "teacher")  # student, teacher, admin
+created_at: datetime
+updated_at: datetime
+
+Relations:
+- documents: List[Document]
+- exams: List[Exam]
+- refresh_tokens: List[RefreshToken]
+- preferences: TeacherPreference (one-to-one)
+- feedback_events: List[FeedbackEvent]
 ```
 
-### 5.2 Routers
-
-#### `routers/auth.py`
-- `POST /api/v1/auth/register` - Đăng ký
-- `POST /api/v1/auth/login` - Đăng nhập
-- `POST /api/v1/auth/logout` - Đăng xuất
-- `POST /api/v1/auth/refresh` - Refresh token
-- `GET /api/v1/auth/me` - Lấy thông tin user hiện tại
-
-#### `routers/documents.py`
-- `POST /api/v1/documents/upload` - Tải lên tài liệu
-- `GET /api/v1/documents` - Danh sách tài liệu (phân trang)
-- `GET /api/v1/documents/{id}` - Chi tiết tài liệu
-- `GET /api/v1/documents/{id}/status` - Trạng thái xử lý (Redis cache)
-- `GET /api/v1/documents/{id}/curriculum-tree` - Cây chương
-- `DELETE /api/v1/documents/{id}` - Xóa tài liệu
-- `POST /api/v1/documents/{id}/rescan-structure` - Quét lại cấu trúc
-- `POST /api/v1/documents/{id}/reprocess` - Xử lý lại RAG
-
-#### `routers/exams.py`
-- `POST /api/v1/exams/generate` - Tạo đề thi (rate limit: 10/ngày/user)
-- `GET /api/v1/exams` - Danh sách đề thi
-- `GET /api/v1/exams/{id}` - Chi tiết đề thi
-- `PATCH /api/v1/exams/{id}/questions/{qid}` - Chỉnh sửa câu hỏi
-- `POST /api/v1/exams/{id}/regenerate` - Tái sinh toàn bộ
-- `GET /api/v1/exams/{id}/export/pdf` - Xuất PDF
-- `GET /api/v1/exams/{id}/export/docx` - Xuất DOCX
-- `POST /api/v1/exams/{id}/approve-blueprint` - Duyệt blueprint (HITL CP1)
-- `POST /api/v1/exams/{id}/reject-blueprint` - Từ chối blueprint (HITL CP1)
-- `POST /api/v1/exams/{id}/submit-review` - Gửi review (HITL CP2)
-- `GET /api/v1/exams/{id}/review-data` - Dữ liệu review
-- `GET /api/v1/exams/{id}/preview` - Preview HTML
-
-#### `routers/generate.py`
-- `POST /api/v1/generate/exam` - Tạo đề (FE-compatible, sync)
-- `POST /api/v1/generate/partial-regenerate` - Tái sinh một phần
-
-### 5.3 Database Models
-
-#### `models/user.py`
+### 4.2 Document
 ```python
-User:
-  - id: UUID (PK)
-  - email: String (unique, indexed)
-  - password_hash: String
-  - full_name: String
-  - role: Enum (STUDENT, TEACHER, ADMIN)
-  - created_at, updated_at: DateTime
+id: UUID (PK)
+user_id: UUID (FK -> users, indexed)
+course_id: UUID (nullable, indexed)
+file_size: int (nullable)
+original_filename: str
+file_type: str  # pdf, docx, pptx
+s3_key: str
+processing_status: str  # pending, processing, completed, failed
+parse_error_message: str (nullable)
+heading_tree: JSONB (nullable)  # nested structure
+total_chapters: int (nullable)
+total_pages_or_slides: int (nullable)
+total_chunks: int (nullable)
+uploaded_at: datetime
+
+Relations:
+- user: User
+- exams: List[Exam]
 ```
 
-#### `models/document.py`
-```python
-Document:
-  - id: UUID (PK)
-  - user_id: UUID (FK → User)
-  - filename: String
-  - s3_key: String
-  - file_type: Enum (PDF, DOCX, PPTX)
-  - file_size: Integer (bytes)
-  - processing_status: Enum (PENDING, PROCESSING, COMPLETED, FAILED)
-  - heading_tree: JSONB  # {chapters: [{id, title, level, children}]}
-  - total_pages: Integer
-  - total_chapters: Integer
-  - total_chunks: Integer
-  - metadata: JSONB  # extracted metadata
-  - error_message: Text (nullable)
-  - created_at, updated_at: DateTime
+**heading_tree structure:**
+```json
+{
+  "chapters": [
+    {
+      "chapter_id": "ch1",
+      "title": "Chapter 1 Title",
+      "sections": [
+        {
+          "section_id": "ch1_s1",
+          "title": "Section 1 Title",
+          "subsections": [
+            {"section_id": "ch1_s1_ss1", "title": "Subsection Title"}
+          ]
+        }
+      ]
+    }
+  ]
+}
 ```
 
-#### `models/exam.py`
+### 4.3 Exam
 ```python
-Exam:
-  - id: UUID (PK)
-  - user_id: UUID (FK → User)
-  - document_id: UUID (FK → Document, nullable)
-  - title: String
-  - scope: JSONB  # {chapters: [{id, title}], selection_method}
-  - exam_config: JSONB  # {type, question_count, bloom_distribution, ...}
-  - questions: JSONB  # [{id, type, content, options, answer, bloom_level, ...}]
-  - blueprint: JSONB  # {slots: [{question_id, bloom_level, chapter, topic}]}
-  - status: Enum (GENERATING, HITL_PENDING_1, HITL_PENDING_2, HITL_PENDING_3, COMPLETED, FAILED, CANCELLED)
-  - checkpoint_state: JSONB  # current checkpoint metadata
-  - generation_metadata: JSONB  # tokens, cost, model used
-  - quality_metrics: JSONB  # {verifier_pass_rate, evidence_coverage}
-  - created_at, updated_at: DateTime
+id: UUID (PK)
+user_id: UUID (FK -> users, indexed)
+document_id: UUID (FK -> documents, nullable)
+title: str
+scope: JSONB (nullable)  # list of chapter titles
+exam_config: JSONB (nullable)
+questions: JSONB (nullable)
+status: str (indexed)  # draft, generating, hitl_pending_1/2/3, completed, failed, published, regenerating
+cost_report: JSONB (nullable)
+total_tokens: int (nullable)
+total_cost_usd: Decimal (nullable)
+blueprint: JSONB (nullable)  # list of BlueprintSlot dicts
+checkpoint_state: JSONB (nullable)
+generation_metadata: JSONB (nullable)
+quality_metrics: JSONB (nullable)
+created_at: datetime
+updated_at: datetime
 
-ExamHistory:
-  - id: UUID (PK)
-  - exam_id: UUID (FK → Exam)
-  - snapshot: JSONB  # full exam state at this point
-  - change_type: Enum (CREATED, UPDATED, REGENERATED, PUBLISHED)
-  - change_description: Text
-  - created_at: DateTime
+Relations:
+- user: User
+- document: Document (nullable)
+- history: List[ExamHistory]
+- feedback_events: List[FeedbackEvent]
 ```
 
-#### `models/teacher_preference.py`
+**Exam Status Flow:**
+```
+draft → generating → hitl_pending_1 → [approved/rejected] → hitl_pending_2 → [approved/rejected] → hitl_pending_3 → completed → published
+                         ↓
+                      failed/cancelled
+```
+
+**BlueprintSlot structure:**
+```json
+{
+  "question_id": "MCQ_001",
+  "type": "mcq",
+  "bloom_level": "thong_hieu",
+  "chapter": "Chapter 1 Title",
+  "topic_hint": "Brief description",
+  "estimated_difficulty": 0.5
+}
+```
+
+### 4.4 ExamHistory
 ```python
-TeacherPreference:
-  - id: UUID (PK)
-  - user_id: UUID (FK → User, unique)
-  - preferred_bloom_distribution: JSONB  # {Nhớ: 10, Hiểu: 20, ...}
-  - preferred_exam_types: JSONB  # ["Trắc nghiệm", "Tự luận"]
-  - subject_focus: String
-  - additional_notes: Text
-  - created_at, updated_at: DateTime
+id: UUID (PK)
+exam_id: UUID (FK -> exams, indexed)
+snapshot: JSONB (nullable)
+change_type: str  # generate, edit_direct, edit_prompt, regenerate, published
+change_description: str (nullable)
+created_at: datetime
+
+Relations:
+- exam: Exam
+```
+
+### 4.5 RefreshToken
+```python
+id: UUID (PK)
+user_id: UUID (FK -> users)
+token_hash: str
+expires_at: datetime
+created_at: datetime
+ip_address: str (nullable)
+revoked: bool (default: False)
+
+Relations:
+- user: User
+```
+
+### 4.6 FeedbackEvent
+```python
+id: UUID (PK)
+user_id: UUID (FK -> users, indexed)
+exam_id: UUID (FK -> exams, indexed)
+signal_type: str  # bloom_mismatch, out_of_scope, duplicate, quality_low, answer_incorrect, validation_warning, generation_error, publish, edit_applied
+severity: str  # info, warning, error, critical
+workflow_stage: str (nullable)
+event_source: str (nullable)
+source_type: str (nullable)
+source_ref: str (nullable)
+review_status: str (nullable)  # pending, accepted, rejected, corrected
+reviewed_by_human: bool
+question_id: str (nullable)
+error_categories: JSONB (nullable)
+before_snapshot_ref: str (nullable)
+after_snapshot_ref: str (nullable)
+payload: JSONB (nullable)
+created_at: datetime
+
+Relations:
+- user: User
+- exam: Exam
 ```
 
 ---
 
-## 6. Hệ thống Multi-Agent
+## 5. WEBSOCKET EVENTS
 
-### 6.1 Tổng quan 5 Agent
+### 5.1 Exam Generation Events (`/ws/exam/{exam_id}`)
+
+| Event Type | Fields | Description |
+|------------|--------|-------------|
+| `plan_step` | `step`, `total_steps`, `message` | Pipeline progress (0-5) |
+| `question_generated` | `question_id`, `question` | Single question generated |
+| `validation_result` | `passed`, `issues_count`, `issues` | Validation completed |
+| `hitl_checkpoint` | `checkpoint_id`, `data` | HITL pause (0/1/2/3) |
+| `pipeline_paused` | `checkpoint_id`, `message`, `blueprint`, `distribution_summary` | Graph paused |
+| `completed` | `exam_id`, `total_cost_usd` | Generation completed |
+| `error` | `message`, `agent` | Error occurred |
+
+**HITL Checkpoints:**
+- **Checkpoint 0:** Requirements confirmation
+- **Checkpoint 1:** Blueprint review (approve/reject with feedback)
+- **Checkpoint 2:** Full exam review (approve/request changes)
+- **Checkpoint 3:** Export preview
+
+### 5.2 Document Upload Events (`/ws/document/{document_id}`)
+
+| Event Type | Fields | Description |
+|------------|--------|-------------|
+| `upload_started` | `document_id`, `filename` | Upload began |
+| `upload_progress` | `document_id`, `percent` | Upload progress |
+| `processing_step` | `document_id`, `step`, `message`, `percent` | Processing step |
+| `processing_completed` | `document_id`, `filename` | Processing done |
+| `processing_failed` | `document_id`, `error` | Processing failed |
+
+---
+
+## 6. AGENT SYSTEM
+
+### 6.1 Multi-Agent Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Orchestrator (Agent 0)                        │
-│              Master coordinator via LangGraph                   │
-└────────────────────────┬────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                    Orchestrator Agent (Agent 0)                   │
+│  - Coordinates all sub-agents                                    │
+│  - Manages LangGraph StateGraph                                  │
+│  - Handles HITL checkpoints                                      │
+│  - Emits WebSocket events                                        │
+└────────────────────────┬─────────────────────────────────────────┘
                          │
-    ┌────────────────────┼────────────────────┐
-    ▼                    ▼                    ▼
-┌─────────┐       ┌──────────┐        ┌──────────┐
-│Retrieval│       │  Outline │        │  Builder │
-│Agent 1  │       │ Agent 2  │        │ Agent 3  │
-│  (RAG)  │──────▶│(Blueprint)│───────▶│(Question)│
-└─────────┘       └──────────┘        └─────┬────┘
-                                           │
-                                           ▼
-                                    ┌──────────┐
-                                    │ Validator│
-                                    │ Agent 4  │
-                                    │(Critic)  │
-                                    └──────────┘
+        ┌────────────────┼────────────────┐
+        ▼                ▼                ▼
+┌───────────────┐ ┌─────────────┐ ┌─────────────┐
+│ Retrieval     │ │ Outline     │ │ Builder      │
+│ Agent (1)    │ │ Agent (2)   │ │ Agent (3)    │
+│ - RAG        │ │ - Blueprint │ │ - Questions  │
+│ - Reranking  │ │ - Bloom     │ │ - MCQ/Essay │
+└───────────────┘ └─────────────┘ └──────┬──────┘
+                                        │
+                                        ▼
+                               ┌─────────────────┐
+                               │ Validator       │
+                               │ Agent (4)      │
+                               │ - Quality      │
+                               │ - Scope check  │
+                               │ - Bloom match  │
+                               └─────────────────┘
 ```
 
-### 6.2 Agent 0: Orchestrator (`orchestrator.py`)
+### 6.2 LangGraph Pipeline Nodes
 
-**Vai trò**: Điều phối toàn bộ pipeline
+1. **initialize** - Setup initial state
+2. **plan_complex** - Complex request planning
+3. **decide_plan** - Route to appropriate path
+4. **load_long_term_memory** - Load teacher preferences
+5. **clarification_check** - Check for unclear requirements
+6. **retrieve_knowledge** - RAG retrieval
+7. **create_outline** - Generate blueprint
+8. **wait_for_blueprint_approval** - HITL CP1 (interrupt)
+9. **build_questions** - Generate questions
+10. **validate_questions** - Quality validation
+11. **check_validation_result** - Route based on validation
+12. **retry_builder** - Retry on validation failure
+13. **handle_*_failure** - Error handling
+14. **save_teacher_preferences** - G14: Persist preferences
+15. **finalize_output** - Complete generation
+16. **emit_checkpoint_1/2/3** - HITL events
+17. **wait_for_review** - HITL CP2 (interrupt)
 
-**Các phương thức chính**:
-- `generate_exam()`: Entry point chính, chạy LangGraph với `thread_id=exam_id`
-- `reject_blueprint()`: G8 - Xử lý từ chối blueprint, tiêm feedback vào prompt
-- `approve_blueprint()`: G7 - Duyệt blueprint, cập nhật Redis
-- `submit_review()`: G14 - Lưu teacher preferences, dispatch task
-- `edit_via_prompt()`: Chỉnh sửa đề bằng prompt
+### 6.3 HITL (Human-In-The-Loop) Flow
 
-### 6.3 Agent 1: Retrieval (`retrieval.py`)
+```
+1. Teacher submits generation request
+        ↓
+2. Pipeline creates blueprint (HITL CP1)
+        ↓
+3. Teacher reviews blueprint:
+   - Approve → continue
+   - Reject → feedback → regenerate blueprint
+        ↓
+4. Pipeline generates questions
+        ↓
+5. Teacher reviews questions (HITL CP2):
+   - Approve → ready for export
+   - Reject → regenerate with feedback
+        ↓
+6. Export (HITL CP3 - optional preview)
+```
 
-**Vai trò**: Truy xuất knowledge chunks từ Pinecone
+### 6.4 Bloom Taxonomy Levels
 
-**Quy trình**:
-1. G11: Query expansion - Tạo 3-5 biến thể query
-2. G10: Truy xuất song song theo chapter
-3. Reranking bằng CrossEncoder
-4. Token budget enforcement (cắt chunks nếu vượt MAX_CONTEXT_TOKENS)
-
-### 6.4 Agent 2: Outline (`outline.py`)
-
-**Vai trò**: Tạo blueprint đề thi
-
-**Output**: `OutlineOutput`:
-- `blueprint`: Danh sách slots, mỗi slot có `question_id`, `bloom_level`, `chapter`, `topic`
-- `distribution_summary`: Thống kê phân bố Bloom
-- `estimated_tokens`, `estimated_cost`
-
-**G8 Feedback Loop**: Nếu bị reject, `outline_feedback` được tiêm vào prompt tiếp theo
-
-### 6.5 Agent 3: Builder (`builder.py`)
-
-**Vai trò**: Sinh câu hỏi từ blueprint slots
-
-**Skill pipeline cho mỗi câu hỏi**:
-1. `bloom_classifier` - Xác định Bloom level
-2. `difficulty_estimator` - Ước lượng độ khó
-3. `dedup_checker` - Kiểm tra trùng lặp
-4. `latex_renderer` - Render LaTeX
-
-**Fallback**: Nếu LLM thất bại sau 3 lần thử, dùng demo question
-
-### 6.6 Agent 4: Validator (`validator.py`)
-
-**Vai trò**: Kiểm tra chất lượng câu hỏi
-
-**Validations**:
-- `bloom_compliance`: Câu hỏi có đúng Bloom level?
-- `scope_violation`: Câu hỏi có nằm ngoài scope?
-- `answer_solvability`: LLM giải được đáp án?
-
-**G9 Retry Logic**: Issues được lưu vào Redis để survive Celery restarts
+| Level | Vietnamese | Description |
+|-------|-----------|-------------|
+| nhan_biet | Nhận biết | Recall/identify facts |
+| thong_hieu | Thông hiểu | Explain/interpret |
+| van_dung | Vận dụng | Apply in new situations |
+| van_dung_cao | Vận dụng cao | Complex analysis/synthesis |
 
 ---
 
-## 7. LangGraph Pipeline
+## 7. EXPORT FEATURES
 
-### 7.1 State Schema (`graph/state.py`)
+### 7.1 PDF Export
+- Uses ReportLab
+- Two versions:
+  - Student version (no answers)
+  - Teacher version (with answers, explanations, rubric)
+- Optional: Include blueprint table at top
+- Limit: 10MB
 
-```python
-ExamGraphState (TypedDict):
-  # Identity
-  - exam_id: str
-  - user_id: str
-  - document_id: Optional[str]
-  
-  # Configuration snapshot
-  - user_prompt: str
-  - exam_config: dict
-  - scope: dict
-  
-  # Pipeline status
-  - pipeline_status: PipelineStatus enum
-  
-  # Intermediate products
-  - retrieval_result: Optional[RetrievalOutput]
-  - outline_result: Optional[OutlineOutput]
-  - builder_result: Optional[BuilderOutput]
-  - validation_result: Optional[ValidatorOutput]
-  
-  # HITL checkpoints
-  - checkpoint_1_state: HITLCheckpointStatus
-  - checkpoint_2_state: HITLCheckpointStatus
-  - checkpoint_3_state: HITLCheckpointStatus
-  
-  # Memory & errors
-  - short_term_memory: dict
-  - long_term_memory: Optional[TeacherPreference]
-  - errors: List[str]
-  - retry_count: int
-```
-
-### 7.2 27 Nodes và Data Flow
-
-```
-[START]
-    │
-    ▼
-┌──────────────────────────────────────────────┐
-│              initialize                       │
-│  - Set default HITL timeouts                 │
-│  - retry_count = 0                           │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│         clarification_check                   │
-│  - Check if user needs clarification          │
-└──────────┬───────────────────────────┬───────┘
-           │ no clarification needed   │ needs clarification
-           ▼                           ▼
-┌──────────────────────────────────┐  ┌──────────────────────┐
-│        decide_plan               │  │ emit_clarification   │
-│  - complex? → plan_complex       │  │ → END                │
-│  - simple? → retrieve_knowledge │  └──────────────────────┘
-└──────────┬───────────────────────┘
-           │
-           ▼
-┌──────────────────────────────────────────────────────┐
-│                  retrieve_knowledge                   │
-│  - Agent 1: Query expansion + Pinecone retrieval     │
-│  - Reranking + token budget enforcement              │
-└──────────┬────────────────────────────┬──────────────┘
-           │ success                    │ failure
-           ▼                            ▼
-┌──────────────────────┐  ┌─────────────────────────────┐
-│    create_outline    │  │  handle_retrieval_failure   │
-│  - Agent 2: Blueprint│  │  → create_outline (empty)   │
-│  - G8: inject feedback│ └─────────────────────────────┘
-└──────────┬───────────┴──────────────────────────────┘
-           │
-           ▼
-┌──────────────────────────────────────────────┐
-│            emit_checkpoint_1                  │
-│  - WebSocket: blueprint to FE                 │
-│  - Auto-approve if timeout                    │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│       wait_for_blueprint_approval            │
-│  🔴 HITL INTERRUPT #1                        │
-│  - await user approval/rejection             │
-│  - Command(resume=...) from /approve-        │
-│    or /reject-blueprint endpoint             │
-└──────────┬───────────────────────────┬──────┘
-           │ approved                   │ rejected
-           ▼                            ▼
-┌──────────────────────┐  ┌─────────────────────────────┐
-│  build_questions     │  │ create_outline (with feedback│
-│  - Agent 3: Generate │  │   from rejection)           │
-│    questions one by  │  │   → emit_checkpoint_1       │
-│    one (chunk_size=1)│  └─────────────────────────────┘
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────────────────────────────┐
-│           validate_questions                  │
-│  - Agent 4: Quality checks                   │
-│  - Bloom compliance, scope, solvability      │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│        check_validation_result                │
-│  ┌─────────┬──────────────┬────────────────┐ │
-│  │ passed  │ retry (<3)   │ max exceeded  │ │
-│  ▼         ▼              ▼                │ │
-│ emit_cp2  retry_builder  handle_max_        │ │
-│                          retries_exceeded   │ │
-└─────────────────────────────────────────────┘
-           │
-           ▼ (loop back)
-┌──────────────────────────────────────────────┐
-│            retry_builder                      │
-│  - Self-loop to validate_questions           │
-│  - G9: Load/save issues from Redis          │
-└──────────────────────────────────────────────┘
-           │
-           ▼
-┌──────────────────────────────────────────────┐
-│           emit_checkpoint_2                   │
-│  - WebSocket: questions list to FE           │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│           wait_for_review                    │
-│  🔴 HITL INTERRUPT #2                        │
-│  - await user review submission              │
-│  - Command(resume=...) from /submit-review   │
-└──────────┬───────────────────────────┬──────┘
-           │ approved                   │ rejected
-           ▼                            ▼
-┌──────────────────────┐  ┌─────────────────────────────┐
-│save_teacher_pref     │  │ build_questions (with edits)│
-└──────────┬───────────┘  │   → validate_questions      │
-           ▼              └─────────────────────────────┘
-┌──────────────────────────────────────────────┐
-│           emit_checkpoint_3                  │
-│  - WebSocket: final preview                  │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│           finalize_output                     │
-│  - Save final exam to DB                     │
-│  - Update status = COMPLETED                 │
-│  - WebSocket: generation_complete           │
-└──────────────────────────────────────────────┘
-                   │
-                   ▼
-                  [END]
-```
-
-### 7.3 HITL Checkpoints Chi tiết
-
-#### Checkpoint 1: Blueprint Approval (G7/G8)
-- **Trigger**: Sau khi outline được tạo
-- **Frontend**: Modal hiển thị blueprint với:
-  - Tổng số câu hỏi theo phân bố Bloom
-  - Danh sách chương được chọn
-  - Ước lượng chi phí/token
-- **Actions**:
-  - **Approve** → `Command(resume={"action": "approve"})` → build_questions
-  - **Reject** → Lưu feedback + tạo outline mới
-  - **Timeout** (5 phút) → Auto-approve
-
-#### Checkpoint 2: Questions Review (G14)
-- **Trigger**: Sau khi questions được build và validate
-- **Frontend**: Danh sách câu hỏi với:
-  - Nội dung câu hỏi
-  - Đáp án đúng
-  - Bloom level
-  - Nút edit/lock/delete mỗi câu
-- **Actions**:
-  - **Submit** → Lưu preferences → finalize
-  - **Edit + Submit** → Chỉnh sửa rồi gửi
-
-#### Checkpoint 3: Preview
-- **Trigger**: Trước khi finalize
-- **Frontend**: Preview đề thi hoàn chỉnh dạng HTML
+### 7.2 DOCX Export
+- Uses python-docx
+- Two versions: Student / Teacher
+- Teacher version includes answer key table
 
 ---
 
-## 8. RAG Pipeline
+## 8. KEY CONFIGURATIONS
 
-### 8.1 Tổng quan luồng
+### 8.1 Environment Variables (`.env`)
 
-```
-Document Upload
-      │
-      ▼
-┌─────────────┐
-│  Parser     │  PDF: Gemini → Marker → PyMuPDF fallback
-│             │  DOCX: python-docx
-│             │  PPTX: python-pptx
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  Cleaner    │  Remove noise, normalize formatting
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  Structure  │  Detect heading tree from markdown
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  Chunker    │  Semantic chunking (overlap)
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│  Embedder   │  BAAI/bge-m3 → embeddings
-└──────┬──────┘
-       │
-       ▼
-┌─────────────┐
-│Vector Store │  Upsert to Pinecone (namespaced)
-└─────────────┘
-```
-
-### 8.2 Parser (`rag/parser.py`)
-
-**PDF parsing (3-level fallback)**:
-
-```
-Level 1: Gemini (google.genai SDK)
-  ├── Split PDF into 10-page chunks
-  ├── Distribute to worker threads
-  ├── Vietnamese prompt: structure + math + images
-  └── Thread-safe ParserJobCoordinator
-
-Level 2: Marker server (QWEN_VISION_BASE_URL/parse-pdf)
-  └── Remote API call fallback
-
-Level 3: PyMuPDF (local)
-  ├── Font-size based heading detection
-  └── Basic text extraction
-```
-
-### 8.3 Embedder (`rag/embedder.py`)
-
-- **Model**: `BAAI/bge-m3` (sentence-transformers)
-- **Cache**: Redis với 7-day TTL
-- **Fallback**: Hash-based deterministic embedding nếu model unavailable
-- **Reranker**: `BAAI/bge-reranker-v2-m3` (local CrossEncoder)
-
-### 8.4 Vector Store (`rag/vector_store.py`)
-
-- **Pinecone** với namespace pattern: `{doc_id}_{chapter_id}` (ASCII-safe)
-- **Methods**:
-  - `upsert_chunks()` - Batch upsert
-  - `query_namespace()` - Semantic search
-  - `count_chunks_in_scope()` - Kiểm tra số chunks
-  - `delete_document_vectors()` - Cleanup
-
----
-
-## 9. Cơ sở dữ liệu & Lưu trữ
-
-### 9.1 PostgreSQL
-
-**Tables**: `users`, `documents`, `exams`, `exam_history`, `teacher_preferences`
-
-**Indexes**:
-- `users.email` (unique)
-- `documents.user_id`
-- `exams.user_id`
-- `exams.document_id`
-- `exams.status`
-
-### 9.2 Redis
-
-**Use cases**:
-| Key Pattern | Purpose | TTL |
-|-------------|---------|-----|
-| `session:{exam_id}:{user_id}` | Short-term memory | 2h |
-| `retry_issues:{exam_id}` | G9 retry issues | 1h |
-| `hitl:approved:{exam_id}:1` | HITL CP1 approval | 30min |
-| `doc_status:{doc_id}` | Processing status cache | - |
-| `embed_cache:{hash}` | Embedding cache | 7d |
-| `rate_limit:gen:{user_id}` | Rate limiting | 24h |
-
-### 9.3 MinIO/S3
-
-**Bucket**: `documents` (configurable via `S3_BUCKET_NAME`)
-
-**Key pattern**: `{user_id}/{document_id}/{filename}`
-
-**Operations**:
-- Upload (signed URL hoặc direct)
-- Download (presigned URL, 1h expiry)
-- Delete (cascade với DB records + Pinecone vectors)
-
-### 9.4 Pinecone
-
-**Index**: `curriculum` (configurable)
-
-**Namespace**: `{doc_id}_{chapter_id}` (ASCII-safe)
-
-**Metadata stored per vector**:
-- `doc_id`, `chapter_id`, `chapter_title`
-- `chunk_index`, `total_chunks`
-- `source_file`, `page_number`
-
----
-
-## 10. WebSocket & Thời gian thực
-
-### 10.1 Connection Manager (`websocket/manager.py`)
-
-```python
-class ConnectionManager:
-  # Exam WebSocket connections
-  active_connections: Dict[str, Set[WebSocket]]
-  
-  # Redis pub/sub fan-out
-  redis_pubsub: asyncio.Task
-  
-  # Event replay for reconnect
-  ws_events:{exam_id}: List[SSEvent]
-  
-  # Methods
-  connect(exam_id, websocket)
-  disconnect(exam_id, websocket)
-  emit(exam_id, event_type, data)  # store + send + publish
-  listen_redis(channel)  # fan-out from Redis to local clients
-```
-
-### 10.2 Event Replay Mechanism (G19)
-
-Khi client reconnect, server replay tất cả events từ Redis LIST:
-
-```
-1. Client connects → receives last_event_id
-2. Server reads: LRANGE ws_events:{exam_id} {last_event_id} -1
-3. Server sends all missed events
-4. Client resumes from correct state
-```
-
-### 10.3 SSEvent Types
-
-```python
-SSEvent.generation_started()
-SSEvent.retrieval_progress()
-SSEvent.outline_created()
-SSEvent.checkpoint_1()
-SSEvent.questions_building()
-SSEvent.questions_built()
-SSEvent.validation_progress()
-SSEvent.validation_done()
-SSEvent.checkpoint_2()
-SSEvent.checkpoint_3()
-SSEvent.generation_complete()
-SSEvent.generation_error()
-SSEvent.generation_cancelled()
-SSEvent.heartbeat()
-```
-
----
-
-## 11. Background Tasks (Celery)
-
-### 11.1 Celery Configuration (`tasks/celery_app.py`)
-
-```python
-broker_url = REDIS_URL
-result_backend = REDIS_URL
-task_serializer = json
-accept_content = [json]
-timezone = Asia/Ho_Chi_Minh
-task_time_limit = 7200  # 2h hard limit
-task_soft_time_limit = 6600  # 1h50 soft limit
-worker_prefetch_multiplier = 1
-task_acks_late = True
-```
-
-### 11.2 Exam Generation Task (`tasks/exam_task.py`)
-
-```python
-@celery_app.task(bind=True, max_retries=3)
-def generate_exam_task(self, exam_id: str, config: dict):
-  # Idempotency guard (check exam status)
-  # Run async via asyncio.new_event_loop()
-  # Store progress in Redis for WebSocket
-  # Fallback: in-memory storage if Redis unavailable
-```
-
-### 11.3 Document Processing Task (`tasks/document_task.py`)
-
-Xử lý tài liệu trong background:
-- Parse document
-- Extract heading tree
-- Chunk content
-- Generate embeddings
-- Upsert to Pinecone
-- Update processing status
-
----
-
-## 12. API Reference
-
-### 12.1 Authentication
-
-```
-POST /api/v1/auth/register
-Body: { email, password, full_name }
-Response: { user, access_token, refresh_token }
-
-POST /api/v1/auth/login
-Body: { email, password }
-Response: { user, access_token, refresh_token }
-
-POST /api/v1/auth/refresh
-Body: { refresh_token }
-Response: { access_token, refresh_token }
-
-POST /api/v1/auth/logout
-Headers: Authorization: Bearer {token}
-Response: { message }
-```
-
-### 12.2 Documents
-
-```
-POST /api/v1/documents/upload
-Headers: Authorization, Content-Type: multipart/form-data
-Body: file (PDF/DOCX/PPTX, max 100MB)
-Response: { id, filename, file_type, processing_status }
-
-GET /api/v1/documents?page=1&limit=10&status=COMPLETED
-Headers: Authorization
-Response: { items: [], total, page, limit }
-
-GET /api/v1/documents/{id}
-Headers: Authorization
-Response: { document object with heading_tree }
-
-GET /api/v1/documents/{id}/status
-Headers: Authorization
-Response: { status, progress, message }
-
-GET /api/v1/documents/{id}/curriculum-tree
-Headers: Authorization
-Response: { tree: { id, title, level, children, page_range } }
-
-DELETE /api/v1/documents/{id}
-Headers: Authorization
-Response: { message }
-
-POST /api/v1/documents/{id}/reprocess
-Headers: Authorization
-Response: { message }
-```
-
-### 12.3 Exams
-
-```
-POST /api/v1/exams/generate
-Headers: Authorization
-Body: {
-  document_id,
-  scope: { chapters: [{id, title}], selection_method },
-  config: {
-    type: "trac_nghiem" | "tu_luan" | "mixed",
-    question_count: 30,
-    bloom_distribution: { "Nhớ": 5, "Hiểu": 10, ... },
-    difficulty: "medium",
-    time_limit: 90,
-    include_answers: true
-  }
-}
-Response: { exam_id, status }
-
-GET /api/v1/exams?page=1&limit=10&status=COMPLETED
-Headers: Authorization
-Response: { items: [], total, page, limit }
-
-GET /api/v1/exams/{id}
-Headers: Authorization
-Response: { exam object with questions }
-
-PATCH /api/v1/exams/{id}/questions/{qid}
-Headers: Authorization
-Body: { content?, options?, answer?, bloom_level?, ... }
-Response: { question }
-
-POST /api/v1/exams/{id}/approve-blueprint
-Headers: Authorization
-Body: { notes? }
-Response: { message, checkpoint_2_state }
-
-POST /api/v1/exams/{id}/reject-blueprint
-Headers: Authorization
-Body: { feedback: "..." }
-Response: { message }
-
-POST /api/v1/exams/{id}/submit-review
-Headers: Authorization
-Body: {
-  action: "approve" | "request_changes",
-  edited_questions?: [...],
-  preferences?: {...}
-}
-Response: { message, exam }
-
-GET /api/v1/exams/{id}/export/pdf
-Headers: Authorization
-Query: ?include_answers=true&include_blueprint=true
-Response: Binary PDF (max 10MB)
-
-GET /api/v1/exams/{id}/export/docx
-Headers: Authorization
-Query: ?include_answers=true
-Response: Binary DOCX (max 10MB)
-```
-
-### 12.4 Rate Limiting
-
-| Endpoint | Limit |
-|----------|-------|
-| `POST /api/v1/exams/generate` | 10/user/24h |
-| `POST /api/v1/auth/login` | 20/user/15min |
-
----
-
-## 13. Cấu hình môi trường
-
-### 13.1 Backend Environment Variables (`.env`)
-
-```bash
+```env
 # Database
-DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/examai
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_DB=examai
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/curriculum_ai
 
 # Redis
 REDIS_URL=redis://localhost:6379/0
+CELERY_BROKER_URL=redis://localhost:6379/1
 
-# JWT
-SECRET_KEY=your-secret-key-here
-ACCESS_TOKEN_EXPIRE_MINUTES=60
-REFRESH_TOKEN_EXPIRE_DAYS=7
+# LLM Provider
+LLM_PROVIDER=groq
+LLM_FALLBACK_CHAIN=groq,ollama,g4f
 
-# LLM Providers
-ORCHESTRATOR_PROVIDER=groq
+# Per-Role LLM Models
 ORCHESTRATOR_MODEL=llama-3.3-70b-versatile
-ORCHESTRATOR_API_KEY=...
-
-BUILDER_PROVIDER=groq
 BUILDER_MODEL=llama-3.3-70b-versatile
-BUILDER_API_KEY=...
-
-# Gemini (for PDF parsing)
-GEMINI_API_KEY=...
-GEMINI_KEYS_FILE=./.gemini_keys
+VALIDATOR_MODEL=llama-3.3-70b-versatile
+OUTLINE_MODEL=llama-3.1-8b-instant
 
 # Pinecone
-PINECONE_API_KEY=...
-PINECONE_INDEX=curriculum
-PINECONE_CLOUD=aws
-PINECONE_REGION=us-east-1
+PINECONE_API_KEY=your_key_here
+PINECONE_INDEX=curriculum-ai
 
-# S3/MinIO
-S3_ENDPOINT_URL=http://localhost:9000
-S3_ACCESS_KEY=minioadmin
-S3_SECRET_KEY=minioadmin
-S3_BUCKET_NAME=documents
-S3_REGION=us-east-1
+# Storage
+STORAGE_BACKEND=minio  # or "s3"
+MINIO_ENDPOINT_URL=http://127.0.0.1:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET_NAME=curriculum-ai
 
-# Qwen/Marker (optional)
-QWEN_VISION_BASE_URL=http://localhost:8001
+# JWT
+JWT_SECRET_KEY=change-me-in-production
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+REFRESH_TOKEN_EXPIRE_DAYS=7
 
-# LangFuse (optional)
-LANGFUSE_PUBLIC_KEY=...
-LANGFUSE_SECRET_KEY=...
-LANGFUSE_HOST=https://cloud.langfuse.com
+# Server
+HOST=0.0.0.0
+PORT=8000
+APP_BASE_URL=http://localhost:8000
 
-# Celery
-CELERY_BROKER_URL=redis://localhost:6379/1
-CELERY_RESULT_BACKEND=redis://localhost:6379/2
-
-# Demo Mode
-DEMO_MODE=false
-
-# App
-API_V1_PREFIX=/api/v1
-CORS_ORIGINS=["http://localhost:3000"]
-LOG_LEVEL=INFO
+# CORS
+CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 ```
 
-### 13.2 Frontend Environment Variables
+### 8.2 Rate Limiting
+- Max exam generations per user per day: 10 (configurable via `MAX_GENERATES_PER_DAY`)
 
+### 8.3 RAG Settings
+- Chunk size: 1200 tokens
+- Chunk overlap: 200 tokens
+- Top K per chapter: 20
+- Top K after rerank: 30
+- Max context tokens: 12000
+
+---
+
+## 9. FEATURES ĐANG CHẠY (IMPLEMENTED)
+
+### 9.1 Authentication
+- [x] JWT login/register with bcrypt password hashing
+- [x] Refresh token rotation
+- [x] Token auto-refresh on 401
+- [x] Logout with token revocation
+
+### 9.2 Document Management
+- [x] Upload PDF/DOCX/PPTX (max 100MB)
+- [x] Background processing pipeline
+- [x] Heading tree detection (LLM + pattern fallback)
+- [x] Semantic chunking
+- [x] Embedding with BAAI/bge-m3
+- [x] Pinecone indexing (per-chapter namespace)
+- [x] Curriculum tree management
+- [x] Rescan structure / Reprocess
+
+### 9.3 Exam Generation
+- [x] 3-step wizard UI (document → config → generate)
+- [x] Real-time WebSocket streaming
+- [x] Pipeline progress visualization
+- [x] Blueprint review (HITL CP1)
+- [x] Question streaming
+- [x] Validation result display
+- [x] HITL approval/rejection flow
+- [x] Demo mode (no AI, local sample questions)
+- [x] Rate limiting (10/day)
+
+### 9.4 Exam Management
+- [x] List exams with pagination/filtering
+- [x] View exam details
+- [x] Inline question editing
+- [x] Edit via prompt (LLM-based)
+- [x] Regenerate questions
+- [x] Version history with snapshots
+- [x] Restore from snapshot
+- [x] Quality metrics display
+- [x] Feedback events
+
+### 9.5 Export
+- [x] PDF export (student/teacher versions)
+- [x] PDF with/without blueprint
+- [x] DOCX export (student/teacher versions)
+- [x] HTML preview before export
+
+### 9.6 Feedback System
+- [x] Feedback event logging
+- [x] Feedback store aggregation
+- [x] Signal types: bloom_mismatch, out_of_scope, duplicate, quality_low, etc.
+- [x] Severity levels
+- [x] Review status tracking
+
+### 9.7 WebSocket Real-time
+- [x] Exam generation streaming
+- [x] Document upload progress
+- [x] Event replay on reconnect
+- [x] Redis pub/sub for multi-instance
+
+### 9.8 Agent System
+- [x] Orchestrator with LangGraph
+- [x] Retrieval agent (RAG + reranking)
+- [x] Outline agent (blueprint generation)
+- [x] Builder agent (question generation)
+- [x] Validator agent (quality checking)
+- [x] HITL checkpoints integration
+- [x] Teacher preference memory (G14)
+
+---
+
+## 10. FEATURES CHƯA/CHƯA ĐẦY ĐỦ (NOT FULLY IMPLEMENTED)
+
+### 10.1 Placeholder APIs
+- `POST /api/v1/courses/*` - Course router tồn tại nhưng chưa có logic đầy đủ
+
+### 10.2 Incomplete Features
+- Long-term memory (TeacherPreference model tồn tại nhưng chưa được gọi đầy đủ)
+- Partial regeneration UI - endpoint tồn tại nhưng chưa được integrate vào FE
+
+### 10.3 Optional Features (configured but may not be active)
+- LangFuse tracing (requires API keys)
+- Celery workers (optional, FastAPI background tasks used instead)
+- Sentry (requires DSN)
+
+---
+
+## 11. FILE STRUCTURE
+
+### 11.1 Backend (`backend/`)
+```
+backend/
+├── app/
+│   ├── main.py                    # FastAPI app entry
+│   ├── config.py                  # Settings re-export
+│   ├── dependencies.py            # Auth, DB, Redis dependencies
+│   ├── agents/
+│   │   ├── orchestrator.py        # Main coordinator
+│   │   ├── retrieval.py           # RAG retrieval
+│   │   ├── outline.py            # Blueprint creation
+│   │   ├── builder.py            # Question generation
+│   │   ├── validator.py          # Quality validation
+│   │   ├── planner.py            # Complex request planning
+│   │   ├── llm.py                # Multi-provider LLM client
+│   │   ├── base.py               # Base agent class
+│   │   ├── memory/
+│   │   │   ├── short_term.py     # Redis session memory
+│   │   │   └── long_term.py      # PostgreSQL preferences
+│   │   ├── graph/
+│   │   │   ├── builder.py         # LangGraph StateGraph builder
+│   │   │   ├── state.py          # Graph state schema
+│   │   │   └── nodes/            # Pipeline nodes
+│   │   └── skills/
+│   │       ├── bloom_classifier.py
+│   │       └── scope_checker.py
+│   ├── core/
+│   │   ├── config.py             # Pydantic Settings
+│   │   ├── database.py          # Async SQLAlchemy
+│   │   └── redis_client.py      # Redis wrapper
+│   ├── models/
+│   │   ├── user.py
+│   │   ├── document.py
+│   │   ├── exam.py
+│   │   └── feedback.py
+│   ├── schemas/
+│   │   ├── auth.py
+│   │   ├── document.py
+│   │   ├── exam.py
+│   │   └── common.py
+│   ├── routers/
+│   │   ├── auth.py
+│   │   ├── courses.py
+│   │   ├── documents.py
+│   │   ├── exams.py
+│   │   └── generate.py
+│   ├── services/
+│   │   ├── auth_service.py
+│   │   ├── exam_service.py
+│   │   └── document_service.py
+│   ├── rag/
+│   │   ├── parser.py             # PDF/DOCX/PPTX parsing
+│   │   ├── cleaner.py           # Markdown normalization
+│   │   ├── chunker.py          # Semantic chunking
+│   │   ├── structure.py        # Heading tree detection
+│   │   ├── embedder.py         # Sentence transformer embeddings
+│   │   └── vector_store.py     # Pinecone operations
+│   ├── tasks/
+│   │   ├── celery_app.py
+│   │   ├── exam_task.py         # Celery background task
+│   │   └── document_task.py
+│   ├── websocket/
+│   │   └── manager.py          # WebSocket connection manager
+│   └── utils/
+│       ├── storage.py           # MinIO/S3 abstraction
+│       ├── export.py            # PDF/DOCX export
+│       └── security.py          # JWT, bcrypt
+└── requirements.txt
+```
+
+### 11.2 Frontend (`Frontend/`)
+```
+Frontend/
+├── app/
+│   ├── layout.tsx               # Root layout (providers)
+│   ├── page.tsx                 # Auth page
+│   ├── globals.css              # Global styles
+│   └── dashboard/
+│       ├── layout.tsx           # Dashboard layout (sidebar)
+│       ├── page.tsx             # Dashboard home
+│       ├── generate/page.tsx    # 3-step generation wizard
+│       ├── exams/
+│       │   ├── page.tsx        # Exam list
+│       │   └── [id]/
+│       │       ├── page.tsx     # Exam detail
+│       │       └── history/page.tsx
+│       ├── documents/
+│       │   ├── page.tsx        # Document list
+│       │   └── [id]/page.tsx   # Document detail
+│       ├── feedback/page.tsx   # Feedback store
+│       └── settings/page.tsx   # Settings
+├── components/
+│   ├── auth-provider.tsx        # Auth context
+│   ├── upload-notification-provider.tsx
+│   ├── theme-provider.tsx
+│   ├── status-badge.tsx
+│   ├── generation-live-viewer.tsx  # Real-time generation UI
+│   ├── latex-renderer.tsx
+│   ├── dashboard-header.tsx
+│   ├── empty-state.tsx
+│   ├── file-upload.tsx
+│   ├── generation-progress.tsx
+│   ├── question-editor.tsx
+│   ├── curriculum-tree.tsx
+│   └── ui/                      # Shadcn/ui components
+│       ├── button.tsx
+│       ├── card.tsx
+│       ├── dialog.tsx
+│       ├── sidebar.tsx
+│       └── ... (60+ components)
+├── lib/
+│   ├── api.ts                   # Complete API client
+│   ├── utils.ts                # cn() utility
+│   └── format.ts               # Formatting utilities
+├── package.json
+└── tsconfig.json
+```
+
+---
+
+## 12. QUICK START
+
+### 12.1 Backend
 ```bash
-NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
-NEXT_PUBLIC_WS_URL=ws://localhost:8000
-NEXT_PUBLIC_APP_NAME=ExamAI
+cd backend
+cp .env.example .env  # Edit with your API keys
+pip install -r requirements.txt
+
+# Start dependencies
+docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:15
+docker run -d -p 6379:6379 redis:7
+docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
+
+# Run migrations
+alembic upgrade head
+
+# Start backend
+uvicorn app.main:app --reload --port 8000
 ```
+
+### 12.2 Frontend
+```bash
+cd Frontend
+npm install
+npm run dev
+# Open http://localhost:3000
+```
+
+### 12.3 Dependencies Required
+- PostgreSQL 15+
+- Redis 7+
+- MinIO (or AWS S3)
+- Pinecone account (for vector search)
+- LLM API keys (Groq recommended for development)
 
 ---
 
-## 14. Lưu ý quan trọng
-
-### 14.1 Về Gemini Keys
-
-File `.gemini_keys` chứa danh sách API keys Gemini (mỗi dòng 1 key). Code sẽ đọc file này và sử dụng luân phiên. Nếu không có file, dùng `GEMINI_API_KEY` env var.
-
-### 14.2 Về Demo Mode
-
-Khi `DEMO_MODE=true` hoặc không có `document_id`:
-- Không gọi LLM
-- Sinh câu hỏi demo cố định
-- Không truy xuất vector DB
-
-### 14.3 Về HITL Timeouts
-
-- Checkpoint 1: Mặc định 5 phút, auto-approve nếu timeout
-- Timeout được cấu hình trong `app/core/config.py`
-
-### 14.4 Về Celery Idempotency
-
-Task `generate_exam_task` có idempotency guard:
-- Kiểm tra `exam.status` trước khi chạy
-- Nếu đã `COMPLETED` hoặc `GENERATING`, skip
-
-### 14.5 Về G19 Event Replay
-
-- Events được lưu vào Redis LIST `ws_events:{exam_id}`
-- Max 1000 events per exam (trim oldest)
-- Client nên gửi `Last-Event-ID` header khi reconnect
-
-### 14.6 Về LLM Fallback Chains
-
-Mỗi role có thể cấu hình nhiều provider fallback:
-```
-ORCHESTRATOR_PROVIDER=groq → openai → anthropic
-```
-
-### 14.7 Về File Parsing Fallback
-
-```
-PDF: Gemini → Marker → PyMuPDF
-```
-
-Nếu không có API keys, hệ thống vẫn hoạt động với PyMuPDF cơ bản (chất lượng thấp hơn).
-
-### 14.8 Về Redis Graceful Degradation
-
-- Nếu Redis unavailable: dùng in-memory fallback
-- Ghi log warning
-- Một số tính năng bị hạn chế (rate limiting, session memory, event replay)
-
-### 14.9 Về Pinecone Graceful Degradation
-
-- Nếu Pinecone unavailable: vẫn tạo đề nhưng không truy xuất knowledge
-- Ghi log error
-- Trả về warning trong response
-
-### 14.10 Về CORS
-
-Frontend chạy ở `localhost:3000`, backend ở `localhost:8000`. CORS được cấu hình trong `app/core/config.py` với `CORS_ORIGINS`.
-
----
-
-## Phụ lục: Danh sách file loại trừ
-
-Các thư mục sau **KHÔNG** thuộc spec vì là dữ liệu rác/thử nghiệm:
-
-```
-chunking/              # Code thử nghiệm chunking
-chunking_demo/         # Demo chunking
-data sách/             # Dữ liệu sách test
-kaggle/                # Dataset kaggle
-docs/                  # Tài liệu tham khảo
-figures/               # Hình ảnh minh họa
-node_modules/          # Dependencies
-__pycache__/           # Python cache
-.next/                 # Next.js build
-.venv/                 # Virtual environment
-```
-
----
-
-*Document generated: 2026-04-27*
-*Version: 1.0*
+*Document generated on 2026-05-02 from actual codebase analysis.*

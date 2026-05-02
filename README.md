@@ -1,256 +1,138 @@
-# ExamAI — Hệ thống Tạo đề Kiểm tra Vật lý Tự động bằng Multi-Agent AI
+# ExamAI — Hệ thống Tạo đề Kiểm tra Vật lý bằng Multi-Agent AI
 
-<p align="center">
-  <img src="figures/logo.svg" width="120" alt="ExamAI Logo" />
-</p>
-
-<p align="center">
-  <img src="figures/architecture.svg" alt="System Architecture" />
-</p>
-
-> **ExamAI** là hệ thống tạo đề kiểm tra Vật lý tự động, sử dụng pipeline **5 agent AI phối hợp** với **Human-in-the-Loop (HITL)** — giảng viên kiểm soát hoàn toàn chất lượng đầu ra.
+Hệ thống tạo đề kiểm tra tự động từ tài liệu PDF, sử dụng pipeline **multi-agent AI** với **Human-in-the-Loop (HITL)** — giảng viên kiểm soát hoàn toàn chất lượng đầu ra.
 
 ---
 
-## Mục lục
+## Tính năng chính
 
-1. [Tổng quan](#tổng-quan)
-2. [Kiến trúc hệ thống](#kiến-trúc-hệ-thống)
-3. [Các thành phần chính](#các-thành-phần-chính)
-4. [Pipeline Agent — Luồng sinh đề 5 bước](#pipeline-agent--luồng-sinh-đề-5-bước)
-5. [Human-in-the-Loop (HITL)](#human-in-the-loop-hitl)
-6. [Tính năng nổi bật](#tính-năng-nổi-bật)
-7. [Bắt đầu](#bắt-đầu)
-8. [Cấu trúc thư mục](#cấu-trúc-thư-mục)
-9. [Công nghệ sử dụng](#công-nghệ-sử-dụng)
-
----
-
-## Tổng quan
-
-**ExamAI** giải quyết bài toán: *"Giảng viên muốn tạo đề kiểm tra Vật lý nhanh, đúng chuẩn Bloom, có đáp án và rubric, từ tài liệu giáo trình PDF của mình — mà không cần viết tay từng câu."*
-
-### Vấn đề cũ (thủ công)
-- Tạo 1 đề 40 câu MCQ + 5 câu tự luận mất **2–4 giờ**
-- Khó đảm bảo phân bổ Bloom đều
-- Câu trả lời sai logic, đáp án mồi nhử không tốt
-- Không tái sử dụng được tài liệu
-
-### Giải pháp ExamAI
-- Sinh đề trong **vài phút** với chất lượng kiểm soát bởi giảng viên
-- Phân bổ Bloom chính xác theo cấu hình
-- Đáp án mồi nhử có logic, rubric chấm điểm rõ ràng
-- Ghi nhớ sở thích giảng viên (long-term memory)
+- **Sinh đề tự động** từ tài liệu PDF trong vài phút
+- **Phân bổ Bloom chính xác** theo cấu hình giảng viên
+- **HITL checkpoints** — giảng viên duyệt blueprint và đề trước khi hoàn thành
+- **Real-time WebSocket** — theo dõi từng bước sinh đề
 - **Xuất PDF / DOCX** sẵn sàng in
+- **Ghi nhớ sở thích** giảng viên qua Long-term Memory
 
 ---
 
-## Kiến trúc hệ thống
-
-<p align="center">
-  <img src="figures/agent_pipeline.svg" alt="Agent Pipeline" />
-</p>
-
-### Tổng quan kiến trúc
+## Kiến trúc
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                        EXAMAI SYSTEM                                 │
-│                                                                      │
-│  ┌──────────────┐         ┌──────────────────────┐                   │
-│  │   Frontend   │◄───────►│   FastAPI Backend     │                   │
-│  │  (Next.js)   │  REST   │   ┌──────────────┐   │                   │
-│  │              │   +     │   │  Orchestrator │   │                   │
-│  │ Dashboard    │  WS     │   │    Agent      │   │                   │
-│  │ Generate     │         │   │  (Agent 0)    │   │                   │
-│  │ Review       │         │   └──────┬───────┘   │                   │
-│  │ History      │         │          │           │                   │
-│  └──────────────┘         │   ┌──────▼───────┐   │                   │
-│         │                 │   │ 5 Sub-Agents │   │                   │
-│         │                 │   └──────┬───────┘   │                   │
-│         │                 └──────────┼────────────┘                   │
-│         │                            │                                │
-│         ▼                            ▼                                │
-│  ┌─────────────┐          ┌───────────────────┐                       │
-│  │  PostgreSQL │          │      Redis        │                       │
-│  │ (Hồ sơ, đề,│          │ (Short-term mem,  │                       │
-│  │  người dùng)│          │  pub/sub events)  │                       │
-│  └─────────────┘          └───────────────────┘                       │
-│         │                            │                                │
-│         │                 ┌──────────▼──────────┐                     │
-│         │                 │     Pinecone        │                     │
-│         │                 │ (Vector store cho   │                     │
-│         │                 │  tài liệu PDF)     │                     │
-│         │                 └─────────────────────┘                     │
-│         │                                                          │
-│         │                 ┌─────────────────────┐                    │
-│         └────────────────►│  Celery Worker       │                    │
-│                           │  (Async task queue)  │                    │
-│                           └─────────────────────┘                    │
-└──────────────────────────────────────────────────────────────────────┘
+Frontend (Next.js 16)
+       │ REST + WebSocket
+       ▼
+Backend (FastAPI)
+  ├── Routers: auth, documents, exams, generate
+  ├── Orchestrator Agent (LangGraph StateGraph)
+  │     ├── Retrieval Agent
+  │     ├── Outline Agent
+  │     ├── Builder Agent
+  │     └── Validator Agent
+  └── Tasks (Celery)
+       │
+       ├── PostgreSQL  (users, exams, documents, preferences)
+       ├── Redis       (short-term memory, pub/sub, WebSocket relay)
+       ├── Pinecone    (vector store: document chunks)
+       └── MinIO/S3    (file storage)
 ```
-
-### Frontend — Next.js 16 (TypeScript)
-
-| Route | Mô tả |
-|---|---|
-| `/` | Trang chủ / Landing |
-| `/dashboard` | Dashboard chính |
-| `/dashboard/generate` | Giao diện sinh đề — chọn tài liệu, cấu hình, theo dõi realtime |
-| `/dashboard/exams/[id]` | Chi tiết đề — xem/sửa câu hỏi, HITL review |
-| `/dashboard/documents` | Quản lý tài liệu PDF |
-| `/dashboard/history` | Lịch sử đã tạo |
-| `/dashboard/settings` | Cài đặt giảng viên |
-
-### Backend — FastAPI (Python)
-
-| Module | Vai trò |
-|---|---|
-| `app/routers/auth.py` | Đăng nhập / đăng ký / JWT tokens |
-| `app/routers/documents.py` | Upload, xử lý, chunking PDF → Pinecone |
-| `app/routers/exams.py` | CRUD đề, approve/reject, export PDF/DOCX |
-| `app/routers/generate.py` | Khởi tạo sinh đề, WebSocket endpoint |
-| `app/agents/orchestrator.py` | Agent 0 — điều phối toàn bộ pipeline |
-| `app/agents/retrieval.py` | Agent 1 — truy xuất chunks từ Pinecone |
-| `app/agents/outline.py` | Agent 2 — tạo blueprint (sườn đề) |
-| `app/agents/builder.py` | Agent 3 — sinh câu hỏi từ blueprint |
-| `app/agents/validator.py` | Agent 4 — kiểm tra chất lượng |
-| `app/agents/planner.py` | Agent phụ — xử lý yêu cầu phức tạp |
-| `app/agents/memory/` | Long-term & short-term memory |
 
 ---
 
-## Pipeline Agent — Luồng sinh đề 5 bước
-
-<p align="center">
-  <img src="figures/dataflow.svg" alt="Data Flow" />
-</p>
+## Cấu trúc thư mục
 
 ```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│  Retrieval  │───►│   Outline   │───►│   HITL 1    │───►│   Builder   │───►│  Validator  │
-│   Agent     │    │   Agent     │    │   (Pause)   │    │   Agent     │    │   Agent     │
-│  (Agent 1)  │    │  (Agent 2)  │    │  ⏸  Pause   │    │  (Agent 3)  │    │  (Agent 4)  │
-└─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘
-      │                  │                  │                  │                  │
-      ▼                  ▼                  ▼                  ▼                  ▼
- Chunking tài liệu   Tạo blueprint     Giảng viên phê     Sinh MCQ + Essay   Kiểm tra:
-   PDF → Vector     (sườn đề theo      duyệt sườn đề     với source evidence   - Scope
-   store (Pinecone)  Bloom levels)       trước khi AI      cho mỗi câu       - Bloom
-                        │              sinh câu hỏi          │               - Logic
-                   HITL 0: Xác                             ▼              - Duplicate
-                   nhận yêu cầu                          HITL 2: Full     - LaTeX
-                                              ◄────────  Review
-                                              │
-                                              ▼
-                                         HITL 3: Export Preview
+Project/
+├── Frontend/                    # Next.js 16 + TypeScript
+│   └── app/dashboard/          # Routes: generate, exams, documents, settings
+│
+├── backend/
+│   ├── app/
+│   │   ├── agents/            # AI agents
+│   │   │   ├── orchestrator.py   # Agent 0: điều phối (LangGraph)
+│   │   │   ├── retrieval.py       # Agent 1: truy xuất vector
+│   │   │   ├── outline.py         # Agent 2: tạo blueprint
+│   │   │   ├── builder.py         # Agent 3: sinh câu hỏi
+│   │   │   ├── validator.py        # Agent 4: kiểm tra chất lượng
+│   │   │   ├── planner.py          # Planner cho yêu cầu phức tạp
+│   │   │   ├── graph/              # LangGraph nodes & state
+│   │   │   ├── skills/             # Bloom classifier, dedup, difficulty, latex
+│   │   │   └── memory/             # Short-term (Redis) + Long-term (PostgreSQL)
+│   │   ├── routers/            # API endpoints
+│   │   │   ├── auth.py        # Đăng nhập / đăng ký / JWT
+│   │   │   ├── documents.py   # Upload, xử lý PDF, chunking
+│   │   │   ├── exams.py        # CRUD đề, approve/reject, export
+│   │   │   ├── generate.py     # Khởi tạo sinh đề
+│   │   │   └── courses.py      # Placeholder (chưa implement)
+│   │   ├── services/           # Business logic
+│   │   │   ├── auth_service.py
+│   │   │   ├── exam_service.py
+│   │   │   └── document_service.py
+│   │   ├── rag/               # RAG pipeline
+│   │   │   ├── parser.py          # PDF parsing (Marker, PyMuPDF)
+│   │   │   ├── cleaner.py          # Markdown cleaning
+│   │   │   ├── chunker.py          # Chunking strategy
+│   │   │   ├── structure.py        # Heading tree detection
+│   │   │   ├── embedder.py         # BGE-m3 embeddings
+│   │   │   └── vector_store.py     # Pinecone client
+│   │   ├── models/            # SQLAlchemy models
+│   │   ├── schemas/           # Pydantic schemas
+│   │   ├── tasks/             # Celery tasks (exam, document)
+│   │   ├── websocket/         # WebSocket manager
+│   │   ├── core/              # Config, database, redis
+│   │   ├── observability/     # Langfuse, tracer, cost tracking
+│   │   └── utils/             # Storage (S3/MinIO), export PDF/DOCX
+│   ├── migrations/            # Alembic migrations
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── docker-compose.yml
 ```
-
-### Chi tiết từng Agent
-
-#### Agent 1 — Retrieval Agent
-- Truy xuất chunks kiến thức từ **Pinecone vector store** dựa trên scope (chương)
-- Mỗi chunk có metadata: `chapter`, `page_number`, `section_id`, `relevance_score`
-- Hỗ trợ lọc theo target Bloom level
-- Output: danh sách `retrieved_chunks` → truyền sang Agent 2
-
-#### Agent 2 — Outline Agent
-- Nhận `retrieved_chunks` + `exam_config`
-- Xây dựng **blueprint** (sườn đề): mảng các slot, mỗi slot có:
-  - `question_id`, `bloom_level`, `chapter`, `topic_hint`, `content_type`
-- Phân bổ số lượng câu hỏi theo `bloom_distribution` cấu hình
-- **Output**: Blueprint → chờ giảng viên phê duyệt (HITL Checkpoint 1)
-
-#### Agent 3 — Builder Agent
-- Sinh câu hỏi thực tế từ từng slot trong blueprint
-- **MCQ**: 4 lựa chọn, 1 đúng, 3 mồi nhử có logic
-- **Essay**: có rubric chấm điểm (4 mức điểm)
-- Mỗi câu đi qua pipeline skills:
-  - `BloomClassifierSkill` — xác nhận mức Bloom
-  - `DedupCheckerSkill` — tránh trùng lặp chủ đề
-  - `DifficultyEstimatorSkill` — ước lượng độ khó
-  - `LatexRendererSkill` — render công thức LaTeX
-- **van_dung_cao**: tự động web search bài toán tương tự → adapt vào scope
-- **Guardrails**: kiểm soát token budget, scope restriction
-- **Output**: mảng `questions` có `source_evidence` cho từng câu
-
-#### Agent 4 — Validator Agent
-- Kiểm tra từng câu hỏi theo nhiều chiều:
-  - **Scope Guard**: câu hỏi chỉ dùng kiến thức trong phạm vi cho phép
-  - **Bloom alignment**: mức Bloom thực tế vs mức khai báo
-  - **Logic**: đáp án đúng có thực sự đúng?
-  - **Duplicate**: trùng lặp nội dung với câu khác
-  - **LaTeX**: cú pháp công thức
-- Nếu có lỗi → tự động retry (max 3 lần), chỉ sinh lại câu bị lỗi
-- **Output**: danh sách `issues` + `status`
-
-#### Planner Agent (Agent phụ)
-- Xử lý yêu cầu **phức tạp**: prompt > 200 ký tự, có từ khóa đặc biệt
-- Phân tích → tạo execution plan → gợi ý cấu hình Bloom
 
 ---
 
-## Human-in-the-Loop (HITL)
+## API Routers
 
-```
-HITL Checkpoint 0 ── Xác nhận yêu cầu (rewritten requirements)
-         │
-         ▼
-HITL Checkpoint 1 ── ⏸ PHÊ DUYỆT BLUEPRINT ── Giảng viên duyệt sườn đề
-         │                                         │
-         │  [Reject] ── Gửi phản hồi ──► Outline tái sinh ──► Checkpoint 1
-         │  [Approve] ──► Tiếp tục sinh câu hỏi
-         ▼
-HITL Checkpoint 2 ── ⏸ FULL REVIEW ── Xem toàn bộ đề, gửi phản hồi/sửa trực tiếp
-         │
-         │  [Reject] ── Gửi feedback ──► Builder tái sinh câu bị lỗi
-         │  [Approve] ──► Publish đề
-         ▼
-HITL Checkpoint 3 ── Export Preview ── Xem trước, chọn định dạng (PDF/DOCX)
-```
+| Router | Endpoint | Mô tả |
+|--------|----------|--------|
+| `auth.py` | `/api/v1/auth/*` | Đăng nhập, đăng ký, refresh token |
+| `documents.py` | `/api/v1/documents/*` | Upload PDF, xử lý, chunking, curriculum tree |
+| `exams.py` | `/api/v1/exams/*` | CRUD đề, approve/reject, export PDF/DOCX, history |
+| `generate.py` | `/api/v1/generate/*` | Khởi tạo sinh đề, HITL approval |
+| `courses.py` | `/api/v1/courses/*` | Placeholder (backlog) |
 
-### 3 Điểm dừng HITL
+## WebSocket Endpoints
 
-| Checkpoint | Giai đoạn | Hành động giảng viên |
-|---|---|---|
-| **HITL 0** | Sau khi làm rõ yêu cầu | Xác nhận requirements đã được diễn giải đúng |
-| **HITL 1** ⏸ | Sau Outline Agent | **Duyệt/Từ chối blueprint** — đây là checkpoint quan trọng nhất |
-| **HITL 2** ⏸ | Sau Validator Agent | Duyệt toàn bộ đề, chỉnh sửa trực tiếp từng câu hoặc gửi phản hồi |
-
-> ⏸ = Pipeline **dừng lại** tại đây, chờ giảng viên hành động qua WebSocket/REST API
+| Endpoint | Mô tả |
+|----------|--------|
+| `/ws/exam/{exam_id}` | Real-time exam generation streaming |
+| `/ws/document/{document_id}` | Document upload/processing progress |
 
 ---
 
-## Tính năng nổi bật
+## Agent Pipeline (LangGraph)
 
-### Multi-Agent Pipeline
-- **5 agent chuyên biệt**, mỗi agent có system prompt riêng
-- Memory分层: **Short-term** (Redis) + **Long-term** (PostgreSQL)
-- Planner Agent tự động nhận diện yêu cầu phức tạp
-- Retry tự động max 3 lần — chỉ tái sinh câu bị lỗi
+```
+User Request → Orchestrator → Retrieval → Outline → HITL 1 (Blueprint)
+                                                      ↓ (approve)
+                                                   Builder → Validator → HITL 2 (Review)
+                                                                        ↓ (approve)
+                                                                     Finalize → Export
+```
 
-### Real-time WebSocket
-- Giảng viên thấy **từng câu hỏi được sinh** theo thời gian thực
-- Trạng thái pipeline: Retrieval → Outline → Waiting → Building → Validating → Done
-- Tự động reconnect nếu mất kết nối (max 5 lần, exponential backoff)
+### Agent Roles
 
-### Kiểm soát chất lượng
-- **Bloom Taxonomy** 4 mức: nhận biết, thông hiểu, vận dụng, vận dụng cao
-- **Source Evidence**: mỗi câu hỏi gắn nguồn trích dẫn từ tài liệu gốc
-- **Quality Score** tổng hợp: pass rate, evidence coverage, warning count
-- Guardrails: kiểm soát token budget, scope restriction
+1. **Orchestrator** — Điều phối toàn bộ pipeline qua LangGraph, xử lý HITL interrupts
+2. **Retrieval** — Truy xuất chunks từ Pinecone theo scope (chapter)
+3. **Outline** — Tạo blueprint với phân bổ Bloom: nhận biết, thông hiểu, vận dụng, vận dụng cao
+4. **Builder** — Sinh MCQ (4 lựa chọn) và Essay (có rubric) từ blueprint
+5. **Validator** — Kiểm tra scope, Bloom alignment, logic, duplicate, LaTeX
 
-### Quản lý tài liệu thông minh
-- Upload PDF → tự động chunking, embedding → Pinecone
-- Hiển thị **curriculum tree** (cây chương trình) từ heading
-- Giảng viên có thể chỉnh sửa cây chương trình
-- Re-process nếu cần
+### Agent Skills
 
-### Xuất đề đa dạng
-- **PDF**: đề + đáp án, có thể tách riêng
-- **DOCX**: import trực tiếp vào Word
-- Mỗi đề có thể tạo **nhiều biến thể** (variant)
-- Full edit history với khả năng **restore** về phiên bản trước
+- `BloomClassifierSkill` — Xác nhận mức Bloom câu hỏi
+- `DedupCheckerSkill` — Tránh trùng lặp nội dung
+- `DifficultyEstimatorSkill` — Ước lượng độ khó
+- `LatexRendererSkill` — Render công thức LaTeX
+- `ScopeCheckerSkill` — Kiểm tra câu hỏi trong phạm vi cho phép
 
 ---
 
@@ -260,30 +142,31 @@ HITL Checkpoint 3 ── Export Preview ── Xem trước, chọn định dạ
 
 - Python 3.11+
 - Node.js 20+
-- PostgreSQL 15+
-- Redis 7+
-- Pinecone account (vector store)
+- PostgreSQL 16
+- Redis 7
+- Pinecone account
+- MinIO (hoặc S3) cho file storage
 
 ### Backend
 
 ```bash
 cd backend
 
-# Tạo virtual environment
+# Virtual environment
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+source venv/Scripts/activate  # Linux: venv/bin/activate
 
-# Cài đặt dependencies
+# Dependencies
 pip install -r requirements.txt
 
-# Cấu hình biến môi trường
+# Environment
 cp .env.example .env
-# Chỉnh sửa .env với API keys (OpenAI, Pinecone, PostgreSQL)
+# Chỉnh sửa .env với API keys
 
-# Chạy migration
+# Migration
 alembic upgrade head
 
-# Khởi động server
+# Chạy server
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -291,132 +174,59 @@ uvicorn app.main:app --reload --port 8000
 
 ```bash
 cd Frontend
-
-# Cài đặt dependencies
 npm install
-
-# Cấu hình biến môi trường
 cp .env.example .env.local
-
-# Khởi động dev server
 npm run dev
 ```
 
-### Celery Worker (cho async tasks)
+### Celery Worker
 
 ```bash
 cd backend
 celery -A app.tasks.celery_app worker --loglevel=info
 ```
 
-### Biến môi trường quan trọng
+### Docker
+
+```bash
+cd backend
+docker-compose up -d
+```
+
+---
+
+## Biến môi trường quan trọng
 
 | Variable | Mô tả |
-|---|---|
-| `OPENAI_API_KEY` | API key cho LLM (GPT-4o) |
+|----------|--------|
 | `DATABASE_URL` | PostgreSQL connection string |
 | `REDIS_URL` | Redis connection string |
 | `PINECONE_API_KEY` | Pinecone API key |
+| `OPENAI_API_KEY` | OpenAI API key (GPT-4o) |
 | `JWT_SECRET_KEY` | Secret cho JWT tokens |
+| `STORAGE_BACKEND` | `minio` hoặc `s3` |
+| `MINIO_ENDPOINT` | MinIO endpoint |
+| `MINIO_ACCESS_KEY` | MinIO access key |
+| `MINIO_SECRET_KEY` | MinIO secret key |
 | `NEXT_PUBLIC_API_URL` | Backend URL (frontend) |
 
 ---
 
-## Cấu trúc thư mục
+## Công nghệ
 
-```
-ExamAI/
-├── Frontend/                      # Next.js 16 frontend
-│   ├── app/
-│   │   ├── dashboard/             # Dashboard routes
-│   │   │   ├── generate/          # Sinh đề mới
-│   │   │   ├── exams/[id]/        # Chi tiết đề
-│   │   │   ├── documents/         # Quản lý tài liệu
-│   │   │   ├── history/           # Lịch sử
-│   │   │   └── settings/          # Cài đặt
-│   │   ├── auth/                  # Trang đăng nhập
-│   │   └── page.tsx              # Landing page
-│   ├── components/               # React components
-│   │   ├── generation-live-viewer.tsx  # Realtime streaming UI
-│   │   ├── generation-stepper.tsx      # Pipeline stepper
-│   │   └── ui/                   # shadcn/ui components
-│   └── lib/
-│       └── api.ts               # API client + WebSocket
-│
-├── backend/                       # FastAPI backend
-│   ├── app/
-│   │   ├── agents/               # 5 AI agents
-│   │   │   ├── orchestrator.py   # Agent 0: điều phối
-│   │   │   ├── retrieval.py       # Agent 1: truy xuất
-│   │   │   ├── outline.py         # Agent 2: tạo blueprint
-│   │   │   ├── builder.py        # Agent 3: sinh câu hỏi
-│   │   │   ├── validator.py      # Agent 4: kiểm tra
-│   │   │   ├── planner.py        # Planner agent
-│   │   │   ├── base.py           # Base class
-│   │   │   ├── llm.py            # LLM client wrapper
-│   │   │   ├── memory/           # Memory management
-│   │   │   ├── guardrails.py     # Guardrails pipeline
-│   │   │   └── skills/           # Agent skills
-│   │   ├── routers/             # API routes
-│   │   │   ├── auth.py
-│   │   │   ├── documents.py
-│   │   │   ├── exams.py
-│   │   │   └── generate.py
-│   │   ├── core/                # Core utilities
-│   │   │   ├── config.py
-│   │   │   ├── database.py
-│   │   │   └── redis_client.py
-│   │   ├── models/              # Pydantic + SQLAlchemy models
-│   │   ├── services/            # Business logic
-│   │   └── tasks/               # Celery tasks
-│   ├── alembic/                 # DB migrations
-│   ├── requirements.txt
-│   └── .env.example
-│
-├── figures/                       # Diagram files
-│   ├── logo.svg
-│   ├── architecture.svg
-│   ├── agent_pipeline.svg
-│   └── dataflow.svg
-│
-└── README.md
-```
+| Layer | Công nghệ |
+|-------|-----------|
+| Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS, Radix UI, Zod, React Hook Form, KaTeX |
+| Backend | FastAPI, Pydantic v2, SQLAlchemy, Alembic, Celery, LangGraph |
+| Database | PostgreSQL, Redis |
+| Vector Store | Pinecone (BGE-m3 embeddings, CrossEncoder reranker) |
+| Storage | MinIO / AWS S3 |
+| LLM | OpenAI GPT-4o ( qua openai, openrouter, groq, anthropic, ollama) |
+| Observability | Langfuse |
 
 ---
 
-## Công nghệ sử dụng
+## Health Check
 
-### Frontend
-| Công nghệ | Mục đích |
-|---|---|
-| Next.js 16 | React framework |
-| TypeScript | Type safety |
-| Tailwind CSS | Styling |
-| shadcn/ui | Component library |
-| Zustand | State management |
-| WebSocket | Real-time updates |
-
-### Backend
-| Công nghệ | Mục đích |
-|---|---|
-| FastAPI | REST API framework |
-| Pydantic v2 | Data validation |
-| SQLAlchemy | ORM |
-| Alembic | Database migrations |
-| Celery | Async task queue |
-| Redis | Pub/sub, short-term memory |
-| PostgreSQL | Primary database |
-| Pinecone | Vector database |
-
-### AI / LLM
-| Công nghệ | Mục đích |
-|---|---|
-| OpenAI GPT-4o | LLM cho tất cả agents |
-| Bloom Taxonomy | Cognitive level classification |
-| OpenAI Embeddings | Document chunk embedding |
-
----
-
-## License
-
-MIT License — dự án phục vụ mục đích nghiên cứu và giáo dục.
+- `GET /health` — Liveness probe
+- `GET /ready` — Readiness probe (kiểm tra PostgreSQL, Redis, Pinecone)
