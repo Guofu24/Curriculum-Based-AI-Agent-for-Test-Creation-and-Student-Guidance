@@ -253,101 +253,15 @@ Trả về JSON với schema:
                     f"Blueprint has {actual_total} questions but config expects {expected_total}"
                 )
 
-            # ── Chapter coverage enforcement ──
-            # Ensure every scope chapter has at least 1 slot.
-            # LLM sometimes skips chapters when there are many.
-            scope_chapters = [str(s) for s in (scope if isinstance(scope, list) else [])]
-            if scope_chapters:
-                chapters_in_bp = {slot.get("chapter", "") for slot in blueprint}
-                missing_chapters = [ch for ch in scope_chapters if ch not in chapters_in_bp]
-
-                if missing_chapters:
-                    logger.warning(
-                        "Blueprint missing %d scope chapters: %s — redistributing slots",
-                        len(missing_chapters), missing_chapters,
-                    )
-                    # Count slots per chapter
-                    ch_counts: dict[str, int] = {}
-                    for slot in blueprint:
-                        ch = slot.get("chapter", "")
-                        ch_counts[ch] = ch_counts.get(ch, 0) + 1
-
-                    for missing_ch in missing_chapters:
-                        # Strategy: steal from the chapter with the most slots
-                        if ch_counts:
-                            donor_ch = max(ch_counts, key=lambda k: ch_counts.get(k, 0))
-                            if ch_counts.get(donor_ch, 0) > 1:
-                                # Find the last slot of the donor chapter and reassign
-                                for i in range(len(blueprint) - 1, -1, -1):
-                                    if blueprint[i].get("chapter") == donor_ch:
-                                        old_id = blueprint[i].get("question_id", "")
-                                        blueprint[i]["chapter"] = missing_ch
-                                        blueprint[i]["section"] = ""
-                                        blueprint[i]["topic_hint"] = f"Nội dung chương {missing_ch}"
-                                        ch_counts[donor_ch] -= 1
-                                        ch_counts[missing_ch] = ch_counts.get(missing_ch, 0) + 1
-                                        warnings.append(
-                                            f"Reassigned {old_id} from '{donor_ch}' to missing chapter '{missing_ch}'"
-                                        )
-                                        break
-                            else:
-                                # All chapters have exactly 1 — add a new slot
-                                q_type = "mcq" if mcq_count > 0 else "essay"
-                                new_slot = {
-                                    "question_id": f"{'MCQ' if q_type == 'mcq' else 'ESSAY'}_{len(blueprint)+1:03d}",
-                                    "type": q_type,
-                                    "bloom_level": "thong_hieu",
-                                    "chapter": missing_ch,
-                                    "section": "",
-                                    "topic_hint": f"Nội dung chương {missing_ch}",
-                                    "content_type": "text",
-                                    "estimated_difficulty": 0.4,
-                                }
-                                blueprint.append(new_slot)
-                                ch_counts[missing_ch] = 1
-                                warnings.append(
-                                    f"Added extra slot for missing chapter '{missing_ch}'"
-                                )
-
-            # ── Total count enforcement ──
-            # Pad or truncate to exactly expected_total
-            while len(blueprint) < expected_total:
-                # Find the chapter with most slots to add a variant
-                ch_counts_pad: dict[str, int] = {}
-                for slot in blueprint:
-                    ch = slot.get("chapter", "")
-                    ch_counts_pad[ch] = ch_counts_pad.get(ch, 0) + 1
-                # Pick the chapter with fewest slots (balance)
-                target_ch = min(ch_counts_pad, key=lambda k: ch_counts_pad.get(k, 0)) if ch_counts_pad else scope_chapters[0] if scope_chapters else "unknown"
-                q_type = "mcq" if mcq_count > 0 else "essay"
-                bloom_cycle = ["nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"]
-                bloom_pick = bloom_cycle[len(blueprint) % len(bloom_cycle)]
-                pad_slot = {
-                    "question_id": f"{'MCQ' if q_type == 'mcq' else 'ESSAY'}_{len(blueprint)+1:03d}",
-                    "type": q_type,
-                    "bloom_level": bloom_pick,
-                    "chapter": target_ch,
-                    "section": "",
-                    "topic_hint": f"Nội dung chương {target_ch}",
-                    "content_type": "text",
-                    "estimated_difficulty": 0.5,
-                }
-                blueprint.append(pad_slot)
-                warnings.append(f"Padded slot {pad_slot['question_id']} for chapter '{target_ch}' (total was {len(blueprint)-1})")
-
-            if len(blueprint) > expected_total:
-                # Truncate from the chapter with most slots
-                while len(blueprint) > expected_total:
-                    ch_counts_trunc: dict[str, int] = {}
-                    for slot in blueprint:
-                        ch = slot.get("chapter", "")
-                        ch_counts_trunc[ch] = ch_counts_trunc.get(ch, 0) + 1
-                    donor_ch = max(ch_counts_trunc, key=lambda k: ch_counts_trunc.get(k, 0))
-                    for i in range(len(blueprint) - 1, -1, -1):
-                        if blueprint[i].get("chapter") == donor_ch:
-                            removed = blueprint.pop(i)
-                            warnings.append(f"Truncated slot {removed.get('question_id')} from '{donor_ch}'")
-                            break
+            # ── Chapter coverage + total count enforcement ──
+            blueprint, warnings = self._enforce_chapter_coverage(
+                blueprint=blueprint,
+                exam_config=exam_config,
+                mcq_count=mcq_count,
+                essay_count=essay_count,
+                expected_total=expected_total,
+                warnings=warnings,
+            )
 
             elapsed_ms = int((time.time() - start_time) * 1000)
             usage = metrics.prompt_tokens + metrics.completion_tokens
@@ -439,6 +353,19 @@ KIỂM TRA LẠI trước khi output.
             warnings.append(f"Retry blueprint invalid: {reason_llm}")
             return await self._fallback_outline(exam_config, start_time, trace_id, warnings)
 
+        # Apply same chapter enforcement as happy path
+        mcq_count = exam_config.get("mcq_count", 0)
+        essay_count = exam_config.get("essay_count", 0)
+        expected_total = mcq_count + essay_count
+        blueprint, warnings = self._enforce_chapter_coverage(
+            blueprint=blueprint,
+            exam_config=exam_config,
+            mcq_count=mcq_count,
+            essay_count=essay_count,
+            expected_total=expected_total,
+            warnings=warnings,
+        )
+
         elapsed_ms = int((time.time() - start_time) * 1000)
         return OutlineOutput(
             status=AgentStatus.SUCCESS,
@@ -450,6 +377,107 @@ KIỂM TRA LẠI trước khi output.
             blueprint=blueprint,
             distribution_summary=distribution_summary,
         )
+    def _enforce_chapter_coverage(
+        self,
+        blueprint: list[dict],
+        exam_config: dict,
+        mcq_count: int,
+        essay_count: int,
+        expected_total: int,
+        warnings: list[str],
+    ) -> tuple[list[dict], list[str]]:
+        """
+        Ensure every scope chapter has ≥1 slot, and total slot count = expected_total.
+
+        Called from both the happy path and the bloom-retry path so chapter
+        coverage is enforced regardless of which LLM response path was taken.
+        """
+        _scope_raw = exam_config.get("scope", [])
+        scope_chapters = [str(s) for s in (_scope_raw if isinstance(_scope_raw, list) else [])]
+
+        if scope_chapters:
+            chapters_in_bp = {slot.get("chapter", "") for slot in blueprint}
+            missing_chapters = [ch for ch in scope_chapters if ch not in chapters_in_bp]
+
+            if missing_chapters:
+                logger.warning(
+                    "Blueprint missing %d scope chapters: %s — redistributing slots",
+                    len(missing_chapters), missing_chapters,
+                )
+                ch_counts: dict[str, int] = {}
+                for slot in blueprint:
+                    ch = slot.get("chapter", "")
+                    ch_counts[ch] = ch_counts.get(ch, 0) + 1
+
+                for missing_ch in missing_chapters:
+                    if ch_counts:
+                        donor_ch = max(ch_counts, key=lambda k: ch_counts.get(k, 0))
+                        if ch_counts.get(donor_ch, 0) > 1:
+                            for i in range(len(blueprint) - 1, -1, -1):
+                                if blueprint[i].get("chapter") == donor_ch:
+                                    old_id = blueprint[i].get("question_id", "")
+                                    blueprint[i]["chapter"] = missing_ch
+                                    blueprint[i]["section"] = ""
+                                    blueprint[i]["topic_hint"] = f"Nội dung chương {missing_ch}"
+                                    ch_counts[donor_ch] -= 1
+                                    ch_counts[missing_ch] = ch_counts.get(missing_ch, 0) + 1
+                                    warnings.append(
+                                        f"Reassigned {old_id} from '{donor_ch}' → missing '{missing_ch}'"
+                                    )
+                                    break
+                        else:
+                            q_type = "mcq" if mcq_count > 0 else "essay"
+                            new_slot = {
+                                "question_id": f"{'MCQ' if q_type == 'mcq' else 'ESSAY'}_{len(blueprint)+1:03d}",
+                                "type": q_type,
+                                "bloom_level": "thong_hieu",
+                                "chapter": missing_ch,
+                                "section": "",
+                                "topic_hint": f"Nội dung chương {missing_ch}",
+                                "content_type": "text",
+                                "estimated_difficulty": 0.4,
+                            }
+                            blueprint.append(new_slot)
+                            ch_counts[missing_ch] = 1
+                            warnings.append(f"Added extra slot for missing chapter '{missing_ch}'")
+
+        # Pad to expected_total
+        bloom_cycle = ["nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"]
+        while len(blueprint) < expected_total:
+            ch_counts_pad: dict[str, int] = {}
+            for slot in blueprint:
+                ch_counts_pad[slot.get("chapter", "")] = ch_counts_pad.get(slot.get("chapter", ""), 0) + 1
+            target_ch = (
+                min(ch_counts_pad, key=lambda k: ch_counts_pad[k])
+                if ch_counts_pad else (scope_chapters[0] if scope_chapters else "unknown")
+            )
+            q_type = "mcq" if mcq_count > 0 else "essay"
+            pad_slot = {
+                "question_id": f"{'MCQ' if q_type == 'mcq' else 'ESSAY'}_{len(blueprint)+1:03d}",
+                "type": q_type,
+                "bloom_level": bloom_cycle[len(blueprint) % len(bloom_cycle)],
+                "chapter": target_ch,
+                "section": "",
+                "topic_hint": f"Nội dung chương {target_ch}",
+                "content_type": "text",
+                "estimated_difficulty": 0.5,
+            }
+            blueprint.append(pad_slot)
+            warnings.append(f"Padded slot for '{target_ch}' (total={len(blueprint)})")
+
+        # Truncate from over-represented chapter
+        while len(blueprint) > expected_total:
+            ch_counts_trunc: dict[str, int] = {}
+            for slot in blueprint:
+                ch_counts_trunc[slot.get("chapter", "")] = ch_counts_trunc.get(slot.get("chapter", ""), 0) + 1
+            donor_ch = max(ch_counts_trunc, key=lambda k: ch_counts_trunc[k])
+            for i in range(len(blueprint) - 1, -1, -1):
+                if blueprint[i].get("chapter") == donor_ch:
+                    removed = blueprint.pop(i)
+                    warnings.append(f"Truncated {removed.get('question_id')} from '{donor_ch}'")
+                    break
+
+        return blueprint, warnings
 
     def _build_context_summary(self, context: list[dict]) -> str:
         """Build a summary of retrieved context."""

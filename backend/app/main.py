@@ -16,7 +16,6 @@ from app.routers.courses import router as courses_router
 from app.routers.documents import router as documents_router
 from app.routers.exams import router as exams_router
 from app.routers.generate import router as generate_router
-from app.routers.playbook import router as playbook_router
 
 settings = get_settings()
 
@@ -242,7 +241,6 @@ app.include_router(courses_router)
 app.include_router(documents_router)
 app.include_router(exams_router)
 app.include_router(generate_router)
-app.include_router(playbook_router)
 
 
 # ── WebSocket Endpoint ─────────────────────────────────────────────────────────

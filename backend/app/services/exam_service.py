@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -13,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.memory import LongTermMemory
 from app.core.redis_client import RedisClient
 from app.models.exam import Exam, ExamHistory
-from app.models.feedback_event import FeedbackEvent
+from app.models.feedback_event import FeedbackEvent, SignalType, Severity, ReviewStatus
+
+logger = logging.getLogger(__name__)
 
 
 class ExamServiceError(Exception):
@@ -229,6 +232,23 @@ class ExamService:
             )
         )
         await self.db.commit()
+
+        # Log edit_applied feedback event (non-blocking)
+        try:
+            await self.log_feedback_events(
+                exam_id=exam_id,
+                user_id=exam.user_id,
+                issues=[{
+                    "issue_type": "edit_applied",
+                    "question_id": question_id,
+                    "detail": f"Direct edit applied to question {question_id}.",
+                    "updates": list(updates.keys()),
+                }],
+                workflow_stage="human_edit",
+                event_source="teacher_direct_edit",
+            )
+        except Exception as _fe_err:
+            logger.warning("Failed to log edit_applied FeedbackEvent: %s", _fe_err)
 
     async def partial_regenerate(
         self,
@@ -490,16 +510,86 @@ class ExamService:
         )
         return mcq_count, essay_count
 
-    async def get_feedback_events(
+    async def log_feedback_events(
         self,
         exam_id: UUID,
         user_id: UUID,
-        page: int = 1,
-        limit: int = 20,
-    ) -> list[dict]:
-        """Compatibility stub until a dedicated feedback table exists."""
-        _ = (exam_id, user_id, page, limit)
-        return []
+        issues: list[dict],
+        workflow_stage: str = "validation",
+        event_source: str = "validator_agent",
+    ) -> int:
+        """
+        Insert FeedbackEvent rows for a list of issues from the validator.
+
+        Each issue dict should have:
+          - issue_type: str  (e.g. "bloom_mismatch", "wrong_answer", "scope_violation")
+          - question_id: str | None
+          - detail: str
+          - suggestion: str | None
+
+        Returns the number of rows inserted.
+        """
+        _ISSUE_TYPE_MAP: dict[str, str] = {
+            "bloom_mismatch": SignalType.BLOOM_MISMATCH.value,
+            "wrong_answer": SignalType.ANSWER_INCORRECT.value,
+            "scope_violation": SignalType.OUT_OF_SCOPE.value,
+            "out_of_scope": SignalType.OUT_OF_SCOPE.value,
+            "duplicate": SignalType.DUPLICATE.value,
+            "quality_low": SignalType.QUALITY_LOW.value,
+            "validation_warning": SignalType.VALIDATION_WARNING.value,
+            "generation_error": SignalType.GENERATION_ERROR.value,
+            "publish": SignalType.PUBLISH.value,
+            "edit_applied": SignalType.EDIT_APPLIED.value,
+        }
+        _SEVERITY_MAP: dict[str, str] = {
+            "bloom_mismatch": Severity.WARNING.value,
+            "wrong_answer": Severity.ERROR.value,
+            "scope_violation": Severity.ERROR.value,
+            "out_of_scope": Severity.ERROR.value,
+            "duplicate": Severity.WARNING.value,
+            "quality_low": Severity.WARNING.value,
+            "validation_warning": Severity.WARNING.value,
+            "generation_error": Severity.CRITICAL.value,
+            "publish": Severity.INFO.value,
+            "edit_applied": Severity.INFO.value,
+        }
+
+        inserted = 0
+        for issue in issues:
+            raw_type = issue.get("issue_type", "validation_warning")
+            signal = _ISSUE_TYPE_MAP.get(raw_type, SignalType.VALIDATION_WARNING.value)
+            severity = _SEVERITY_MAP.get(raw_type, Severity.WARNING.value)
+            event = FeedbackEvent(
+                exam_id=exam_id,
+                user_id=user_id,
+                question_id=issue.get("question_id"),
+                signal_type=signal,
+                severity=severity,
+                workflow_stage=workflow_stage,
+                event_source=event_source,
+                review_status=ReviewStatus.PENDING.value,
+                reviewed_by_human=False,
+                description=issue.get("detail") or issue.get("description") or "",
+                payload={
+                    k: v for k, v in issue.items()
+                    if k not in ("issue_type", "question_id", "detail", "description")
+                } or None,
+            )
+            self.db.add(event)
+            inserted += 1
+
+        if inserted:
+            try:
+                await self.db.commit()
+                logger.info(
+                    "Inserted %d FeedbackEvent rows for exam %s", inserted, exam_id
+                )
+            except Exception as exc:
+                logger.warning("Failed to commit FeedbackEvents for exam %s: %s", exam_id, exc)
+                await self.db.rollback()
+                inserted = 0
+
+        return inserted
 
     async def get_quality_summary(self, user_id: UUID) -> dict:
         """Return quality metrics matching frontend's QualitySummary interface."""
@@ -525,18 +615,83 @@ class ExamService:
         }
 
     async def get_feedback_store_summary(self, user_id: UUID) -> dict:
-        """Compatibility stub until feedback events are persisted separately."""
-        _ = user_id
+        """Return aggregate counts from the real feedback_events table."""
+        # Total events for this user
+        total_stmt = select(func.count(FeedbackEvent.id)).where(
+            FeedbackEvent.user_id == user_id
+        )
+        total = (await self.db.execute(total_stmt)).scalar() or 0
+
+        reviewed_stmt = select(func.count(FeedbackEvent.id)).where(
+            FeedbackEvent.user_id == user_id,
+            FeedbackEvent.reviewed_by_human.is_(True),
+        )
+        reviewed = (await self.db.execute(reviewed_stmt)).scalar() or 0
+
+        accepted_stmt = select(func.count(FeedbackEvent.id)).where(
+            FeedbackEvent.user_id == user_id,
+            FeedbackEvent.review_status == ReviewStatus.ACCEPTED.value,
+        )
+        accepted = (await self.db.execute(accepted_stmt)).scalar() or 0
+
+        rejected_stmt = select(func.count(FeedbackEvent.id)).where(
+            FeedbackEvent.user_id == user_id,
+            FeedbackEvent.review_status == ReviewStatus.REJECTED.value,
+        )
+        rejected = (await self.db.execute(rejected_stmt)).scalar() or 0
+
+        corrected_stmt = select(func.count(FeedbackEvent.id)).where(
+            FeedbackEvent.user_id == user_id,
+            FeedbackEvent.review_status == ReviewStatus.CORRECTED.value,
+        )
+        corrected = (await self.db.execute(corrected_stmt)).scalar() or 0
+
+        # Top signal types
+        from sqlalchemy import text
+        top_signals_stmt = (
+            select(FeedbackEvent.signal_type, func.count(FeedbackEvent.id).label("count"))
+            .where(FeedbackEvent.user_id == user_id)
+            .group_by(FeedbackEvent.signal_type)
+            .order_by(func.count(FeedbackEvent.id).desc())
+            .limit(5)
+        )
+        top_signals_result = await self.db.execute(top_signals_stmt)
+        top_signal_types = [
+            {"name": row.signal_type, "count": row.count}
+            for row in top_signals_result
+        ]
+
+        # Recent events (last 5)
+        recent_stmt = (
+            select(FeedbackEvent)
+            .where(FeedbackEvent.user_id == user_id)
+            .order_by(FeedbackEvent.created_at.desc())
+            .limit(5)
+        )
+        recent_result = await self.db.execute(recent_stmt)
+        recent_events = [
+            {
+                "id": str(e.id),
+                "exam_id": str(e.exam_id),
+                "signal_type": e.signal_type,
+                "severity": e.severity,
+                "description": e.description,
+                "review_status": e.review_status,
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in recent_result.scalars().all()
+        ]
+
         return {
-            "total_events": 0,
-            "reviewed_by_human_count": 0,
-            "accepted_count": 0,
-            "rejected_count": 0,
-            "corrected_count": 0,
+            "total_events": total,
+            "reviewed_by_human_count": reviewed,
+            "accepted_count": accepted,
+            "rejected_count": rejected,
+            "corrected_count": corrected,
             "linked_eval_count": 0,
-            "top_signal_types": [],   # list[NamedCount]
-            "top_error_categories": [],  # list[ErrorCategoryCount]
-            "recent_events": [],        # list[FeedbackEvent]
+            "top_signal_types": top_signal_types,
+            "top_error_categories": [],
+            "recent_events": recent_events,
             "last_updated_at": datetime.now(timezone.utc),
         }
 
@@ -581,10 +736,6 @@ class ExamService:
         )
         result = await self.db.execute(stmt)
         events = result.scalars().all()
-
-        # If no real events, return demo data for better UX
-        if not events:
-            return _demo_feedback_events(page, limit), max(total, len(_DEMO_EVENTS))
 
         return list(events), total
 
