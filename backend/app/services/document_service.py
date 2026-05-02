@@ -451,6 +451,36 @@ class DocumentService:
                 pass
             return {"document_id": str(document_id), "processing_status": "failed", "error": str(e)}
 
+    async def reindex_document(self, document_id: UUID, user_id: UUID) -> dict:
+        """
+        Re-run the full RAG pipeline for an already-processed document.
+
+        Deletes stale Pinecone vectors first, then re-parses the file from S3
+        and re-indexes with fresh chapter_ids derived from the current heading_tree.
+        Fixes chapter_id mismatches caused by heading tree renumbering.
+        """
+        import logging
+        _log = logging.getLogger("document.reindex")
+
+        document = await self.get_document(document_id, user_id)
+        if not document:
+            raise DocumentServiceError("Document not found or access denied")
+
+        doc_id_str = str(document_id)
+        _log.info("Reindex started for doc %s", doc_id_str)
+
+        # Delete stale vectors first
+        try:
+            await self.vector_store.delete_all_document_vectors(doc_id_str)
+            _log.info("Deleted stale Pinecone vectors for doc %s", doc_id_str)
+        except Exception as e:
+            _log.warning("Could not delete stale vectors for %s: %s", doc_id_str, e)
+
+        # Re-run the full processing pipeline (reuses process_document logic)
+        return await self.process_document(document_id)
+
+
+
     def get_presigned_url(self, document: Document) -> str:
         """Get a presigned URL for downloading the document (G20)."""
         return get_storage().generate_presigned_url(document.s3_key)

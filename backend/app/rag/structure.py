@@ -45,6 +45,55 @@ def _is_heading_chapter_level(title: str) -> bool:
     )
 
 
+def extract_headings_with_context(
+    markdown: str,
+    context_chars: int = 150,
+) -> list[dict]:
+    """
+    Extract all # headings from markdown, each paired with the content
+    preview that immediately follows it (up to context_chars characters).
+
+    Returns a list of dicts:
+      {
+        "level": int,           # 1-4 (number of #)
+        "heading": str,         # full heading text
+        "context": str,         # content preview after heading
+        "line_number": int,     # 0-based line index in markdown
+      }
+    """
+    lines = markdown.split("\n")
+    result: list[dict] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        m = re.match(r"^(#{1,4})\s+(.+)$", line)
+        if m and len(m.group(2).strip()) > 1:
+            level = len(m.group(1))
+            heading_text = m.group(2).strip()
+            # Collect content lines until next heading or 3 non-empty lines
+            content_parts: list[str] = []
+            non_empty_count = 0
+            j = i + 1
+            while j < len(lines) and non_empty_count < 3:
+                next_line = lines[j].strip()
+                next_m = re.match(r"^#{1,4}\s+", next_line)
+                if next_m:
+                    break
+                if next_line:
+                    content_parts.append(next_line)
+                    non_empty_count += 1
+                j += 1
+            context = " ".join(content_parts)[:context_chars].strip()
+            result.append({
+                "level": level,
+                "heading": heading_text,
+                "context": context,
+                "line_number": i,
+            })
+        i += 1
+    return result
+
+
 def _is_likely_heading(line: str, line_index: int, total_lines: int) -> int:
     """
     Heuristic: does `line` look like a heading even without # markers?
@@ -330,41 +379,57 @@ async def detect_heading_tree_llm(markdown: str) -> dict:
     """
     LLM-based heading tree detection.
 
-    1. Extract all # headings from markdown
-    2. Send heading list to LLM to identify REAL chapters/sections
+    1. Extract all # headings from markdown with content preview (1-3 lines after)
+    2. Send heading + context to LLM to identify REAL chapters/sections
     3. LLM filters garbage (school names, TOC, answer keys)
     4. Returns clean heading tree
+    5. Post-processing: rule-based clean + LLM consolidation if > 12 chapters
 
     Falls back to heuristic detect_heading_tree on failure.
     """
-    heading_lines: list[str] = []
-    for line in markdown.split("\n"):
-        line_s = line.strip()
-        m = re.match(r"^(#{1,4})\s+(.+)$", line_s)
-        if m and len(m.group(2).strip()) > 1:
-            heading_lines.append(line_s)
+    headings = extract_headings_with_context(markdown, context_chars=150)
 
-    if not heading_lines:
+    if not headings:
         logger.info("[detect_heading_tree_llm] No headings found, falling back to heuristic")
         return detect_heading_tree(markdown)
 
-    heading_text = "\n".join(heading_lines)
+    # Build prompt input: heading + content preview for each heading
+    heading_blocks: list[str] = []
+    for h in headings:
+        level_hash = "#" * h["level"]
+        if h["context"]:
+            heading_blocks.append(
+                f"{level_hash} {h['heading']}\n"
+                f"  Content: {h['context']}"
+            )
+        else:
+            heading_blocks.append(f"{level_hash} {h['heading']}")
+
+    heading_text = "\n".join(heading_blocks)
 
     prompt = (
         "Ban la chuyen gia phan tich cau truc sach giao khoa.\n\n"
-        "Danh sach TAT CA heading tu tai lieu:\n\n"
+        "Danh sach heading tu tai lieu, kem noi dung ngay sau moi heading:\n\n"
         "---\n"
         f"{heading_text}\n"
         "---\n\n"
         "NHIEM VU: To chuc lai thanh CHUONG (chapter) va BAI/MUC (section) THAT SU.\n\n"
-        "QUY TAC:\n"
-        "1. CHI giu heading mang NOI DUNG HOC THUAT (chuong, bai, kien thuc)\n"
-        "2. LOAI BO: ten truong, muc luc, loi noi dau, dap an, huong dan giai, phu luc, tai lieu tham khao\n"
-        "3. BAI TAP cua chuong -> merge vao chuong do (thanh section), KHONG tach chapter rieng\n"
-        "4. Title chapter phai mo ta noi dung (vd: 'Dong hoc chat diem'), KHONG dung 'Phan I' hay 'Chuong 1'\n"
-        "5. Sections = bai hoc/chu de CON that su\n"
-        "6. Neu co 'Phan I', 'Phan II' la grouping lon -> dung muc con ben trong lam chapters\n"
-        "7. Toi da 15 chapters, moi chapter toi da 10 sections\n\n"
+        "QUY TAC PHAN LOAI (vai tro quan trong):\n"
+        "1. CHAPTER = heading ma content ke sau la NOI DUNG LY THUYET/cong thuc/mo ta khai niem.\n"
+        "2. Neu heading co content la bai tap/cong thuc/dap an -> day la SECTION, KHONG phai chapter.\n"
+        "3. LOAI BO hoac demote: ten truong, muc luc, loi noi dau, dap an, huong dan giai, phu luc.\n"
+        "4. BAI TAP cua chuong -> merge vao chuong do (thanh section cua chuong do).\n"
+        "5. 'HƯỚNG DẪN VÀ ĐÁP SỐ', 'ĐÁP SỐ', 'ĐÁP ÁN' -> SECTION, KHONG lam chapter rieng.\n"
+        "6. 'BÀI TẬP ÁP DỤNG' -> SECTION cua chapter truoc do, khong phai chapter.\n"
+        "7. Heading chỉ co ten roman numeral (I., II.) hoac chu cai (A., B.) ma khong co mo ta -> demote.\n"
+        "8. TOI DA 15 chapters, moi chapter toi da 10 sections.\n\n"
+        "VI DU:\n"
+        "  # A. BO TUC VEC TO\n"
+        "    Content: Vec to la mot dai luong co huong va do lon...\n"
+        "    -> Day la CHAPTER vi co noi dung ly thuyet.\n\n"
+        "  # HƯỚNG DẪN VÀ ĐÁP SỐ\n"
+        "    Content: Bài 1. Dap so: 5m/s\n"
+        "    -> Day la SECTION (cua chapter truoc do), KHONG phai chapter.\n\n"
         "TRA VE JSON THUAN (KHONG markdown code block):\n"
         '{"chapters": [{"chapter_id": "ch1", "title": "Ten chuong", '
         '"sections": [{"section_id": "ch1_sec1", "title": "Ten bai"}]}]}'
@@ -375,11 +440,11 @@ async def detect_heading_tree_llm(markdown: str) -> dict:
         import json
 
         llm = get_llm_client()
-        response = await llm.agenerate(
-            prompt=prompt,
+        response = await llm.chat(
+            messages=[{"role": "user", "content": prompt}],
             role="planner",
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=2500,
         )
 
         text = response.strip()
@@ -419,11 +484,14 @@ async def detect_heading_tree_llm(markdown: str) -> dict:
 
         logger.info(
             "[detect_heading_tree_llm] LLM detected %d chapters from %d headings",
-            len(chapters), len(heading_lines),
+            len(chapters), len(headings),
         )
         for ch in chapters:
             logger.info("  ch=%s: %s (%d sections)",
                         ch["chapter_id"], ch["title"], len(ch.get("sections", [])))
+
+        # Post-process: rule-based clean + LLM consolidation if > 12 chapters
+        result = await post_process_heading_tree(result)
 
         return result
 
@@ -605,8 +673,9 @@ _META_PATTERNS = re.compile(
 
 _ANSWER_PATTERNS = re.compile(
     r"("
-    r"ĐÁP SỐ|ĐÁP ÁN|HƯỚNG DẪN|LỜI GIẢI|"
-    r"DAP SO|DAP AN|HUONG DAN|LOI GIAI"
+    r"\b[ĐD]AP SO\.?\b|\b[ĐD]AP AN\.?\b|\bHUONG DAN\b|\bLOI GIAI\b|"
+    r"\bBAI TAP AP DUNG\b|"
+    r"\bDAPSO\b|\bDAPAN\b|\bHUONGDAN\b|\bLOIGIAI\b"
     r")",
     re.IGNORECASE,
 )

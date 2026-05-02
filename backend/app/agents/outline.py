@@ -263,6 +263,21 @@ Trả về JSON với schema:
                 warnings=warnings,
             )
 
+            # ── Recompute distribution_summary from actual blueprint ──
+            # Bug fix: distribution_summary was returned from LLM response (before
+            # _enforce_chapter_coverage added missing chapters). Recompute now so
+            # frontend sees all 9 scope chapters, not just the 6 LLM originally generated.
+            _scope_raw = exam_config.get("scope", [])
+            scope_chapters = [str(s) for s in (_scope_raw if isinstance(_scope_raw, list) else [])]
+            bloom_dist = exam_config.get("bloom_distribution", {})
+            distribution_summary = {
+                "by_bloom": {level: sum(1 for s in blueprint if s.get("bloom_level") == level) for level in bloom_dist},
+                "by_chapter": {
+                    ch: sum(1 for s in blueprint if s.get("chapter") == ch)
+                    for ch in scope_chapters
+                },
+            }
+
             elapsed_ms = int((time.time() - start_time) * 1000)
             usage = metrics.prompt_tokens + metrics.completion_tokens
 
@@ -365,6 +380,18 @@ KIỂM TRA LẠI trước khi output.
             expected_total=expected_total,
             warnings=warnings,
         )
+
+        # Recompute distribution_summary from actual blueprint (same fix as happy path)
+        _scope_raw = exam_config.get("scope", [])
+        scope_chapters = [str(s) for s in (_scope_raw if isinstance(_scope_raw, list) else [])]
+        bloom_dist = exam_config.get("bloom_distribution", {})
+        distribution_summary = {
+            "by_bloom": {level: sum(1 for s in blueprint if s.get("bloom_level") == level) for level in bloom_dist},
+            "by_chapter": {
+                ch: sum(1 for s in blueprint if s.get("chapter") == ch)
+                for ch in scope_chapters
+            },
+        }
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         return OutlineOutput(

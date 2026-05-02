@@ -627,9 +627,14 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
         # Collect results in original order (for stable output)
         ordered: list[tuple[int, dict | None, list[str]]] = []
-        for result in results:
+        for idx, result in enumerate(results):
             if isinstance(result, Exception):
-                warnings.append(f"Slot generation raised exception: {result}")
+                slot_idx = slot_start_index + idx
+                slot = chunk[idx] if idx < len(chunk) else {}
+                warnings.append(f"Slot {slot_idx + 1} raised exception: {result} — using demo fallback")
+                logger.warning("Slot %d task exception (using demo): %s", slot_idx + 1, result)
+                demo_q = self._build_demo_question(slot, context[:8000])
+                ordered.append((slot_idx + 1, demo_q, [str(result)]))
                 continue
             ordered.append(result)
 

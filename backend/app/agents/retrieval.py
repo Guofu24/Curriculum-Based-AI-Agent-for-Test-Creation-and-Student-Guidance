@@ -176,40 +176,90 @@ class RetrievalAgent:
                 )
             warnings.extend(supplement_warnings)
 
-            # Step 3: Per-chapter rerank — ensures every chapter retains context.
-            # Global rerank would let dominant chapters crowd out others.
+            # Step 3: Rerank — guarantee scope chapters BEFORE token budget cut.
+            #
+            # Bug fix: the old per-chapter rerank grouped ALL chunks (from all 29
+            # chapters in the document), then divided budget equally. With 29 chapters
+            # sharing RAG_TOP_K_AFTER_RERANK=30, scope chapters got ~1 chunk each,
+            # and _enforce_token_budget later cut them entirely when sorting by score.
+            #
+            # Fix: (1) normalize scope_chapter IDs once, (2) separate scope vs
+            # non-scope chunks, (3) guarantee each scope chapter >= MIN_SCOPE_CHUNKS
+            # before the token-budget cut, (4) only fill remaining budget with
+            # non-scope chunks.
             rerank_total = settings.RAG_TOP_K_AFTER_RERANK  # e.g. 30
+            MIN_SCOPE_CHUNKS = 5  # minimum chunks per scope chapter
 
-            # Group chunks by chapter
-            by_chapter: dict[str, list[dict]] = {}
+            # Normalize scope chapter IDs once (handles ch18 → ch18, roman numerals, etc.)
+            scope_ch_ids: set[str] = set()
+            for ch in scope_chapters:
+                nid = normalize_chapter_id(ch)
+                scope_ch_ids.add(nid)
+                scope_ch_ids.add(ch)  # also keep original string
+
+            # Separate scope vs non-scope chunks
+            scope_chunks: list[dict] = []
+            non_scope_chunks: list[dict] = []
+            scope_seen: set[str] = set()  # track chunk_ids to avoid duplicates
+            non_scope_seen: set[str] = set()
+
             for chunk in all_chunks:
-                ch = chunk.get("metadata", {}).get("chapter", "unknown")
-                by_chapter.setdefault(ch, []).append(chunk)
+                ch_raw = chunk.get("metadata", {}).get("chapter", "")
+                ch_id = normalize_chapter_id(ch_raw)
+                # Also check raw chapter string directly
+                is_scope = ch_id in scope_ch_ids or ch_raw in scope_ch_ids
+                chunk_id = chunk.get("chunk_id", "")
+                if is_scope:
+                    if chunk_id not in scope_seen:
+                        scope_seen.add(chunk_id)
+                        scope_chunks.append(chunk)
+                else:
+                    if chunk_id not in non_scope_seen:
+                        non_scope_seen.add(chunk_id)
+                        non_scope_chunks.append(chunk)
 
-            num_chapters = max(len(by_chapter), 1)
-            per_chapter_k = max(rerank_total // num_chapters, 5)  # at least 5 per chapter
+            # Per-scope-chapter rerank: keep top-N per chapter (but at least MIN_SCOPE_CHUNKS)
+            num_scope = max(len(scope_ch_ids), 1)
+            per_scope_k = max(rerank_total // num_scope, MIN_SCOPE_CHUNKS)
 
             logger.info(
-                "Reranking %d chunks across %d chapters (top %d per chapter)",
-                len(all_chunks), num_chapters, per_chapter_k,
+                "Rerank: %d scope chunks across %d scope chapters (top %d each), "
+                "%d non-scope chunks (global pool)",
+                len(scope_chunks), num_scope, per_scope_k, len(non_scope_chunks),
             )
 
-            reranked_all: list[dict] = []
-            query_text = " ".join(expanded_queries)
+            # Group scope chunks by normalized chapter_id
+            scope_by_ch: dict[str, list[dict]] = {}
+            for chunk in scope_chunks:
+                ch_id = normalize_chapter_id(chunk.get("metadata", {}).get("chapter", ""))
+                if ch_id not in scope_by_ch:
+                    scope_by_ch[ch_id] = []
+                scope_by_ch[ch_id].append(chunk)
 
-            for ch, ch_chunks in by_chapter.items():
-                if len(ch_chunks) <= per_chapter_k:
-                    # No need to rerank — keep all
-                    reranked_all.extend(ch_chunks)
+            # Rerank each scope chapter independently
+            query_text = " ".join(expanded_queries)
+            reranked_scope: list[dict] = []
+            for ch_id, ch_chunks in scope_by_ch.items():
+                if len(ch_chunks) <= per_scope_k:
+                    reranked_scope.extend(ch_chunks)
                 else:
                     reranked = await self._rerank_chunks(
                         query=query_text,
                         chunks=ch_chunks,
-                        top_k=per_chapter_k,
+                        top_k=per_scope_k,
                     )
-                    reranked_all.extend(reranked)
+                    reranked_scope.extend(reranked)
 
-            all_chunks = reranked_all
+            # Remaining budget after scope chapters
+            remaining_budget = rerank_total - len(reranked_scope)
+            if remaining_budget > 0 and non_scope_chunks:
+                # Sort non-scope by score, keep top remaining_budget
+                non_scope_sorted = sorted(
+                    non_scope_chunks, key=lambda c: c.get("score", 0), reverse=True
+                )
+                reranked_scope.extend(non_scope_sorted[:remaining_budget])
+
+            all_chunks = reranked_scope
 
             # Enforce token budget cap (Phase 1 guard)
             all_chunks, token_warning = self._enforce_token_budget(
