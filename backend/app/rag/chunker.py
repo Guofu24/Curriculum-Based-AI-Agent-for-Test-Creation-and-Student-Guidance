@@ -108,6 +108,8 @@ def _simple_chunk(
     current_section = ""
     current_section_id = ""
     chunk_index = 0
+    # Per-chapter section counter to generate correct sequential section_ids
+    section_counter: dict[str, int] = {}
 
     def flush() -> dict:
         nonlocal current_chunks, current_size, chunk_index, current_chapter_id
@@ -169,7 +171,10 @@ def _simple_chunk(
                     current_chunks = [line]
                     current_size = len(line)
                 current_section = title
-                current_section_id = f"{current_chapter_id}_sec{_count_sections(chunks, current_chapter_id) + 1}"
+                # Use per-chapter section counter (sequential, correct)
+                sec_num = section_counter.get(current_chapter_id, 0) + 1
+                section_counter[current_chapter_id] = sec_num
+                current_section_id = f"{current_chapter_id}_sec{sec_num}"
 
             elif level == 3:
                 current_chunks.append(line)

@@ -10,7 +10,6 @@ Key alignments:
 """
 
 import asyncio
-import re
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -77,141 +76,28 @@ async def _run_generation_inline(
                     from app.rag.structure import flatten_heading_tree
                     import unicodedata
                     flat = flatten_heading_tree(doc.heading_tree)
-
-                    # Build title→chapter_id lookup (case-insensitive, diacritic-insensitive)
-                    # Must be declared BEFORE _best_chapter_match so closure works correctly
                     title_to_id: dict[str, str] = {}
                     for node in flat:
                         raw_title = node.get("title", "").strip()
                         if not raw_title or not node.get("chapter_id"):
                             continue
+                        # Normalize: lowercase + strip diacritics for reliable matching
                         norm = unicodedata.normalize("NFD", raw_title.lower())
                         ascii_key = "".join(c for c in norm if unicodedata.category(c) != "Mn")
                         title_to_id[ascii_key] = node["chapter_id"]
 
-                    def _norm(s: str) -> str:
-                        """Lowercase + strip diacritics for matching."""
-                        nfd = unicodedata.normalize("NFD", s.strip().lower())
-                        return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-
-                    def _keywords(s: str) -> set[str]:
-                        """Extract meaningful keywords (alpha tokens >= 2 chars)."""
-                        return {w for w in re.findall(r"[a-z0-9]{2,}", _norm(s))}
-
-                    def _best_chapter_match(
-                        input_scope: str, flat: list[dict], t2id: dict[str, str]
-                    ) -> str | None:
-                        """
-                        Try multiple strategies to match `input_scope` to a chapter_id:
-                          1. Exact diacritic-stripped key (title_to_id[norm])
-                          2. Substring: input_norm in chapter_norm OR chapter_norm in input_norm
-                          3. Keyword overlap: >= 40% overlap of keywords
-                          4. Input is "Chapter > Section" → extract chapter part and retry (1-3)
-                          5. normalize_chapter_id() on chapter part
-                          6. normalize_chapter_id() on full input
-                        Returns the best chapter_id or None.
-                        """
-                        # Strategy 1: exact diacritic-stripped
-                        exact_key = _norm(input_scope)
-                        if exact_key in t2id:
-                            return t2id[exact_key]
-
-                        # Strategy 2 & 3: iterate over chapter-level nodes
-                        input_kws = _keywords(input_scope)
-                        best: tuple[float, str] | None = None
-                        for node in flat:
-                            if node.get("level") != 1:
-                                continue
-                            ch_title = node.get("title", "")
-                            ch_norm = _norm(ch_title)
-                            if not ch_title:
-                                continue
-
-                            # Strategy 2: substring containment (high confidence)
-                            if (len(ch_norm) >= 3 and ch_norm in exact_key) or \
-                               (len(exact_key) >= 3 and exact_key in ch_norm):
-                                return node["chapter_id"]
-
-                            # Strategy 3: keyword overlap
-                            ch_kws = _keywords(ch_title)
-                            if input_kws and ch_kws:
-                                overlap = len(input_kws & ch_kws)
-                                max_len = max(len(input_kws), len(ch_kws))
-                                score = overlap / max_len if max_len > 0 else 0.0
-                                if score >= 0.4:
-                                    if best is None or score > best[0]:
-                                        best = (score, node["chapter_id"])
-
-                        if best is not None:
-                            return best[1]
-
-                        # Strategy 4: "Chapter > Section" → extract chapter part
-                        if " > " in input_scope:
-                            chapter_part = input_scope.split(" > ", 1)[0].strip()
-                            ch_key = _norm(chapter_part)
-                            if ch_key in t2id:
-                                return t2id[ch_key]
-                            for node in flat:
-                                if node.get("level") != 1:
-                                    continue
-                                ch_title = node.get("title", "")
-                                ch_norm = _norm(ch_title)
-                                if not ch_title:
-                                    continue
-                                if (len(ch_norm) >= 3 and ch_norm in ch_key) or \
-                                   (len(ch_key) >= 3 and ch_key in ch_norm):
-                                    return node["chapter_id"]
-                            best = None  # reset for chapter-part keyword search
-                            ch_kws = _keywords(chapter_part)
-                            for node in flat:
-                                if node.get("level") != 1:
-                                    continue
-                                ch_title = node.get("title", "")
-                                if not ch_title:
-                                    continue
-                                ch_kws2 = _keywords(ch_title)
-                                if ch_kws and ch_kws2:
-                                    overlap = len(ch_kws & ch_kws2)
-                                    max_len = max(len(ch_kws), len(ch_kws2))
-                                    score = overlap / max_len if max_len > 0 else 0.0
-                                    if score >= 0.4:
-                                        if best is None or score > best[0]:
-                                            best = (score, node["chapter_id"])
-                            if best is not None:
-                                return best[1]
-
-                        # Strategy 5: normalize_chapter_id on chapter part
-                        if " > " in input_scope:
-                            chapter_part = input_scope.split(" > ", 1)[0].strip()
-                            resolved = normalize_chapter_id(chapter_part)
-                            if resolved and not resolved.startswith("_unknown") and \
-                               (re.match(r"^ch\d", resolved) or re.match(r"^ch_[a-z]", resolved)):
-                                return resolved
-
-                        # Strategy 6: normalize_chapter_id on full input
-                        resolved = normalize_chapter_id(input_scope)
-                        if resolved and not resolved.startswith("_unknown") and \
-                           (re.match(r"^ch\d", resolved) or re.match(r"^ch_[a-z]", resolved)):
-                            return resolved
-
-                        return None
-
                     for s in scope:
                         if not s:
                             continue
-                        matched = _best_chapter_match(s, flat, title_to_id)
-                        if matched:
-                            normalized_scope.append(matched)
+                        # Normalize input the same way
+                        norm_s = unicodedata.normalize("NFD", s.strip().lower())
+                        ascii_key = "".join(c for c in norm_s if unicodedata.category(c) != "Mn")
+                        if ascii_key in title_to_id:
+                            normalized_scope.append(title_to_id[ascii_key])
                         else:
-                            # Last resort: raw normalize_chapter_id (logs warning inside)
+                            # Try normalize_chapter_id as fallback
                             resolved = normalize_chapter_id(s)
                             normalized_scope.append(resolved)
-                            _logger.warning(
-                                "Scope '%s' could not be resolved to a chapter_id; "
-                                "using fallback '%s'. Available chapters: %s",
-                                s, resolved,
-                                [f"{n['chapter_id']}:{n['title']}" for n in flat if n.get("level") == 1],
-                            )
                     _logger.info("Scope normalized: %s → %s", scope, normalized_scope)
                 else:
                     normalized_scope = [normalize_chapter_id(s) for s in scope if s]
@@ -291,18 +177,6 @@ async def _run_generation_inline(
             # Inject resolved scope into exam_config so orchestrator uses canonical chapter_ids
             resolved_config = dict(exam_config or {})
             resolved_config["scope"] = normalized_scope
-
-            # Extract section titles from scope strings ("Chương > Phần" → "Phần")
-            if scope and isinstance(scope, list):
-                section_titles: list[str] = []
-                for s in scope:
-                    if isinstance(s, str) and " > " in s:
-                        section_part = s.split(" > ", 1)[1].strip()
-                        if section_part:
-                            section_titles.append(section_part)
-                if section_titles:
-                    resolved_config["scope_sections"] = section_titles
-                    _logger.info("Extracted scope_sections: %s", section_titles)
 
             orchestrator = OrchestratorAgent(redis=redis_client, db_session=db)
             orchestrator.set_stream_callback(stream_callback)
@@ -477,15 +351,6 @@ async def generate_exam_fe(
     # Rate limit check
     await check_generate_rate_limit(redis, str(current_user.id))
 
-    # Extract section titles from scope strings ("Chương > Phần" → "Phần")
-    scope_sections: list[str] = []
-    if config.scope and isinstance(config.scope, list):
-        for s in config.scope:
-            if isinstance(s, str) and " > " in s:
-                section_part = s.split(" > ", 1)[1].strip()
-                if section_part:
-                    scope_sections.append(section_part)
-
     service = ExamService(db, redis)
     try:
         exam = await service.create_exam(
@@ -500,7 +365,6 @@ async def generate_exam_fe(
                 "bloom_distribution": config.bloom_distribution.model_dump(),
                 "user_prompt": config.user_prompt,
                 "extra_instructions": config.extra_instructions,
-                "scope_sections": scope_sections if scope_sections else None,
             },
         )
     except Exception as e:

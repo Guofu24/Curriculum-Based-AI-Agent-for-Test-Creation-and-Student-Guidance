@@ -567,22 +567,47 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 # Filter context to just this slot's chapter/section
                 slot_chapter = slot.get("chapter", "Unknown")
                 slot_section = slot.get("section", "") or ""
+                slot_chapter_id = slot.get("chapter_id", "")  # Canonical ID from heading_tree
+                slot_section_id = slot.get("section_id", "")  # Canonical section ID
+
                 topic_key = f"{slot_chapter} > {slot_section}" if slot_section else slot_chapter
-                # Try exact match first, then normalized match
-                topic_chunks = topic_context_map.get(topic_key, [])
-                match_path = "exact" if topic_chunks else ""
+                topic_chunks: list[dict] = []
+                match_path = ""
+
+                # ── Priority 1: Exact chapter_id + section_id match (most precise) ──
+                if slot_chapter_id and slot_section_id:
+                    key_ids = f"{slot_chapter_id} > {slot_section_id}"
+                    topic_chunks = topic_context_map.get(key_ids, [])
+                    if topic_chunks:
+                        match_path = "chapter_id+section_id"
+
+                # ── Priority 2: Exact chapter_id match ──
+                if not topic_chunks and slot_chapter_id:
+                    topic_chunks = topic_context_map.get(slot_chapter_id, [])
+                    if topic_chunks:
+                        match_path = "chapter_id"
+
+                # ── Priority 3: Exact title match ──
+                if not topic_chunks:
+                    topic_chunks = topic_context_map.get(topic_key, [])
+                    if topic_chunks:
+                        match_path = "exact_title"
+
+                # ── Priority 4: Normalized title match ──
                 if not topic_chunks:
                     norm_key = self._normalize_chapter_key(slot_chapter)
                     topic_chunks = norm_context_map.get(norm_key, [])
                     if topic_chunks:
                         match_path = "normalized"
-                # Try chapter_id match (ch2 -> chunks from that namespace)
+
+                # ── Priority 5: normalize_chapter_id fallback ──
                 if not topic_chunks:
                     ch_id = normalize_chapter_id(slot_chapter)
                     topic_chunks = chid_context_map.get(ch_id, [])
                     if topic_chunks:
-                        match_path = "chapter_id"
-                # Last resort: pick any chunks whose normalized key contains the chapter number
+                        match_path = "normalize_chapter_id"
+
+                # ── Priority 6: Number-based fuzzy fallback ──
                 if not topic_chunks:
                     import re
                     num_match = re.search(r'\d+', slot_chapter)
@@ -593,6 +618,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                                 topic_chunks = v
                                 match_path = "number_fallback"
                                 break
+
                 if not topic_chunks:
                     match_path = "FALLBACK_ALL"
                 question_context_str = (
@@ -1035,25 +1061,41 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
     def _build_topic_context_map(self, retrieved_context: list[dict]) -> dict[str, list[dict]]:
         """Build a dict mapping topic/chapter to relevant chunks for per-question context filtering.
 
-        Instead of dumping ALL chunks into every question prompt (wasting tokens),
-        each question only gets chunks relevant to its chapter/topic.
+        Keys include:
+        - chapter title: "I. CƠ HỌC"
+        - chapter title + section: "I. CƠ HỌC > 1.1 Động học"
+        - chapter_id: "ch1" (ALWAYS indexed, not just when different from title)
+        - chapter_id + section_id: "ch1 > ch1_sec1"
 
-        Keys include both chapter titles AND chapter_ids for flexible matching.
+        Having chapter_id as a first-class key means blueprint slots that carry
+        `chapter_id` can do an O(1) lookup without any normalize_chapter_id call.
         """
         topic_map: dict[str, list[dict]] = {}
         for chunk in retrieved_context:
             chapter = chunk.get("chapter", "") or chunk.get("metadata", {}).get("chapter", "Unknown")
             chapter_id = chunk.get("chapter_id", "") or chunk.get("metadata", {}).get("chapter_id", "")
             section = chunk.get("section", "") or chunk.get("metadata", {}).get("section", "")
-            key = f"{chapter} > {section}" if section else chapter
-            if key not in topic_map:
-                topic_map[key] = []
-            topic_map[key].append(chunk)
-            # Also index by chapter_id (e.g., "ch2") so blueprint slots can match
-            if chapter_id and chapter_id != chapter:
+            section_id = chunk.get("section_id", "") or chunk.get("metadata", {}).get("section_id", "")
+
+            # Index 1: chapter title (+ optional section)
+            key_title = f"{chapter} > {section}" if section else chapter
+            if key_title not in topic_map:
+                topic_map[key_title] = []
+            topic_map[key_title].append(chunk)
+
+            # Index 2: chapter_id (ALWAYS — primary lookup key for blueprint slots)
+            if chapter_id:
                 if chapter_id not in topic_map:
                     topic_map[chapter_id] = []
                 topic_map[chapter_id].append(chunk)
+
+                # Index 3: chapter_id + section_id (granular match)
+                if section_id:
+                    key_ids = f"{chapter_id} > {section_id}"
+                    if key_ids not in topic_map:
+                        topic_map[key_ids] = []
+                    topic_map[key_ids].append(chunk)
+
         return topic_map
 
     @staticmethod

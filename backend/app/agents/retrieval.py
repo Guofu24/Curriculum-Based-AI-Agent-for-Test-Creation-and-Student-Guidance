@@ -106,7 +106,6 @@ class RetrievalAgent:
         bloom_targets: list[str] | None = None,
         query_hints: list[str] | None = None,
         trace_id: str = "",
-        scope_sections: list[str] | None = None,
     ) -> RetrievalOutput:
         """Main retrieval method."""
         start_time = time.time()
@@ -268,33 +267,6 @@ class RetrievalAgent:
             )
             if token_warning:
                 warnings.append(token_warning)
-
-            # ── Section filter: keep only chunks whose section matches scope_sections ──
-            if scope_sections:
-                import unicodedata
-                def _strip_d(s: str) -> str:
-                    nfd = unicodedata.normalize("NFD", s.strip().lower())
-                    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-                scope_sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
-                if scope_sec_set:
-                    filtered_chunks: list[dict] = []
-                    all_section_titles: set[str] = set()
-                    for chunk in all_chunks:
-                        chunk_sec = (chunk.get("metadata", {}).get("section") or "").strip()
-                        chunk_sec_norm = _strip_d(chunk_sec)
-                        if chunk_sec_norm:
-                            all_section_titles.add(chunk_sec_norm)
-                        if chunk_sec_norm and chunk_sec_norm in scope_sec_set:
-                            filtered_chunks.append(chunk)
-                    logger.info(
-                        "[retrieve] scope_sections=%r → filtered %d chunks (from %d). "
-                        "Chunk sections found: %s",
-                        sorted(scope_sec_set), len(filtered_chunks), len(all_chunks),
-                        sorted(all_section_titles),
-                    )
-                    if filtered_chunks:
-                        all_chunks = filtered_chunks
-                    # If filtering removed everything, warn but keep chunks (fallback)
 
             # Build coverage map
             coverage_map: dict[str, list[str]] = {}
