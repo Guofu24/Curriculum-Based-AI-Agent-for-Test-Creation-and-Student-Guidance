@@ -299,6 +299,34 @@ Essay Format:
   "estimated_solve_time_minutes": 10
 }
 
+Đúng-Sai Format (THPT 2025 — 4 mệnh đề, mỗi mệnh đề đúng hoặc sai):
+{
+  "question_id": "DS_001",
+  "type": "dung_sai",
+  "stem": "Đoạn dẫn mô tả tình huống/hiện tượng vật lý...",
+  "propositions": [
+    {"label": "a", "text": "Mệnh đề a...", "is_correct": true},
+    {"label": "b", "text": "Mệnh đề b...", "is_correct": false},
+    {"label": "c", "text": "Mệnh đề c...", "is_correct": true},
+    {"label": "d", "text": "Mệnh đề d...", "is_correct": false}
+  ],
+  "explanation": "Giải thích từng mệnh đề: a) Đúng vì... b) Sai vì... c) Đúng vì... d) Sai vì...",
+  "bloom_level": "van_dung",
+  "chapter": "Chương 3"
+}
+
+Trả lời ngắn Format (THPT 2025 — điền kết quả số):
+{
+  "question_id": "SA_001",
+  "type": "short_answer",
+  "stem": "Câu hỏi yêu cầu tính toán, kết quả là một số...",
+  "correct_answer": "3.14",
+  "unit": "s",
+  "solution": "Bước 1:... Bước 2:... Kết quả: 3.14 s",
+  "bloom_level": "van_dung",
+  "chapter": "Chương 1"
+}
+
 Trả về JSON array (không có key bọc ngoài):
 [câu_hỏi_1]"""
 
@@ -802,6 +830,21 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     q["correct_answer"] = "A"
                     q["explanation"] = "Đáp án đúng là A."
 
+                # Build propositions for Đúng-Sai
+                if q_type == "dung_sai" and "propositions" not in q:
+                    q["propositions"] = [
+                        {"label": "a", "text": "Mệnh đề a", "is_correct": True},
+                        {"label": "b", "text": "Mệnh đề b", "is_correct": False},
+                        {"label": "c", "text": "Mệnh đề c", "is_correct": True},
+                        {"label": "d", "text": "Mệnh đề d", "is_correct": False},
+                    ]
+
+                # Build answer for Short Answer
+                if q_type == "short_answer" and "correct_answer" not in q:
+                    q["correct_answer"] = ""
+                    q["unit"] = ""
+                    q["solution"] = ""
+
                 # Build rubric for Essay
                 if q_type == "essay" and "rubric" not in q:
                     q["rubric"] = [
@@ -963,11 +1006,27 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 demo_q["stem"] = f"Bài toán liên quan đến {chapter}"
             demo_q["rubric"] = [
                 {"score": 10, "description": "Hoàn toàn chính xác và đầy đủ"},
-                {"score": 7, "description": "�úng nhưng thiếu một số chi tiết"},
+                {"score": 7, "description": "Đúng nhưng thiếu một số chi tiết"},
                 {"score": 4, "description": "Sai sót một phần"},
                 {"score": 0, "description": "Sai hoàn toàn"},
             ]
             demo_q["estimated_solve_time_minutes"] = 15
+
+        if q_type == "dung_sai":
+            demo_q["stem"] = snippet[:200] if snippet else f"Hiện tượng liên quan đến {chapter}"
+            demo_q["propositions"] = [
+                {"label": "a", "text": "Mệnh đề a (demo)", "is_correct": True},
+                {"label": "b", "text": "Mệnh đề b (demo)", "is_correct": False},
+                {"label": "c", "text": "Mệnh đề c (demo)", "is_correct": True},
+                {"label": "d", "text": "Mệnh đề d (demo)", "is_correct": False},
+            ]
+            demo_q["explanation"] = "Câu hỏi demo. Vui lòng tạo lại đề."
+
+        if q_type == "short_answer":
+            demo_q["stem"] = snippet[:200] if snippet else f"Tính đại lượng liên quan đến {chapter}"
+            demo_q["correct_answer"] = "0"
+            demo_q["unit"] = ""
+            demo_q["solution"] = "Câu hỏi demo. Vui lòng tạo lại đề."
 
         return demo_q
 

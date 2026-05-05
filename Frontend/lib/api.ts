@@ -274,8 +274,14 @@ export const documentsApi = {
 
 // ============ EXAMS API ============
 export type BloomLevel = 'nhan_biet' | 'thong_hieu' | 'van_dung' | 'van_dung_cao'
-export type QuestionType = 'mcq' | 'essay'
+export type QuestionType = 'mcq' | 'essay' | 'dung_sai' | 'short_answer'
 export type ExamStatus = 'draft' | 'ready_for_review' | 'regenerating' | 'published'
+
+export interface DungSaiProposition {
+  label: string
+  text: string
+  is_correct: boolean
+}
 
 export interface Question {
   id: string
@@ -284,7 +290,10 @@ export interface Question {
   type?: string
   content: string
   options?: Array<{ label: string; text: string }>
+  propositions?: DungSaiProposition[]
   correct_answer?: string
+  unit?: string
+  solution?: string
   rubric?: Record<string, unknown>
   explanation?: string
   bloom_level?: BloomLevel | string
@@ -364,11 +373,15 @@ export interface ExamListResponse {
 }
 
 export interface ExamGenerationRequest {
-  document_id: string
+  document_id?: string | null
+  use_builtin_knowledge?: boolean
   scope: string[]
   exam_type?: 'mcq' | 'essay' | 'mixed'
+  exam_mode?: 'standard' | 'thpt_2025'
   mcq_count?: number
   essay_count?: number
+  dung_sai_count?: number
+  short_answer_count?: number
   bloom_distribution?: Record<BloomLevel, number>
   user_prompt?: string
   extra_instructions?: string

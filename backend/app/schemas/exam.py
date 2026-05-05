@@ -142,6 +142,23 @@ class ExamConfigRequest(BaseModel):
         description="If True: all question content must be traceable to the document. "
                     "If False: the AI may include questions from general knowledge. Default: True.",
     )
+    exam_mode: Literal["standard", "thpt_2025"] = Field(
+        default="standard",
+        description="Exam mode. 'standard': custom config. "
+                    "'thpt_2025': auto-sets 18 MCQ + 4 Đúng-Sai + 6 Short-Answer per THPT 2025 format.",
+    )
+    dung_sai_count: int = Field(
+        default=0,
+        ge=0,
+        le=20,
+        description="Number of Đúng-Sai questions (4 propositions each, THPT 2025 format). Default: 0.",
+    )
+    short_answer_count: int = Field(
+        default=0,
+        ge=0,
+        le=20,
+        description="Number of short-answer (trả lời ngắn) questions. Default: 0.",
+    )
 
 
 class GenerationStep(BaseModel):

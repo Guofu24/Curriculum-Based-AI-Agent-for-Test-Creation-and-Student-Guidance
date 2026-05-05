@@ -68,6 +68,9 @@ interface QuestionGeneratedEvent {
     rubric?: Record<string, unknown>
     explanation?: string
     chapter?: string
+    propositions?: Array<{ label: string; text: string; is_correct: boolean }>
+    unit?: string
+    solution?: string
     [key: string]: unknown
   }
 }
@@ -1640,10 +1643,12 @@ function QuestionCard({
             className={cn(
               "text-[10px]",
               qType === "mcq" && "bg-blue-100 text-blue-700 border-blue-200",
-              qType === "essay" && "bg-violet-100 text-violet-700 border-violet-200"
+              qType === "essay" && "bg-violet-100 text-violet-700 border-violet-200",
+              qType === "dung_sai" && "bg-amber-100 text-amber-700 border-amber-200",
+              qType === "short_answer" && "bg-teal-100 text-teal-700 border-teal-200",
             )}
           >
-            {qType === "mcq" ? "MCQ" : qType === "essay" ? "Essay" : qType.toUpperCase()}
+            {qType === "mcq" ? "MCQ" : qType === "essay" ? "Essay" : qType === "dung_sai" ? "Đúng-Sai" : qType === "short_answer" ? "Trả lời ngắn" : qType.toUpperCase()}
           </Badge>
           {/* Bloom badge */}
           {bloomInfo && (
@@ -1691,6 +1696,42 @@ function QuestionCard({
               <span className="text-sm text-foreground">{opt.text}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Đúng-Sai propositions */}
+      {qType === "dung_sai" && question.propositions && question.propositions.length > 0 && (
+        <div className="space-y-1.5">
+          {question.propositions.map((prop) => (
+            <div
+              key={prop.label}
+              className={`flex items-start gap-2 rounded-lg border p-2.5 text-sm ${
+                prop.is_correct
+                  ? "border-emerald-500/40 bg-emerald-500/10"
+                  : "border-red-500/30 bg-red-500/10"
+              }`}
+            >
+              <span className="font-semibold text-xs w-4 shrink-0 mt-0.5">{prop.label})</span>
+              <span className="flex-1">{prop.text}</span>
+              <span className={`text-xs font-medium shrink-0 ${prop.is_correct ? "text-emerald-400" : "text-red-400"}`}>
+                {prop.is_correct ? "Đúng" : "Sai"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Short Answer */}
+      {qType === "short_answer" && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 space-y-1">
+          <p className="text-sm">
+            <span className="font-medium text-amber-300 text-xs">Đáp án: </span>
+            <span className="font-mono text-sm">{question.correct_answer ?? "—"}</span>
+            {question.unit && <span className="ml-1 text-xs text-muted-foreground">{question.unit}</span>}
+          </p>
+          {question.solution && (
+            <p className="text-xs text-muted-foreground whitespace-pre-line">{question.solution}</p>
+          )}
         </div>
       )}
 

@@ -44,11 +44,13 @@ Tạo sườn đề (blueprint) với các slot câu hỏi được phân bổ t
   - Loại nội dung (text, calculation, applied_problem, conceptual)
 
 ## Ràng buộc nghiêm ngặt
-- Tổng MCQ + Essay phải KHỚP với config
+- Tổng MCQ + Essay + Đúng-Sai + Trả lời ngắn phải KHỚP với config
 - **Phân bổ Bloom phải CHÍNH XÁC**: tổng slot mỗi mức = config yêu cầu (±0 câu)
 - Không chapter nào chiếm > 50% tổng số câu
 - MCQ: 4 lựa chọn, 1 đúng, 3 mồi nhử có logic
 - Essay: có rubric chấm điểm
+- dung_sai: 4 mệnh đề a/b/c/d, mỗi mệnh đề đúng hoặc sai (THPT 2025)
+- short_answer: kết quả là con số, thí sinh điền trực tiếp (THPT 2025)
 
 ## Taxonomy Bloom đầy đủ
 - **nhan_biet** (Nhận biết): Định nghĩa, liệt kê, nêu tên — câu hỏi bắt đầu bằng "Định nghĩa", "Nêu", "Liệt kê", "Cho biết"
@@ -535,49 +537,56 @@ KIỂM TRA LẠI trước khi output.
         """Build the user prompt for outline creation."""
         scope = exam_config.get("scope", [])
         mcq_count = exam_config.get("mcq_count", 40)
-        essay_count = exam_config.get("essay_count", 5)
+        essay_count = exam_config.get("essay_count", 0)
+        dung_sai_count = exam_config.get("dung_sai_count", 0)
+        short_answer_count = exam_config.get("short_answer_count", 0)
         bloom_dist = exam_config.get("bloom_distribution", {})
         user_prompt = exam_config.get("user_prompt", "")
         extra_instructions = exam_config.get("extra_instructions", "")
-        # G8: HITL feedback from rejected blueprint
         outline_feedback = exam_config.get("outline_feedback", "")
 
         feedback_section = ""
         if outline_feedback:
             feedback_section = f"""
-## Phan hoi tu giang vien (HITL - G8):
+## Phản hồi từ giảng viên (HITL):
 {outline_feedback}
 
-Hay dieu chinh blueprint theo phan hoi tren.
+Hãy điều chỉnh blueprint theo phản hồi trên.
 """
 
-        # Convert bloom percentages to actual counts for LLM clarity
-        total_questions = mcq_count + essay_count
+        total_questions = mcq_count + essay_count + dung_sai_count + short_answer_count
         bloom_counts = self._bloom_pct_to_counts(bloom_dist, total_questions)
 
-        prompt = f"""Tao suon de kiem tra voi cau hinh sau:
+        type_breakdown = f"- MCQ (trắc nghiệm 4 lựa chọn): {mcq_count} câu"
+        if essay_count:
+            type_breakdown += f"\n- Essay (tự luận): {essay_count} câu"
+        if dung_sai_count:
+            type_breakdown += f"\n- Đúng-Sai (4 mệnh đề a/b/c/d, type='dung_sai'): {dung_sai_count} câu"
+        if short_answer_count:
+            type_breakdown += f"\n- Trả lời ngắn (điền số, type='short_answer'): {short_answer_count} câu"
 
-## Scope (pham vi bai kiem tra):
+        prompt = f"""Tạo sườn đề kiểm tra với cấu hình sau:
+
+## Phạm vi (scope):
 {json.dumps(scope, ensure_ascii=False)}
 
-## Cau hinh de:
-- Tong so cau MCQ: {mcq_count}
-- Tong so cau Essay: {essay_count}
-- TONG SO CAU: {total_questions} (MCQ + Essay)
-- **MOI CHUONG trong scope PHAI co it nhat 1 cau hoi** (bat buoc, khong bo sot chuong nao)
-- Phan bo Bloom (SO LUONG CAU, KHONG PHAI %):
+## Cấu hình đề:
+{type_breakdown}
+- TỔNG SỐ CÂU: {total_questions}
+- **MỖI CHƯƠNG trong scope PHẢI có ít nhất 1 câu hỏi** (bắt buộc)
+- Phân bổ Bloom (SỐ LƯỢNG CÂU, KHÔNG PHẢI %):
 {json.dumps(bloom_counts, ensure_ascii=False, indent=2)}
 
-## Kien thuc da truy xuat:
+## Kiến thức đã truy xuất:
 {self._build_context_summary(retrieved_context)}
 
-## Yeu cau tu giang vien:
-{user_prompt or "Khong co yeu cau dac biet."}
+## Yêu cầu từ giảng viên:
+{user_prompt or "Không có yêu cầu đặc biệt."}
 
-## Huong dan bo sung:
-{extra_instructions or "Sinh cau hoi chuan muc, phu hop voi chuong trinh pho thong Viet Nam."}
+## Hướng dẫn bổ sung:
+{extra_instructions or "Sinh câu hỏi chuẩn mực, phù hợp với chương trình phổ thông Việt Nam."}
 {feedback_section}
-Tao blueprint chi tiet:"""
+Tạo blueprint chi tiết:"""
 
         return prompt
 
@@ -623,6 +632,7 @@ Tao blueprint chi tiet:"""
             return False, f"Blueprint must be a list, got {type(bp).__name__}"
 
         valid_blooms = {"nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"}
+        valid_types = {"mcq", "essay", "dung_sai", "short_answer"}
 
         for i, slot in enumerate(bp):
             if not isinstance(slot, dict):
@@ -642,6 +652,12 @@ Tao blueprint chi tiet:"""
                 missing.append("chapter")
             if missing:
                 return False, f"Blueprint[{i}] missing required keys: {missing}"
+            slot_type = slot.get("type", "mcq")
+            if slot_type not in valid_types:
+                return False, (
+                    f"Blueprint[{i}] type '{slot_type}' is not valid "
+                    f"(expected one of {valid_types})"
+                )
 
         return True, ""
 
@@ -690,25 +706,28 @@ Tao blueprint chi tiet:"""
 
         scope = exam_config.get("scope", [])
         mcq_count = exam_config.get("mcq_count", 40)
-        essay_count = exam_config.get("essay_count", 5)
+        essay_count = exam_config.get("essay_count", 0)
+        dung_sai_count = exam_config.get("dung_sai_count", 0)
+        short_answer_count = exam_config.get("short_answer_count", 0)
         bloom_dist = exam_config.get("bloom_distribution", {
             "nhan_biet": 20, "thong_hieu": 30, "van_dung": 30, "van_dung_cao": 20
         })
 
-        # Simple round-robin allocation
-        blueprint = []
-        bloom_counts = self._bloom_pct_to_counts(bloom_dist, mcq_count)
+        total_questions = mcq_count + essay_count + dung_sai_count + short_answer_count
+        bloom_counts = self._bloom_pct_to_counts(bloom_dist, total_questions)
         bloom_levels = list(bloom_counts.keys())
         chapters = scope if scope else ["Chương 1"]
+        diff_map = {"nhan_biet": 0.2, "thong_hieu": 0.4, "van_dung": 0.6, "van_dung_cao": 0.85}
 
-        mcq_id = 1
-        essay_id = 1
+        blueprint = []
+        mcq_id = essay_id = ds_id = sa_id = 1
 
+        # Allocate MCQ slots round-robin across bloom levels
+        mcq_bloom = self._bloom_pct_to_counts(bloom_dist, mcq_count)
         for bloom in bloom_levels:
-            bloom_count = bloom_counts.get(bloom, 0)
-            for i in range(bloom_count):
+            for i in range(mcq_bloom.get(bloom, 0)):
                 chapter = chapters[i % len(chapters)]
-                slot = {
+                blueprint.append({
                     "question_id": f"MCQ_{mcq_id:03d}",
                     "type": "mcq",
                     "bloom_level": bloom,
@@ -716,36 +735,59 @@ Tao blueprint chi tiet:"""
                     "section": None,
                     "topic_hint": f"Câu hỏi mức {bloom}",
                     "content_type": "calculation" if bloom in ["van_dung", "van_dung_cao"] else "text",
-                    "estimated_difficulty": {"nhan_biet": 0.2, "thong_hieu": 0.4, "van_dung": 0.6, "van_dung_cao": 0.85}.get(bloom, 0.5),
-                }
-                blueprint.append(slot)
+                    "estimated_difficulty": diff_map.get(bloom, 0.5),
+                })
                 mcq_id += 1
 
-        # MCQ-only: strip essay slots before building essay section
-        if essay_count == 0:
-            return blueprint
-
+        # Essay slots
         for i in range(essay_count):
-            chapter = chapters[i % len(chapters)]
-            slot = {
+            blueprint.append({
                 "question_id": f"ESSAY_{essay_id:03d}",
                 "type": "essay",
                 "bloom_level": "van_dung",
-                "chapter": chapter,
+                "chapter": chapters[i % len(chapters)],
                 "section": None,
                 "topic_hint": "Câu tự luận vận dụng",
                 "content_type": "applied_problem",
                 "estimated_difficulty": 0.7,
-            }
-            blueprint.append(slot)
+            })
             essay_id += 1
 
+        # Đúng-Sai slots (THPT 2025)
+        ds_bloom = self._bloom_pct_to_counts(bloom_dist, dung_sai_count)
+        for bloom in bloom_levels:
+            for i in range(ds_bloom.get(bloom, 0)):
+                blueprint.append({
+                    "question_id": f"DS_{ds_id:03d}",
+                    "type": "dung_sai",
+                    "bloom_level": bloom,
+                    "chapter": chapters[i % len(chapters)],
+                    "section": None,
+                    "topic_hint": f"Câu đúng-sai mức {bloom}",
+                    "content_type": "conceptual",
+                    "estimated_difficulty": diff_map.get(bloom, 0.5),
+                })
+                ds_id += 1
+
+        # Short-Answer slots (THPT 2025)
+        sa_bloom = self._bloom_pct_to_counts(bloom_dist, short_answer_count)
+        for bloom in bloom_levels:
+            for i in range(sa_bloom.get(bloom, 0)):
+                blueprint.append({
+                    "question_id": f"SA_{sa_id:03d}",
+                    "type": "short_answer",
+                    "bloom_level": bloom,
+                    "chapter": chapters[i % len(chapters)],
+                    "section": None,
+                    "topic_hint": f"Câu trả lời ngắn mức {bloom}",
+                    "content_type": "calculation",
+                    "estimated_difficulty": diff_map.get(bloom, 0.6),
+                })
+                sa_id += 1
+
         distribution_summary = {
-            "by_bloom": {level: round(mcq_count * bloom_dist.get(level, 25) / 100) for level in bloom_levels},
-            "by_chapter": {
-                ch: sum(1 for slot in blueprint if slot.get("chapter") == ch)
-                for ch in chapters
-            },
+            "by_bloom": {level: sum(1 for s in blueprint if s.get("bloom_level") == level) for level in bloom_levels},
+            "by_chapter": {ch: sum(1 for s in blueprint if s.get("chapter") == ch) for ch in chapters},
         }
 
         valid, reason = self.validate_blueprint(blueprint)

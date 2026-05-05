@@ -29,6 +29,7 @@ import {
   AlertCircle,
   BookOpen,
   Layers,
+  Upload,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -44,14 +45,17 @@ import { GenerationLiveViewer } from '@/components/generation-live-viewer'
 import { cn } from '@/lib/utils'
 
 type ExamType = 'mcq' | 'essay' | 'mixed'
+type ExamMode = 'standard' | 'thpt_2025'
 
 interface GenerationConfig {
   documentId: string
-  // Selected section IDs
   selectedSections: Set<string>
+  examMode: ExamMode
   examType: ExamType
   mcqCount: number
   essayCount: number
+  dungSaiCount: number
+  shortAnswerCount: number
   bloomDistribution: Record<BloomLevel, number>
   userPrompt: string
   strictScope: boolean
@@ -61,9 +65,12 @@ interface GenerationConfig {
 const defaultConfig: GenerationConfig = {
   documentId: '',
   selectedSections: new Set(),
+  examMode: 'standard',
   examType: 'mixed',
   mcqCount: 10,
   essayCount: 2,
+  dungSaiCount: 0,
+  shortAnswerCount: 0,
   bloomDistribution: {
     nhan_biet: 20,
     thong_hieu: 30,
@@ -75,6 +82,14 @@ const defaultConfig: GenerationConfig = {
   title: '',
 }
 
+const THPT_2025_CONFIG = {
+  mcqCount: 18,
+  dungSaiCount: 4,
+  shortAnswerCount: 6,
+  essayCount: 0,
+  bloomDistribution: { nhan_biet: 40, thong_hieu: 30, van_dung: 20, van_dung_cao: 10 } as Record<BloomLevel, number>,
+}
+
 const BLOOM_LABELS: Record<BloomLevel, string> = {
   nhan_biet: 'Nhận biết',
   thong_hieu: 'Thông hiểu',
@@ -84,7 +99,7 @@ const BLOOM_LABELS: Record<BloomLevel, string> = {
 
 export default function GeneratePage() {
   const router = useRouter()
-  const [step, setStep] = useState(1)
+  const [step, setStep] = useState(0)
   const [config, setConfig] = useState<GenerationConfig>(defaultConfig)
   const [documents, setDocuments] = useState<Document[]>([])
   const [curriculum, setCurriculum] = useState<CurriculumNode[]>([])
@@ -264,9 +279,10 @@ export default function GeneratePage() {
 
   const hasAnySelection = config.selectedSections.size > 0
   const canProceedStep1 = config.documentId !== ''
+  const totalQuestions = config.mcqCount + config.essayCount + config.dungSaiCount + config.shortAnswerCount
   const canProceedStep2 =
     hasAnySelection &&
-    (config.mcqCount > 0 || config.essayCount > 0) &&
+    totalQuestions > 0 &&
     isBloomValid
 
   const handleStartGeneration = async () => {
@@ -278,9 +294,12 @@ export default function GeneratePage() {
       const request: ExamGenerationRequest = {
         document_id: config.documentId,
         scope: displayScope,
+        exam_mode: config.examMode,
         exam_type: config.examType,
         mcq_count: config.mcqCount,
         essay_count: config.essayCount,
+        dung_sai_count: config.dungSaiCount,
+        short_answer_count: config.shortAnswerCount,
         bloom_distribution: config.bloomDistribution,
         user_prompt: config.userPrompt || undefined,
         strict_scope_flag: config.strictScope,
@@ -350,39 +369,91 @@ export default function GeneratePage() {
       <main className="flex-1 overflow-auto">
         <div className="container mx-auto p-6 space-y-6">
           {/* Header */}
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">Tạo đề thi mới</h1>
-            <p className="text-muted-foreground">
-              Sinh đề thi tự động từ tài liệu giảng dạy
-            </p>
-          </div>
+          {step > 0 && (
+            <div>
+              <h1 className="text-3xl font-bold tracking-tight">Tạo đề thi mới</h1>
+              <p className="text-muted-foreground">
+                Sinh đề thi tự động từ tài liệu giảng dạy
+              </p>
+            </div>
+          )}
 
           {/* Step Indicator */}
-          <div className="flex items-center gap-2">
-            {[1, 2, 3].map((s) => (
-              <div key={s} className="flex items-center gap-2">
-                <div
-                  className={cn(
-                    "flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium transition-colors",
-                    step >= s
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-muted-foreground"
-                  )}
-                >
-                  {step > s ? <Check className="h-4 w-4" /> : s}
+          {step > 0 && (
+            <div className="flex items-center gap-2">
+              {[1, 2, 3].map((s) => (
+                <div key={s} className="flex items-center gap-2">
+                  <div
+                    className={cn(
+                      "flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium transition-colors",
+                      step >= s
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-muted-foreground"
+                    )}
+                  >
+                    {step > s ? <Check className="h-4 w-4" /> : s}
+                  </div>
+                  <span className={cn(
+                    "text-sm hidden sm:inline",
+                    step >= s ? "text-foreground" : "text-muted-foreground"
+                  )}>
+                    {s === 1 && "Chọn tài liệu"}
+                    {s === 2 && "Cấu hình đề"}
+                    {s === 3 && "Tạo đề"}
+                  </span>
+                  {s < 3 && <ChevronRight className="h-4 w-4 text-muted-foreground" />}
                 </div>
-                <span className={cn(
-                  "text-sm hidden sm:inline",
-                  step >= s ? "text-foreground" : "text-muted-foreground"
-                )}>
-                  {s === 1 && "Chọn tài liệu"}
-                  {s === 2 && "Cấu hình đề"}
-                  {s === 3 && "Tạo đề"}
-                </span>
-                {s < 3 && <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+              ))}
+            </div>
+          )}
+
+          {/* Step 0: Choose Source */}
+          {step === 0 && (
+            <div className="grid gap-6 mt-8 max-w-4xl mx-auto">
+              <div className="text-center mb-8">
+                <h1 className="text-3xl font-bold tracking-tight">Chọn nguồn kiến thức</h1>
+                <p className="text-muted-foreground mt-2">
+                  Bạn muốn sinh đề từ tài liệu của mình hay dùng kiến thức sẵn có?
+                </p>
               </div>
-            ))}
-          </div>
+              <div className="grid sm:grid-cols-2 gap-6">
+                <Card
+                  className="cursor-pointer border-2 transition-all hover:border-primary hover:bg-primary/5 h-full"
+                  onClick={() => setStep(1)}
+                >
+                  <CardContent className="pt-8 pb-8 flex flex-col h-full">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 text-primary mb-6">
+                      <Upload className="h-8 w-8" />
+                    </div>
+                    <h3 className="font-semibold text-xl mb-2">Tôi đã có tài liệu</h3>
+                    <p className="text-muted-foreground flex-1">
+                      Upload PDF / DOCX / PPTX và sinh đề từ nội dung do bạn cung cấp.
+                    </p>
+                  </CardContent>
+                </Card>
+
+                <Card
+                  className="cursor-pointer border-2 transition-all hover:border-amber-500 hover:bg-amber-500/5 h-full"
+                  onClick={() => router.push('/dashboard/generate/textbook')}
+                >
+                  <CardContent className="pt-8 pb-8 flex flex-col h-full">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-500 mb-6">
+                      <BookOpen className="h-8 w-8" />
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap mb-2">
+                      <h3 className="font-semibold text-xl">Dùng kiến thức có sẵn</h3>
+                      <Badge variant="outline" className="text-amber-500 border-amber-500/40 bg-amber-500/10 text-xs">
+                        Vật lí 12
+                      </Badge>
+                    </div>
+                    <p className="text-muted-foreground flex-1">
+                      Hệ thống đã có sẵn kiến thức SGK Vật lí 12 — không cần upload tài liệu.
+                    </p>
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
+          )}
 
           {/* Step 1: Select Document */}
           {step === 1 && (
@@ -686,7 +757,38 @@ export default function GeneratePage() {
                     </Field>
                   </FieldGroup>
 
-                  {/* Exam Type */}
+                  {/* Exam Mode */}
+                  <FieldGroup>
+                    <Field>
+                      <FieldLabel>Chế độ đề thi</FieldLabel>
+                      <RadioGroup
+                        value={config.examMode}
+                        onValueChange={(val) => {
+                          const mode = val as ExamMode
+                          if (mode === 'thpt_2025') {
+                            setConfig(prev => ({ ...prev, examMode: mode, ...THPT_2025_CONFIG }))
+                          } else {
+                            setConfig(prev => ({ ...prev, examMode: mode }))
+                          }
+                        }}
+                        className="flex flex-wrap gap-4"
+                      >
+                        <div className="flex items-center gap-2">
+                          <RadioGroupItem value="standard" id="mode-standard" />
+                          <Label htmlFor="mode-standard">Tuỳ chỉnh</Label>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <RadioGroupItem value="thpt_2025" id="mode-thpt" />
+                          <Label htmlFor="mode-thpt" className="font-medium text-amber-400">
+                            Chuẩn THPT 2025 (18 TN + 4 Đúng-Sai + 6 Ngắn)
+                          </Label>
+                        </div>
+                      </RadioGroup>
+                    </Field>
+                  </FieldGroup>
+
+                  {/* Exam Type (standard mode only) */}
+                  {config.examMode === 'standard' && (
                   <FieldGroup>
                     <Field>
                       <FieldLabel>Loại đề thi</FieldLabel>
@@ -710,24 +812,38 @@ export default function GeneratePage() {
                       </RadioGroup>
                     </Field>
                   </FieldGroup>
+                  )}
 
                   {/* Question Counts */}
                   <div className="grid gap-4 sm:grid-cols-2">
-                    {(config.examType === 'mcq' || config.examType === 'mixed') && (
+                    {(config.examMode === 'thpt_2025' || config.examType === 'mcq' || config.examType === 'mixed') && (
                       <Field>
-                        <FieldLabel>Số câu trắc nghiệm</FieldLabel>
+                        <FieldLabel>Trắc nghiệm (MCQ)</FieldLabel>
                         <Input
                           type="number"
-                          min={1}
+                          min={0}
                           max={50}
                           value={config.mcqCount}
+                          disabled={config.examMode === 'thpt_2025'}
                           onChange={(e) => setConfig(prev => ({ ...prev, mcqCount: parseInt(e.target.value) || 0 }))}
                         />
                       </Field>
                     )}
-                    {(config.examType === 'essay' || config.examType === 'mixed') && (
+                    {config.examMode === 'thpt_2025' && (
                       <Field>
-                        <FieldLabel>Số câu tự luận</FieldLabel>
+                        <FieldLabel>Đúng-Sai (THPT)</FieldLabel>
+                        <Input type="number" value={config.dungSaiCount} disabled />
+                      </Field>
+                    )}
+                    {config.examMode === 'thpt_2025' && (
+                      <Field>
+                        <FieldLabel>Trả lời ngắn</FieldLabel>
+                        <Input type="number" value={config.shortAnswerCount} disabled />
+                      </Field>
+                    )}
+                    {(config.examMode === 'standard' && (config.examType === 'essay' || config.examType === 'mixed')) && (
+                      <Field>
+                        <FieldLabel>Tự luận</FieldLabel>
                         <Input
                           type="number"
                           min={0}

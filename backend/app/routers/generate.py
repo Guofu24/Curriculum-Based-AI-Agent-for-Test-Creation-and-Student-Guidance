@@ -424,6 +424,18 @@ def _map_fe_to_be_request(data: dict) -> ExamConfigRequest:
             mcq_count = total_q
             essay_count = max(total_q // 5, 2)
 
+    exam_mode = data.get("exam_mode", "standard") or "standard"
+    dung_sai_count = int(data.get("dung_sai_count") or 0)
+    short_answer_count = int(data.get("short_answer_count") or 0)
+
+    # THPT 2025 preset: override all counts + bloom distribution
+    if exam_mode == "thpt_2025":
+        mcq_count = 18
+        dung_sai_count = 4
+        short_answer_count = 6
+        essay_count = 0
+        bloom = {"nhan_biet": 40, "thong_hieu": 30, "van_dung": 20, "van_dung_cao": 10}
+
     from app.schemas.exam import BloomDistribution
     return ExamConfigRequest(
         document_id=doc_id,
@@ -432,6 +444,9 @@ def _map_fe_to_be_request(data: dict) -> ExamConfigRequest:
         exam_type=data.get("exam_type", "mixed") or "mixed",
         mcq_count=mcq_count,
         essay_count=essay_count,
+        dung_sai_count=dung_sai_count,
+        short_answer_count=short_answer_count,
+        exam_mode=exam_mode,
         bloom_distribution=BloomDistribution(**bloom),
         user_prompt=data.get("user_prompt") or data.get("prompt") or None,
         extra_instructions=data.get("extra_instructions") or data.get("instructions") or None,
