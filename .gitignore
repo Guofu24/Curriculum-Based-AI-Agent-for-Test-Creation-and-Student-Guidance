@@ -141,6 +141,7 @@ docs/*.puml
 # Local reference/source drops (books data)
 Data sách/
 "Data sách"/
+*.pdf
 
 # Output files with potential secrets
 gemini.txt

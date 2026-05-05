@@ -145,9 +145,11 @@ class VectorStore:
                         )
                         raise
 
+        import asyncio
+        loop = asyncio.get_running_loop()
         for i in range(0, len(records), 100):
             batch = records[i:i + 100]
-            _upsert_batch(batch, namespace)
+            await loop.run_in_executor(None, _upsert_batch, batch, namespace)
 
     async def count_chunks_in_scope(
         self,

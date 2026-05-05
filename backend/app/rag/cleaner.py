@@ -29,6 +29,7 @@ def clean_markdown(raw: str) -> CleanerResult:
         "fixed_bolds": 0,
         "removed_duplicates": 0,
         "normalized_spacing": 0,
+        "demoted_exercises": 0,
     }
 
     # ── Rule 1: Remove noise artifacts ─────────────────────────────────────────
@@ -54,6 +55,10 @@ def clean_markdown(raw: str) -> CleanerResult:
     # ── Rule 6: Normalize spacing ───────────────────────────────────────────────
     lines, count = _normalize_spacing(lines)
     stats["normalized_spacing"] = count
+
+    # ── Rule 7: Demote bare exercise-label headings (Bài X.) to plain text ───────
+    lines, count = _demote_exercise_headings(lines)
+    stats["demoted_exercises"] = count
 
     cleaned = "\n".join(lines)
     return CleanerResult(cleaned=cleaned, stats=stats)
@@ -372,3 +377,49 @@ def _normalize_spacing(lines: list[str]) -> tuple[list[str], int]:
     removed = len([l for l in lines if not l.strip()]) - len([l for l in collapsed if not l])
 
     return collapsed, max(removed, 0)
+
+
+# ─── Rule 7: Demote exercise-label headings ──────────────────────────────────────
+
+# Bare exercise labels: "Bài 1.", "Bài 2. a.", "Bài 12. ĐS:" — no substantive title.
+# These appear bold in scan PDFs so Gemini OCR wraps them in ## headings.
+# We strip the # markers so they become plain content inside the parent chunk.
+_RE_EXERCISE_LABEL = re.compile(
+    r"^(#{1,4})\s+(B\u00e0i|Bai)\s+\d+[\s.,:;]*"
+    r"(\d+[a-z]?[.)]?|\u0110S|ĐS|HD|H\u01b0\u1edbng\s+d\u1eabn|a\.|b\.|c\.)?\s*$",
+    re.IGNORECASE,
+)
+# Answer/guide section headings that sneak through as H1 (e.g. "ĐÁP SỐ PHẦN I")
+_RE_ANSWER_HEADING = re.compile(
+    r"^(#{1,4})\s+(\u0110\u00e1p\s+s\u1ed1|Dap\s+so|H\u01b0\u1edbng\s+d\u1eabn\s+v\u00e0|Phan\s+h\u01b0\u1edbng|Answer\s+key)",
+    re.IGNORECASE,
+)
+
+
+def _demote_exercise_headings(lines: list[str]) -> tuple[list[str], int]:
+    """
+    Rule 7: Strip heading markers from lines that are bare exercise labels.
+
+    Converts:  ## Bài 1.          →  Bài 1.
+               ### Bài 12. ĐS:   →  Bài 12. ĐS:
+               # ĐÁP SỐ PHẦN I   →  ĐÁP SỐ PHẦN I
+
+    This stops them from appearing in the LLM heading list while keeping
+    the text in the markdown so it gets included in the parent chunk.
+    """
+    result: list[str] = []
+    demoted = 0
+    for line in lines:
+        stripped = line.strip()
+        if _RE_EXERCISE_LABEL.match(stripped):
+            # Strip the leading #s
+            plain = re.sub(r"^#{1,4}\s+", "", stripped)
+            result.append(plain)
+            demoted += 1
+        elif _RE_ANSWER_HEADING.match(stripped):
+            plain = re.sub(r"^#{1,4}\s+", "", stripped)
+            result.append(plain)
+            demoted += 1
+        else:
+            result.append(line)
+    return result, demoted
