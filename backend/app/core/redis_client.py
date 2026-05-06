@@ -22,7 +22,7 @@ def _get_pool() -> redis.ConnectionPool:
         try:
             _redis_pool = redis.ConnectionPool.from_url(
                 settings.REDIS_URL,
-                max_connections=20,
+                max_connections=500,
                 decode_responses=True,
             )
             _redis_available = True
@@ -97,7 +97,11 @@ class RedisClient:
             if isinstance(val, str):
                 return val
             return None
-        return await self.client.get(key)
+        try:
+            return await self.client.get(key)
+        except Exception as exc:
+            logger.warning("Redis get(%s) failed: %s", key, exc)
+            return None
 
     async def get_json(self, key: str) -> Optional[dict]:
         """Get JSON value by key."""
