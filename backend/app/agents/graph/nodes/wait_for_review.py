@@ -26,6 +26,7 @@ def _normalize(val) -> str:
 def _process_review_result(
     state: ExamGraphState,
     approved: bool,
+    feedback: str | None = None,
 ) -> ExamGraphState:
     """Process the review approval/rejection result and return state update."""
     exam_id = state.get("exam_id", "")
@@ -54,6 +55,7 @@ def _process_review_result(
         **state,
         "checkpoint_2_approved": False,
         "checkpoint_2_status": HITLCheckpointStatus.REJECTED,
+        "checkpoint_2_feedback": feedback or "",
     }
 
 

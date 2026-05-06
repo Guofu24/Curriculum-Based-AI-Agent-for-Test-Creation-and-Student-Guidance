@@ -188,6 +188,15 @@ slot CHÍNH XÁC bằng số slot đã nhận được.
                 temperature=0.3,
             )
 
+            # Extract token usage if LLM client returns metadata alongside text
+            # llm.chat() may return a plain str or a response object with .usage
+            if not isinstance(response, str):
+                _usage = getattr(response, "usage", None)
+                if _usage:
+                    metrics.prompt_tokens = int(getattr(_usage, "prompt_tokens", 0) or 0)
+                    metrics.completion_tokens = int(getattr(_usage, "completion_tokens", 0) or 0)
+                response = getattr(response, "text", None) or str(response)
+
             print(f"[OutlineAgent] RAW ({len(response)} chars): {response[:400]!r}", flush=True)
             # Strip markdown code fences before parsing (model often wraps JSON in ```json...```)
             _clean = response.strip()
@@ -207,15 +216,49 @@ slot CHÍNH XÁC bằng số slot đã nhận được.
                 _raw_ch[_s.get("chapter", "?")] = _raw_ch.get(_s.get("chapter", "?"), 0) + 1
             print(f"[OutlineAgent] RAW LLM: {len(blueprint)} slots, chapter_dist={_raw_ch}", flush=True)
 
+            # ── Modification mode: restore bloom_level + type from current_blueprint ──
+            # The LLM is only allowed to change chapter/section/topic_hint.
+            # Bloom and type must stay exactly as in the original blueprint.
+            if is_modification:
+                _orig_map: dict[str, dict] = {
+                    s.get("question_id", ""): s
+                    for s in (exam_config.get("current_blueprint") or [])
+                    if s.get("question_id")
+                }
+                _bloom_reverted = 0
+                for slot in blueprint:
+                    qid = slot.get("question_id", "")
+                    orig = _orig_map.get(qid)
+                    if orig:
+                        if slot.get("bloom_level") != orig.get("bloom_level"):
+                            slot["bloom_level"] = orig["bloom_level"]
+                            _bloom_reverted += 1
+                        if slot.get("type") != orig.get("type"):
+                            slot["type"] = orig["type"]
+                if _bloom_reverted:
+                    print(f"[OutlineAgent] BLOOM LOCK: reverted bloom_level for {_bloom_reverted} slots", flush=True)
+
             # ── Hard type-count enforcement BEFORE Bloom check ──────────────
             mcq_target    = int(exam_config.get("mcq_count", 40) or 0)
             essay_target  = int(exam_config.get("essay_count", 0) or 0)
             ds_target     = int(exam_config.get("dung_sai_count", 0) or 0)
             sa_target     = int(exam_config.get("short_answer_count", 0) or 0)
             _scope_for_pad = [str(s) for s in (exam_config.get("scope", []) or [])]
+
+            # In modification mode, capture the chapter distribution from LLM output
+            # BEFORE enforcement so we can use it when padding missing slots.
+            # This preserves the teacher's feedback-driven chapter redistribution.
+            _llm_chapter_dist: dict[str, int] | None = None
+            if is_modification and blueprint:
+                _llm_chapter_dist = {}
+                for _s in blueprint:
+                    _ch = _s.get("chapter", "")
+                    _llm_chapter_dist[_ch] = _llm_chapter_dist.get(_ch, 0) + 1
+
             blueprint = self._enforce_type_counts(
                 blueprint, mcq_target, essay_target, ds_target, sa_target,
                 scope_chapters=_scope_for_pad,
+                llm_chapter_dist=_llm_chapter_dist,
             )
             # Warn if LLM only returned a subset of slots (common in modification mode)
             _actual_from_llm = len(result.get("blueprint", []))
@@ -306,63 +349,57 @@ slot CHÍNH XÁC bằng số slot đã nhận được.
             if validation_warning:
                 warnings.append(validation_warning)
 
-            # ─── Strict enforcement: MCQ-only or Essay-only ───
-            # If the user requested only MCQ (essay_count=0), strip any essay slots the LLM may have generated.
-            # If the user requested only Essay (mcq_count=0), strip any MCQ slots.
-            essay_count = exam_config.get("essay_count", 5)
-            mcq_count = exam_config.get("mcq_count", 40)
-
-            # Debug: log config values
-            logger.info(f"[OUTLINE AGENT] exam_type={exam_config.get('exam_type')} "
-                        f"mcq_count={mcq_count} essay_count={essay_count} "
-                        f"LLM returned {len(blueprint)} slots")
-
-            if essay_count == 0 and mcq_count > 0:
-                # MCQ-only: remove essay slots, then truncate to exactly mcq_count
-                blueprint = [s for s in blueprint if s.get("type") != "essay"]
-                original_len = len(blueprint)
-                if len(blueprint) > mcq_count:
-                    blueprint = blueprint[:mcq_count]
-                    warnings.append(
-                        f"Blueprint had {original_len} MCQ slots but config requires {mcq_count}. "
-                        "Truncated to match configuration."
-                    )
-                elif len(blueprint) < mcq_count:
-                    warnings.append(
-                        f"Blueprint has only {len(blueprint)} MCQ slots but config requires {mcq_count}."
-                    )
-            elif mcq_count == 0 and essay_count > 0:
-                # Essay-only: remove MCQ slots
-                original_len = len(blueprint)
-                blueprint = [s for s in blueprint if s.get("type") != "mcq"]
-                if len(blueprint) < original_len:
-                    warnings.append(
-                        f"LLM generated {original_len - len(blueprint)} MCQ slots but exam is Essay-only. "
-                        "These were removed to match the configuration."
-                    )
-                if len(blueprint) > essay_count:
-                    blueprint = blueprint[:essay_count]
-
-            # If blueprint doesn't match config, adjust
-            actual_total = len(blueprint)
+            # ── Derive expected totals from config (consistent with _enforce_type_counts) ──
+            mcq_count = int(exam_config.get("mcq_count", 0) or 0)
+            essay_count = int(exam_config.get("essay_count", 0) or 0)
             dung_sai_count_val = int(exam_config.get("dung_sai_count", 0) or 0)
             short_answer_count_val = int(exam_config.get("short_answer_count", 0) or 0)
             expected_total = mcq_count + essay_count + dung_sai_count_val + short_answer_count_val
+            actual_total = len(blueprint)
 
-            if abs(actual_total - expected_total) > 2:
+            logger.info(
+                "[OUTLINE AGENT] exam_type=%s mcq=%d essay=%d ds=%d sa=%d | "
+                "blueprint_slots=%d expected=%d",
+                exam_config.get("exam_type"), mcq_count, essay_count,
+                dung_sai_count_val, short_answer_count_val,
+                actual_total, expected_total,
+            )
+
+            if actual_total != expected_total:
                 warnings.append(
-                    f"Blueprint has {actual_total} questions but config expects {expected_total}"
+                    f"Blueprint slot count mismatch after enforcement: "
+                    f"{actual_total} slots but config expects {expected_total}"
                 )
 
             # ── Chapter coverage + total count enforcement ──
-            blueprint, warnings = self._enforce_chapter_coverage(
-                blueprint=blueprint,
-                exam_config=exam_config,
-                mcq_count=mcq_count,
-                essay_count=essay_count,
-                expected_total=expected_total,
-                warnings=warnings,
+            # SKIP in modification mode when the LLM already returned exactly the
+            # right total — _enforce_chapter_coverage redistributes chapters
+            # blindly and would undo the feedback-driven chapter distribution the
+            # LLM applied.
+            _total_after_enforce = len(blueprint)
+            _skip_chapter_enforce = (
+                is_modification
+                and _total_after_enforce == expected_total
+                and all(
+                    any(s.get("chapter") == ch for s in blueprint)
+                    for ch in [str(c) for c in (exam_config.get("scope", []) or [])]
+                )
             )
+            if _skip_chapter_enforce:
+                logger.info(
+                    "[OutlineAgent] Modification mode: skipping _enforce_chapter_coverage "
+                    "— LLM already produced correct total (%d) and all scope chapters present.",
+                    _total_after_enforce,
+                )
+            else:
+                blueprint, warnings = self._enforce_chapter_coverage(
+                    blueprint=blueprint,
+                    exam_config=exam_config,
+                    mcq_count=mcq_count,
+                    essay_count=essay_count,
+                    expected_total=expected_total,
+                    warnings=warnings,
+                )
 
             # ── Recompute distribution_summary from actual blueprint ──
             # Bug fix: distribution_summary was returned from LLM response (before
@@ -400,12 +437,138 @@ slot CHÍNH XÁC bằng số slot đã nhận được.
         except json.JSONDecodeError as e:
             warnings.append(f"Failed to parse blueprint JSON: {e}")
             if is_modification and exam_config.get("current_blueprint"):
-                logger.warning(
-                    "[OutlineAgent] JSON parse failed in modification mode — "
-                    "applying deterministic chapter redistribution on current blueprint."
-                )
-                warnings.append("JSON parse failed — falling back to deterministic chapter redistribution")
-                return await self._deterministic_redistribute(exam_config, start_time, trace_id, warnings)
+                # Attempt partial JSON recovery from truncated output
+                _recovered = self._recover_partial_slots(_clean)
+                if _recovered:
+                    logger.warning(
+                        "[OutlineAgent] JSON parse failed but recovered %d/%d slots from partial output.",
+                        len(_recovered), len(exam_config.get("current_blueprint", []))
+                    )
+                    warnings.append(f"Partial JSON recovery: salvaged {len(_recovered)} slots")
+                    # Merge recovered slots with original blueprint
+                    _orig_bp = list(exam_config.get("current_blueprint", []))
+                    _orig_map_ids = {s.get("question_id"): s for s in _orig_bp}
+                    _recovered_ids = {s.get("question_id") for s in _recovered}
+                    # Keep recovered slots, fill missing from orig (updated chapter = orig chapter for non-recovered)
+                    merged_slots = list(_recovered)
+                    for orig_slot in _orig_bp:
+                        if orig_slot.get("question_id") not in _recovered_ids:
+                            merged_slots.append(orig_slot)
+                    # Temporarily inject merged blueprint and recurse with same config
+                    try:
+                        _clean_merged = json.dumps({"blueprint": merged_slots, "distribution_summary": {}})
+                        result_merged = json.loads(_clean_merged)
+                        blueprint = result_merged.get("blueprint", [])
+                        # Restore bloom/type locks
+                        for slot in blueprint:
+                            qid = slot.get("question_id", "")
+                            orig = _orig_map_ids.get(qid)
+                            if orig:
+                                slot["bloom_level"] = orig.get("bloom_level", slot.get("bloom_level"))
+                                slot["type"] = orig.get("type", slot.get("type"))
+                        # Continue with this blueprint (fall through to enforcement)
+                        is_partial_recovery = True
+                        distribution_summary = {}
+                    except Exception:
+                        is_partial_recovery = False
+                        blueprint = []
+
+                    _orig_count = len(exam_config.get("current_blueprint") or [])
+                    _recovery_ratio = len(_recovered) / max(_orig_count, 1)
+                    if not is_partial_recovery or not blueprint or _recovery_ratio < 0.5:
+                        logger.warning(
+                            "[OutlineAgent] JSON parse failed in modification mode "
+                            "(recovered %d/%d slots = %.0f%%) — retrying LLM with truncation warning.",
+                            len(_recovered), _orig_count, _recovery_ratio * 100,
+                        )
+                        # ── Retry once with explicit "output ALL slots" instruction ──
+                        _retry_config = dict(exam_config)
+                        _orig_fb = _retry_config.get("outline_feedback", "")
+                        _retry_config["outline_feedback"] = (
+                            f"{_orig_fb}\n\n"
+                            f"[LỖI KỸ THUẬT] Lần trước bạn chỉ output {len(_recovered)}/{_orig_count} slot "
+                            f"do bị cắt ngắn. Lần này BẮT BUỘC phải output ĐỦ {_orig_count} slot "
+                            f"trong JSON. Không được dừng giữa chừng."
+                        )
+                        try:
+                            _retry_resp = await self.llm.chat(
+                                messages=[
+                                    {"role": "system", "content": self.MODIFICATION_SYSTEM_PROMPT},
+                                    {"role": "user", "content": self._build_outline_prompt(
+                                        retrieved_context, _retry_config
+                                    )},
+                                ],
+                                role="outline",
+                                max_tokens=8192,
+                                temperature=0.1,
+                            )
+                            if not isinstance(_retry_resp, str):
+                                _retry_resp = getattr(_retry_resp, "text", None) or str(_retry_resp)
+                            _retry_clean = _retry_resp.strip()
+                            if _retry_clean.startswith("```"):
+                                _retry_clean = _retry_clean.split("```", 2)[1].lstrip("json").strip()
+                                if "```" in _retry_clean:
+                                    _retry_clean = _retry_clean[:_retry_clean.rfind("```")].strip()
+                            _retry_result = json.loads(_retry_clean)
+                            blueprint = _retry_result.get("blueprint", [])
+                            distribution_summary = _retry_result.get("distribution_summary", {})
+                            logger.info(
+                                "[OutlineAgent] Truncation retry succeeded: %d slots", len(blueprint)
+                            )
+                            is_partial_recovery = True  # continue to enforce_type_counts below
+                        except Exception as _retry_e:
+                            logger.warning(
+                                "[OutlineAgent] Truncation retry also failed (%s) — "
+                                "applying feedback-aware deterministic redistribution.", _retry_e
+                            )
+                            warnings.append(
+                                f"JSON parse failed (recovered {len(_recovered)}/{_orig_count} slots, "
+                                f"retry failed) — feedback-aware redistribution"
+                            )
+                            return await self._deterministic_redistribute(
+                                exam_config, start_time, trace_id, warnings
+                            )
+
+                    # Enforce type counts then proceed normally
+                    _scope_for_pad = [str(s) for s in (exam_config.get("scope", []) or [])]
+                    blueprint = self._enforce_type_counts(
+                        blueprint,
+                        int(exam_config.get("mcq_count", 0) or 0),
+                        int(exam_config.get("essay_count", 0) or 0),
+                        int(exam_config.get("dung_sai_count", 0) or 0),
+                        int(exam_config.get("short_answer_count", 0) or 0),
+                        scope_chapters=_scope_for_pad,
+                    )
+                    valid_r, reason_r = self.validate_blueprint(blueprint)
+                    if not valid_r:
+                        warnings.append(f"Partial recovery invalid: {reason_r} — using feedback-aware fallback")
+                        return await self._deterministic_redistribute(exam_config, start_time, trace_id, warnings)
+
+                    _scope_raw = exam_config.get("scope", [])
+                    scope_chapters_r = [str(s) for s in (_scope_raw if isinstance(_scope_raw, list) else [])]
+                    bloom_dist_r = exam_config.get("bloom_distribution", {})
+                    distribution_summary = {
+                        "by_bloom": {level: sum(1 for s in blueprint if s.get("bloom_level") == level) for level in bloom_dist_r},
+                        "by_chapter": {ch: sum(1 for s in blueprint if s.get("chapter") == ch) for ch in scope_chapters_r},
+                    }
+                    elapsed_ms = int((time.time() - start_time) * 1000)
+                    return OutlineOutput(
+                        status=AgentStatus.PARTIAL,
+                        agent_name="outline",
+                        execution_time_ms=elapsed_ms,
+                        token_usage=TokenUsage(),
+                        warnings=warnings,
+                        trace_id=trace_id,
+                        blueprint=blueprint,
+                        distribution_summary=distribution_summary,
+                    )
+                else:
+                    logger.warning(
+                        "[OutlineAgent] JSON parse failed in modification mode — "
+                        "no partial slots recoverable, applying feedback-aware deterministic redistribution."
+                    )
+                    warnings.append("JSON parse failed — falling back to feedback-aware redistribution")
+                    return await self._deterministic_redistribute(exam_config, start_time, trace_id, warnings)
             return await self._fallback_outline(exam_config, start_time, trace_id, warnings)
 
         except Exception as e:
@@ -413,11 +576,28 @@ slot CHÍNH XÁC bằng số slot đã nhận được.
             if is_modification and exam_config.get("current_blueprint"):
                 logger.warning(
                     "[OutlineAgent] LLM call failed in modification mode (%s) — "
-                    "applying deterministic chapter redistribution.", e
+                    "applying feedback-aware deterministic redistribution.", e
                 )
-                warnings.append(f"LLM call failed ({e}) — falling back to deterministic chapter redistribution")
+                warnings.append(f"LLM call failed ({e}) — falling back to feedback-aware redistribution")
                 return await self._deterministic_redistribute(exam_config, start_time, trace_id, warnings)
             return await self._fallback_outline(exam_config, start_time, trace_id, warnings)
+
+    def _recover_partial_slots(self, raw_text: str) -> list[dict]:
+        """
+        Attempt to recover complete slot objects from a truncated JSON string.
+        Uses regex to find complete {...} objects that have a question_id field.
+        Returns list of valid slot dicts, or empty list if none recoverable.
+        """
+        import re as _re
+        slots = []
+        for match in _re.finditer(r'\{[^{}]+\}', raw_text):
+            try:
+                obj = json.loads(match.group())
+                if obj.get("question_id") and obj.get("type") and obj.get("bloom_level"):
+                    slots.append(obj)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return slots
 
     async def _retry_with_bloom_feedback(
         self,
@@ -465,7 +645,7 @@ KIỂM TRA LẠI trước khi output.
                     {"role": "user", "content": self._build_outline_prompt(retrieved_context, exam_config)},
                 ],
                 role="outline",
-                max_tokens=4000,
+                max_tokens=8192 if exam_config.get("current_blueprint") else 4000,
                 temperature=0.2,
             )
             print(f"[OutlineAgent] RAW ({len(response)} chars): {response[:400]!r}", flush=True)
@@ -565,11 +745,20 @@ KIỂM TRA LẠI trước khi output.
         """
         Fallback for modification mode when LLM fails to produce valid JSON.
 
-        Takes the current_blueprint from exam_config and redistributes its slots
-        evenly across all scope chapters using _redistribute_chapters().
-        This honours the teacher's intent (equal distribution) without needing
-        a successful LLM call.
+        Parses teacher feedback to understand intent:
+        - "đều / cân bằng" → equal total slots per chapter
+        - "vận dụng / vận dụng cao tập trung ở chương X, Y" → assign VD/VDC bloom
+          slots preferentially to those chapters, then fill remaining bloom levels
+          to hit the per-chapter target
+
+        Algorithm:
+        1. Determine per-chapter target total (equal or from original distribution)
+        2. Detect bloom-chapter mapping from feedback
+        3. Assign bloom-specific slots to preferred chapters first
+        4. Fill remaining slots (other bloom levels) to reach per-chapter target
         """
+        import re as _re
+
         current_blueprint = list(exam_config.get("current_blueprint", []))
         scope = exam_config.get("scope", [])
         scope_chapters = [str(s) for s in (scope if isinstance(scope, list) else [])]
@@ -578,12 +767,205 @@ KIỂM TRA LẠI trước khi output.
             warnings.append("_deterministic_redistribute: missing blueprint or scope — using full fallback")
             return await self._fallback_outline(exam_config, start_time, trace_id, warnings)
 
-        blueprint = self._redistribute_chapters(current_blueprint, scope_chapters)
-        n = len(blueprint)
+        feedback = (exam_config.get("outline_feedback") or "").lower()
+        n = len(current_blueprint)
         k = len(scope_chapters)
+
+        # ── Step 1: Determine per-chapter target totals ─────────────────────
+        has_balance = any(kw in feedback for kw in ["đều", "cân bằng", "đồng đều", "equal"])
+        if has_balance:
+            base = n // k
+            remainder_count = n % k
+            chapter_targets: dict[str, int] = {}
+            for i, ch in enumerate(scope_chapters):
+                chapter_targets[ch] = base + (1 if i < remainder_count else 0)
+            warnings.append(f"Equal chapter distribution: {chapter_targets}")
+        else:
+            # Keep original distribution from current_blueprint
+            orig_dist: dict[str, int] = {}
+            for slot in current_blueprint:
+                ch = slot.get("chapter", "")
+                if ch in scope_chapters:
+                    orig_dist[ch] = orig_dist.get(ch, 0) + 1
+            # Fill missing chapters
+            base = n // k
+            chapter_targets = {ch: orig_dist.get(ch, base) for ch in scope_chapters}
+            # Adjust total to exactly n
+            diff = n - sum(chapter_targets.values())
+            for ch in scope_chapters:
+                if diff == 0:
+                    break
+                chapter_targets[ch] += 1 if diff > 0 else -1
+                diff += -1 if diff > 0 else 1
+
+        # ── Step 2: Detect bloom-chapter concentration from feedback ────────
+        # e.g. "vận dụng cao tập trung ở chương 3, 4" →
+        #   bloom_focus = {"van_dung", "van_dung_cao"}, focus_chapters = [ch3, ch4]
+        bloom_keywords: dict[str, list[str]] = {
+            "van_dung_cao": ["vận dụng cao", "vdc", "van dung cao"],
+            "van_dung": ["vận dụng", " vd ", "van dung"],
+            "thong_hieu": ["thông hiểu", " th ", "thong hieu"],
+            "nhan_biet": ["nhận biết", " nb ", "nhan biet"],
+        }
+        bloom_focus: set[str] = set()
+        for bloom_level, kws in bloom_keywords.items():
+            if any(kw in feedback for kw in kws):
+                bloom_focus.add(bloom_level)
+
+        # If no specific bloom in feedback, focus bloom is empty (all blooms distributed normally)
+        focus_chapters: list[str] = []
+        for ch in scope_chapters:
+            num_match = _re.search(r'chương\s*(\d+)', ch.lower())
+            if not num_match:
+                continue
+            ch_num = num_match.group(1)
+            if _re.search(rf'chương\s*{ch_num}(?:\D|$)', feedback):
+                focus_chapters.append(ch)
+
+        # ── Step 3: Assign slots using bloom-chapter mapping ────────────────
+        # Separate blueprint slots by bloom level
+        focus_bloom_slots = [s for s in current_blueprint if s.get("bloom_level") in bloom_focus] if bloom_focus else []
+        other_slots = [s for s in current_blueprint if s.get("bloom_level") not in bloom_focus] if bloom_focus else list(current_blueprint)
+
+        assigned: dict[str, list[dict]] = {ch: [] for ch in scope_chapters}
+
+        if bloom_focus and focus_chapters:
+            # Distribute focus-bloom slots: 70% to focus_chapters, 30% to rest
+            n_focus = len(focus_bloom_slots)
+            non_focus_chapters = [ch for ch in scope_chapters if ch not in focus_chapters]
+            k_focus = len(focus_chapters)
+            k_rest = len(non_focus_chapters)
+
+            # How many focus-bloom slots go to focus_chapters?
+            # Cap at chapter_targets — we can't exceed the per-chapter total
+            max_focus_in_targets = sum(chapter_targets[ch] for ch in focus_chapters)
+            # Aim for 65% of focus bloom slots in focus chapters, but not more than targets allow
+            target_in_focus = min(round(n_focus * 0.65), max_focus_in_targets)
+            target_in_rest = n_focus - target_in_focus
+
+            # Distribute target_in_focus across focus_chapters proportionally to their targets
+            if k_focus > 0:
+                focus_weight_total = sum(chapter_targets[ch] for ch in focus_chapters)
+                focus_alloc: dict[str, int] = {}
+                for ch in focus_chapters:
+                    focus_alloc[ch] = round(target_in_focus * (chapter_targets[ch] / max(focus_weight_total, 1)))
+                # Adjust for rounding
+                adj = target_in_focus - sum(focus_alloc.values())
+                for ch in focus_chapters:
+                    if adj == 0:
+                        break
+                    focus_alloc[ch] += 1 if adj > 0 else -1
+                    adj += -1 if adj > 0 else 1
+            else:
+                focus_alloc = {}
+
+            # Assign focus-bloom slots to focus chapters
+            idx = 0
+            for ch in focus_chapters:
+                count = focus_alloc.get(ch, 0)
+                for _ in range(count):
+                    if idx < n_focus:
+                        slot = dict(focus_bloom_slots[idx])
+                        slot["chapter"] = ch
+                        slot["section"] = ""
+                        assigned[ch].append(slot)
+                        idx += 1
+
+            # Remaining focus-bloom slots go to rest chapters round-robin
+            for i, slot in enumerate(focus_bloom_slots[idx:]):
+                if k_rest > 0:
+                    ch = non_focus_chapters[i % k_rest]
+                else:
+                    ch = scope_chapters[i % k]
+                slot = dict(slot)
+                slot["chapter"] = ch
+                slot["section"] = ""
+                assigned[ch].append(slot)
+
+            warnings.append(
+                f"Bloom-chapter assignment: bloom_focus={bloom_focus}, "
+                f"focus_chapters={focus_chapters}, focus_alloc={focus_alloc}"
+            )
+        else:
+            # No bloom-chapter mapping — round-robin assign focus_bloom_slots normally
+            for i, slot in enumerate(focus_bloom_slots):
+                ch = scope_chapters[i % k]
+                slot = dict(slot)
+                slot["chapter"] = ch
+                slot["section"] = ""
+                assigned[ch].append(slot)
+
+        # ── Step 4: Fill remaining slots (other bloom levels) to hit targets ─
+        # For each chapter, how many more slots are needed?
+        remaining_slots = list(other_slots)
+        slot_idx = 0
+        for ch in scope_chapters:
+            needed = chapter_targets[ch] - len(assigned[ch])
+            for _ in range(max(needed, 0)):
+                if slot_idx >= len(remaining_slots):
+                    break
+                slot = dict(remaining_slots[slot_idx])
+                slot["chapter"] = ch
+                slot["section"] = ""
+                assigned[ch].append(slot)
+                slot_idx += 1
+
+        # If any remaining slots left (due to rounding), distribute round-robin
+        for i, slot in enumerate(remaining_slots[slot_idx:]):
+            ch = scope_chapters[i % k]
+            slot = dict(slot)
+            slot["chapter"] = ch
+            slot["section"] = ""
+            assigned[ch].append(slot)
+
+        # ── Step 5: Interleave bloom levels within each chapter ───────────────
+        # Without this, assigned[ch] is grouped by bloom (e.g. 6× NB then 1× VD)
+        # because slots arrive sorted by type/bloom from current_blueprint.
+        # Interleaving makes the blueprint look natural: NB, TH, VD, NB, TH...
+        BLOOM_ORDER = ["nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"]
+        for ch in scope_chapters:
+            ch_slots = assigned[ch]
+            if len(ch_slots) <= 1:
+                continue
+            # Sort by bloom order index, then preserve original relative order within same bloom
+            by_bloom: dict[str, list[dict]] = {b: [] for b in BLOOM_ORDER}
+            unknown: list[dict] = []
+            for s in ch_slots:
+                bl = s.get("bloom_level", "")
+                if bl in by_bloom:
+                    by_bloom[bl].append(s)
+                else:
+                    unknown.append(s)
+            # Interleave: pick one from each bloom level in rotation until all exhausted
+            interleaved: list[dict] = []
+            queues = [by_bloom[b] for b in BLOOM_ORDER if by_bloom[b]] + ([unknown] if unknown else [])
+            while any(queues):
+                for q in queues:
+                    if q:
+                        interleaved.append(q.pop(0))
+            assigned[ch] = interleaved
+
+        # Flatten and verify
+        blueprint = [slot for slots in assigned.values() for slot in slots]
+        if len(blueprint) != n:
+            logger.warning(
+                "[OutlineAgent] _deterministic_redistribute: blueprint length mismatch "
+                "(%d != %d) — padding with round-robin slots to compensate.",
+                len(blueprint), n,
+            )
+            warnings.append(f"Redistribution length mismatch ({len(blueprint)} != {n}) — padded")
+            # Pad with any leftover slots from current_blueprint round-robin
+            while len(blueprint) < n:
+                idx = len(blueprint)
+                slot = dict(current_blueprint[idx % len(current_blueprint)])
+                slot["chapter"] = scope_chapters[idx % k]
+                slot["section"] = ""
+                blueprint.append(slot)
+            blueprint = blueprint[:n]  # truncate if somehow over
+
         warnings.append(
-            f"Deterministic redistribution applied: {n} slots across {k} chapters "
-            f"(~{n // k} per chapter, remainder {n % k})"
+            f"Deterministic redistribution applied: "
+            f"{{{', '.join(f'{ch}: {len(assigned[ch])}' for ch in scope_chapters)}}}"
         )
 
         bloom_dist = exam_config.get("bloom_distribution", {})
@@ -609,6 +991,7 @@ KIỂM TRA LẠI trước khi output.
             blueprint=blueprint,
             distribution_summary=distribution_summary,
         )
+
 
     def _enforce_chapter_coverage(
         self,
@@ -720,6 +1103,7 @@ KIỂM TRA LẠI trước khi output.
         ds_target: int,
         sa_target: int,
         scope_chapters: list[str] | None = None,
+        llm_chapter_dist: dict[str, int] | None = None,
     ) -> list[dict]:
         """
         Enforce exact per-type slot counts.
@@ -732,6 +1116,9 @@ KIỂM TRA LẠI trước khi output.
             scope_chapters: If provided, padded slots will have their chapter
                 assigned round-robin from this list instead of left empty,
                 preventing validate_blueprint failures on missing chapter.
+            llm_chapter_dist: If provided (modification mode), padded slots
+                are assigned to chapters proportionally to this distribution
+                rather than round-robin, preserving teacher feedback intent.
         """
         type_targets = {
             "mcq": mcq_target,
@@ -739,6 +1126,17 @@ KIỂM TRA LẠI trước khi output.
             "dung_sai": ds_target,
             "short_answer": sa_target,
         }
+
+        # Build chapter pool: if we have an LLM distribution, expand it into
+        # a weighted pool so padding follows the same proportions as the LLM output.
+        if llm_chapter_dist:
+            # e.g. {Ch1: 3, Ch2: 7} → [Ch1, Ch1, Ch1, Ch2, Ch2, ...]
+            _weighted_pool: list[str] = []
+            for ch, cnt in llm_chapter_dist.items():
+                _weighted_pool.extend([ch] * cnt)
+            _pad_chapter_pool = _weighted_pool if _weighted_pool else (scope_chapters or [])
+        else:
+            _pad_chapter_pool = scope_chapters if scope_chapters else []
 
         # Separate by type
         by_type: dict[str, list[dict]] = {t: [] for t in type_targets}
@@ -753,7 +1151,6 @@ KIỂM TRA LẠI trước khi output.
         id_counters = {"mcq": 1, "essay": 1, "dung_sai": 1, "short_answer": 1}
         prefix_map = {"mcq": "MCQ", "essay": "ESSAY", "dung_sai": "DS", "short_answer": "SA"}
         bloom_cycle = ["nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"]
-        _pad_chapter_pool = scope_chapters if scope_chapters else []
 
         for q_type, target in type_targets.items():
             if target <= 0:
@@ -762,7 +1159,7 @@ KIỂM TRA LẠI trước khi output.
             # Pad missing slots
             while len(slots) < target:
                 idx = len(slots)
-                # Use scope_chapters round-robin so chapter is never empty
+                # Use weighted pool so chapter proportions match LLM feedback output
                 fallback_chapter = (
                     _pad_chapter_pool[idx % len(_pad_chapter_pool)]
                     if _pad_chapter_pool else ""
@@ -785,44 +1182,6 @@ KIỂM TRA LẠI trước khi output.
 
         return result
 
-    def _redistribute_chapters(
-        self,
-        blueprint: list[dict],
-        scope_chapters: list[str],
-    ) -> list[dict]:
-        """
-        Evenly redistribute chapter labels across the blueprint using
-        interleaved (true round-robin) assignment.
-
-        Called when teacher rejects with feedback — LLM can't override
-        chapter bias from context density, so we do it deterministically.
-
-        Uses interleaved round-robin: [Ch1,Ch2,Ch3,Ch4,Ch1,Ch2,...] so that
-        bloom levels spread evenly across all chapters rather than being
-        grouped by chapter in blocks (old: [Ch1×7, Ch2×7, ...]).
-
-        Preserves all other slot fields (bloom_level, type, topic_hint, etc.).
-        """
-        if not scope_chapters or not blueprint:
-            return blueprint
-
-        n = len(blueprint)
-        k = len(scope_chapters)
-
-        # Build interleaved chapter assignment (true round-robin).
-        # Each position i gets scope_chapters[i % k], which interleaves chapters
-        # so consecutive slots always cycle through all chapters.
-        # This ensures bloom levels (which are grouped by type in the input)
-        # are spread across chapters rather than stacked in chapter blocks.
-        result = []
-        for i, slot in enumerate(blueprint):
-            slot = dict(slot)
-            slot["chapter"] = scope_chapters[i % k]
-            # Clear section since chapter changed
-            slot["section"] = ""
-            result.append(slot)
-
-        return result
 
     def _build_context_summary(self, context: list[dict]) -> str:
         """Build a summary of retrieved context."""
@@ -850,43 +1209,66 @@ KIỂM TRA LẠI trước khi output.
         retrieved_context: list[dict],
         exam_config: dict,
     ) -> str:
-        """Build the user prompt for outline creation."""
+        """Build the user prompt for outline creation or modification."""
         scope = exam_config.get("scope", [])
-        mcq_count = exam_config.get("mcq_count", 40)
-        essay_count = exam_config.get("essay_count", 0)
-        dung_sai_count = exam_config.get("dung_sai_count", 0)
-        short_answer_count = exam_config.get("short_answer_count", 0)
+        mcq_count = int(exam_config.get("mcq_count", 0) or 0)
+        essay_count = int(exam_config.get("essay_count", 0) or 0)
+        dung_sai_count = int(exam_config.get("dung_sai_count", 0) or 0)
+        short_answer_count = int(exam_config.get("short_answer_count", 0) or 0)
         bloom_dist = exam_config.get("bloom_distribution", {})
-        user_prompt = exam_config.get("user_prompt", "")
-        extra_instructions = exam_config.get("extra_instructions", "")
-        outline_feedback = exam_config.get("outline_feedback", "")
-        current_blueprint = exam_config.get("current_blueprint", [])
-
-        feedback_section = ""
-        if outline_feedback:
-            feedback_section = f"""
-## Phản hồi từ giảng viên (HITL):
-{outline_feedback}
-
-Hãy điều chỉnh blueprint theo phản hồi trên.
-"""
+        user_prompt_text = exam_config.get("user_prompt", "") or ""
+        extra_instructions = exam_config.get("extra_instructions", "") or ""
+        outline_feedback = exam_config.get("outline_feedback", "") or ""
+        current_blueprint = exam_config.get("current_blueprint", []) or []
 
         total_questions = mcq_count + essay_count + dung_sai_count + short_answer_count
         bloom_counts = self._bloom_pct_to_counts(bloom_dist, total_questions)
+        blueprint_history: list[dict] = exam_config.get("blueprint_history") or []
 
-        type_breakdown = f"- MCQ (trắc nghiệm 4 lựa chọn): {mcq_count} câu"
-        if essay_count:
-            type_breakdown += f"\n- Essay (tự luận): {essay_count} câu"
-        if dung_sai_count:
-            type_breakdown += f"\n- Đúng-Sai (4 mệnh đề a/b/c/d, type='dung_sai'): {dung_sai_count} câu"
-        if short_answer_count:
-            type_breakdown += f"\n- Trả lời ngắn (điền số, type='short_answer'): {short_answer_count} câu"
+        # ── Pre-compute the EXACT slot matrix (bloom × type) ──────────────────
+        # From current_blueprint, count per (bloom_level, type).
+        # This gives LLM the precise breakdown it must preserve.
+        bloom_levels = ["nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"]
+        q_types_active = []
+        if mcq_count: q_types_active.append("mcq")
+        if essay_count: q_types_active.append("essay")
+        if dung_sai_count: q_types_active.append("dung_sai")
+        if short_answer_count: q_types_active.append("short_answer")
 
-        # If teacher rejected and provided feedback + current blueprint
-        # → switch to MODIFICATION mode so LLM understands what to change
+        type_label = {"mcq": "MCQ", "essay": "Essay", "dung_sai": "Đúng-Sai", "short_answer": "Trả lời ngắn"}
+
+        # Build bloom×type matrix from existing blueprint if in modification mode
+        slot_matrix: dict[str, dict[str, int]] = {bl: {qt: 0 for qt in q_types_active} for bl in bloom_levels}
+        if current_blueprint:
+            for s in current_blueprint:
+                bl = s.get("bloom_level", "")
+                qt = s.get("type", "mcq")
+                if bl in slot_matrix and qt in slot_matrix[bl]:
+                    slot_matrix[bl][qt] += 1
+
+        # Format matrix as readable table string
+        def _matrix_table() -> str:
+            header = "| Bloom Level       | " + " | ".join(type_label.get(qt, qt) for qt in q_types_active) + " | TỔNG |"
+            sep    = "|" + "---|" * (len(q_types_active) + 2)
+            rows = []
+            for bl in bloom_levels:
+                if bloom_counts.get(bl, 0) == 0:
+                    continue
+                cells = [str(slot_matrix[bl].get(qt, 0)) for qt in q_types_active]
+                row_total = sum(slot_matrix[bl].get(qt, 0) for qt in q_types_active)
+                rows.append(f"| {bl:<17} | " + " | ".join(cells) + f" | {row_total}    |")
+            total_row_cells = [str(sum(slot_matrix[bl].get(qt, 0) for bl in bloom_levels)) for qt in q_types_active]
+            rows.append(f"| **TỔNG**          | " + " | ".join(total_row_cells) + f" | **{total_questions}** |")
+            return "\n".join([header, sep] + rows)
+
+        # ═══════════════════════════════════════════════════════════════
+        # MODIFICATION MODE — teacher rejected the previous blueprint
+        # ═══════════════════════════════════════════════════════════════
         if outline_feedback and current_blueprint:
-            print(f"[OutlineAgent] MODIFICATION MODE: feedback='{outline_feedback[:60]}', blueprint_len={len(current_blueprint)}", flush=True)
-            # Compact blueprint for readability (only key fields)
+            print(f"[OutlineAgent] MODIFICATION MODE: feedback='{outline_feedback[:80]}', "
+                  f"blueprint_len={len(current_blueprint)}", flush=True)
+
+            # Compact current blueprint for LLM (only fields that matter)
             compact_bp = [
                 {
                     "question_id": s.get("question_id"),
@@ -902,75 +1284,146 @@ Hãy điều chỉnh blueprint theo phản hồi trên.
                 ch = s.get("chapter", "?")
                 current_dist[ch] = current_dist.get(ch, 0) + 1
 
-            return f"""Bạn là chuyên gia thiết kế đề thi. Nhiệm vụ là CHỈNH SỬA blueprint dưới đây theo đúng phản hồi của giáo viên.
+            # Compute per-% helper for teacher feedback that references percentages
+            pct_helper = f"(tổng {total_questions} câu → 10% ≈ {round(total_questions*0.1)} câu, " \
+                         f"20% ≈ {round(total_questions*0.2)} câu, " \
+                         f"30% ≈ {round(total_questions*0.3)} câu, " \
+                         f"40% ≈ {round(total_questions*0.4)} câu, " \
+                         f"50% ≈ {round(total_questions*0.5)} câu)"
 
-## BLUEPRINT HIỆN TẠI (cần chỉnh sửa):
+        # Build blueprint history block for modification mode
+        history_block_mod = ""
+        if blueprint_history:
+            history_block_mod = "\n---\n### LỊCH SỬ CÁC BLUEPRINT ĐÃ BỊ TỪ CHỐI\n\n"
+            for entry in blueprint_history[-2:]:  # Show at most 2 previous rounds
+                rnd = entry.get("round", "?")
+                fb = entry.get("feedback", "")
+                prev_bp = entry.get("blueprint", [])
+                prev_dist: dict[str, int] = {}
+                for s in prev_bp:
+                    ch = s.get("chapter", "?")
+                    prev_dist[ch] = prev_dist.get(ch, 0) + 1
+                history_block_mod += (
+                    f"**Round {rnd}** — Phản hồi: \"{fb}\"\n"
+                    f"Phân bổ khi đó: {json.dumps(prev_dist, ensure_ascii=False)}\n\n"
+                )
+            history_block_mod += "Tránh lặp lại các lỗi đã bị từ chối ở trên.\n"
+
+            return f"""Bạn là chuyên gia thiết kế đề thi. Nhiệm vụ: CHỈNH SỬA blueprint theo phản hồi giáo viên.
+
+---
+### RÀNG BUỘC BẤT BIẾN (KHÔNG ĐƯỢC THAY ĐỔI — vi phạm là output sai)
+
+TỔNG SỐ SLOT: {total_questions} (chính xác, không +1, không -1)
+
+Phân bổ loại câu hỏi (giữ nguyên hoàn toàn):
+{chr(10).join(f"  - {type_label.get(qt,'?')}: {[mcq_count,essay_count,dung_sai_count,short_answer_count][q_types_active.index(qt)]} câu" for qt in q_types_active)}
+
+Số câu theo mức Bloom (giữ nguyên hoàn toàn):
+{chr(10).join(f"  - {bl}: {bloom_counts.get(bl,0)} câu" for bl in bloom_levels if bloom_counts.get(bl,0) > 0)}
+
+Ma trận slot bloom x loại câu (từng con số không được thay đổi):
+{_matrix_table()}
+
+---
+### YÊU CẦU GỐC CỦA GIÁO VIÊN KHI TẠO ĐỀ
+
+{user_prompt_text or "(Không có yêu cầu đặc biệt)"}
+
+---
+### BLUEPRINT CŨ CẦN CHỈNH SỬA
+
 Phân bổ theo chương hiện tại: {json.dumps(current_dist, ensure_ascii=False)}
-Tổng số slot: {len(compact_bp)}
+Tổng slot: {len(compact_bp)}
 
-Chi tiết blueprint:
 {json.dumps(compact_bp, ensure_ascii=False, indent=2)}
 
-## PHẢN HỒI CỦA GIÁO VIÊN (BẮT BUỘC TUÂN THEO):
+---
+### PHẢN HỒI GIÁO VIÊN (thực hiện đúng yêu cầu này)
+
 {outline_feedback}
+{history_block_mod}
+---
+### HƯỚNG DẪN THỰC HIỆN
 
-## HƯỚNG DẪN THỰC HIỆN (suy luận trước khi output):
-Tổng số câu = {total_questions}.
-- Nếu phản hồi đề cập đến % cho nhóm chương, hãy tính số câu cụ thể:
-  VD "60% chương 3, 4" → {round(total_questions * 0.6)} câu cho chương 3 và 4 cộng lại
-- Chỉ thay đổi field "chapter" (và "section", "topic_hint") của mỗi slot
-- Giữ nguyên "bloom_level" và "type" của từng slot để tổng bloom không thay đổi
-- Ghi rõ số câu mục tiêu mỗi chương TRƯỚC khi viết JSON
+Tổng {total_questions} câu. Quy đổi phần trăm: {pct_helper}
 
-## ⚠️ RÀNG BUỘC TUYỆT ĐỐI:
-- OUTPUT PHẢI CÓ ĐỦ {total_questions} SLOT — không được thiếu bất kỳ câu nào
-- Mỗi slot trong input PHẢI xuất hiện trong output (chỉ thay đổi chapter/section/topic_hint)
-- TỔNG SỐ CÂU: {total_questions} ({type_breakdown.replace(chr(10), ', ')})
-- Phân bổ Bloom (số câu chính xác): {json.dumps(bloom_counts, ensure_ascii=False)}
-- Phạm vi (scope): {json.dumps(scope, ensure_ascii=False)}
-- Mỗi chương phải có ít nhất 1 câu
+Bước 1: Xác định chương nào tăng/giảm theo phản hồi.
+Bước 2: Tính số câu cụ thể mỗi chương (tổng phải bằng {total_questions}).
+Bước 3: Gán lại field "chapter" và "topic_hint" cho từng slot. Tuyệt đối KHÔNG thêm/xóa slot, KHÔNG thay đổi bloom_level, KHÔNG thay đổi type.
+Bước 4: Kiểm tra: tổng slot = {total_questions}? bloom counts khớp ma trận? mỗi chương trong scope có ít nhất 1 slot?
 
-Trả về JSON theo đúng format (KHÔNG thêm markdown, chỉ JSON thuần):
-{{"blueprint": [<TOÀN BỘ {total_questions} slot đã chỉnh sửa>], "distribution_summary": {{"by_bloom": {{}}, "by_chapter": {{}}}}}}"""
+Phạm vi (scope): {json.dumps(scope, ensure_ascii=False)}
 
-        print(f"[OutlineAgent] CREATION MODE: outline_feedback={bool(outline_feedback)}, has_blueprint={bool(current_blueprint)}", flush=True)
-        # Build feedback block for creation mode
-        feedback_block = ""
-        if outline_feedback:
-            feedback_block = f"""
-⚠️ PHẢN HỒI BẮT BUỘC PHẢI TUÂN THEO (HITL Rejection Feedback):
-═══════════════════════════════════════════════════════════════
-{outline_feedback}
-═══════════════════════════════════════════════════════════════
-Blueprint trước đã bị từ chối. Mày PHẢI điều chỉnh phân bổ chapter/bloom
-theo phản hồi trên trước khi làm bất cứ điều gì khác.
+Output chỉ JSON thuần (không markdown, không giải thích):
+{{"blueprint": [<TOAN BO {total_questions} slot da chinh sua>], "distribution_summary": {{"by_bloom": {bloom_counts}, "by_chapter": {{}}}}}}"""
 
-"""
+        # CREATION MODE — build with constraints + history
+        print(f"[OutlineAgent] CREATION MODE: outline_feedback={bool(outline_feedback)}, "
+              f"has_blueprint={bool(current_blueprint)}", flush=True)
 
-        prompt = f"""{feedback_block}Tạo sườn đề kiểm tra với cấu hình sau:
+        type_breakdown_lines = []
+        if mcq_count:          type_breakdown_lines.append(f"  - MCQ (trắc nghiệm 4 lựa chọn): {mcq_count} câu")
+        if essay_count:        type_breakdown_lines.append(f"  - Essay (tự luận): {essay_count} câu")
+        if dung_sai_count:     type_breakdown_lines.append(f"  - Đúng-Sai (4 mệnh đề a/b/c/d, type='dung_sai'): {dung_sai_count} câu")
+        if short_answer_count: type_breakdown_lines.append(f"  - Trả lời ngắn (điền số, type='short_answer'): {short_answer_count} câu")
+        type_breakdown = "\n".join(type_breakdown_lines)
 
-## Phạm vi (scope):
+        # Blueprint history block for creation mode (if re-running after a rejection)
+        history_block_create = ""
+        if blueprint_history:
+            history_block_create = "\n### LỊCH SỬ PHẢN HỒI TRƯỚC ĐÓ (tránh lặp lại)\n\n"
+            for entry in blueprint_history[-2:]:
+                rnd = entry.get("round", "?")
+                fb = entry.get("feedback", "")
+                prev_bp = entry.get("blueprint", [])
+                prev_dist: dict[str, int] = {}
+                for s in prev_bp:
+                    ch = s.get("chapter", "?")
+                    prev_dist[ch] = prev_dist.get(ch, 0) + 1
+                history_block_create += (
+                    f"Round {rnd} — Phản hồi: \"{fb}\"\n"
+                    f"Phân bổ khi đó: {json.dumps(prev_dist, ensure_ascii=False)}\n\n"
+                )
+
+        pct_helper_create = (
+            f"(tổng {total_questions} câu → 10% ≈ {round(total_questions*0.1)} câu, "
+            f"20% ≈ {round(total_questions*0.2)} câu, "
+            f"30% ≈ {round(total_questions*0.3)} câu)"
+        )
+
+        return f"""Tạo sườn đề kiểm tra với cấu hình sau:
+
+### RÀNG BUỘC BẮT BUỘC (KHÔNG ĐƯỢC SAI)
+
+Tổng số câu: {total_questions} (chính xác)
+{type_breakdown}
+
+Phân bổ Bloom (số câu chính xác, không phải %):
+{chr(10).join(f"  - {bl}: {bloom_counts.get(bl,0)} câu" for bl in bloom_levels if bloom_counts.get(bl,0) > 0)}
+
+Quy đổi %: {pct_helper_create}
+
+### Phạm vi (scope):
 {json.dumps(scope, ensure_ascii=False)}
 
-## Cấu hình đề:
-{type_breakdown}
-- TỔNG SỐ CÂU: {total_questions}
-- **MỖI CHƯƠNG trong scope PHẢI có ít nhất 1 câu hỏi** (bắt buộc)
-- Phân bổ Bloom (SỐ LƯỢNG CÂU, KHÔNG PHẢI %):
-{json.dumps(bloom_counts, ensure_ascii=False, indent=2)}
+Quy tắc phân bổ mặc định:
+- Mỗi chương trong scope phải có ít nhất 1 câu
+- Không chương nào > 50% tổng câu
+- Mặc định phân bổ đều các chương trừ khi giáo viên chỉ định khác
+- Nếu chỉ 1 chương trong scope → phân bổ theo section/chủ đề trong chương đó
 
-## Kiến thức đã truy xuất:
+### Kiến thức đã truy xuất:
 {self._build_context_summary(retrieved_context)}
 
-## Yêu cầu từ giảng viên:
-{user_prompt or "Không có yêu cầu đặc biệt."}
+### Yêu cầu từ giảng viên:
+{user_prompt_text or "Không có yêu cầu đặc biệt — phân bổ đều các chương."}
 
-## Hướng dẫn bổ sung:
+### Hướng dẫn bổ sung:
 {extra_instructions or "Sinh câu hỏi chuẩn mực, phù hợp với chương trình phổ thông Việt Nam."}
+{history_block_create}
+Tạo blueprint chi tiết (JSON thuần):"""
 
-Tạo blueprint chi tiết:"""
-
-        return prompt
 
     def _validate_distribution(
         self,

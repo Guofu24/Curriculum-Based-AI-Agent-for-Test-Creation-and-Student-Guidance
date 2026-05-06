@@ -523,11 +523,24 @@ export const examsApi = {
       body: JSON.stringify(data),
     })
   },
-  
+
+  partialRegenerate: async (
+    examId: string,
+    data: { question_id: string; prompt?: string }
+  ): Promise<{ question: Question; question_id: string }> => {
+    return apiFetch<{ question: Question; question_id: string }>(
+      `/exams/${examId}/partial-regenerate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    )
+  },
+
   getReviewData: async (examId: string): Promise<{ blueprint: BlueprintSlot[]; questions: Question[] }> => {
     return apiFetch(`/exams/${examId}/review-data`)
   },
-  
+
   exportPdf: async (examId: string, includeAnswers = true): Promise<Blob> => {
     const token = getToken()
     const response = await fetch(
@@ -539,7 +552,7 @@ export const examsApi = {
     if (!response.ok) throw new Error('Export PDF thất bại')
     return response.blob()
   },
-  
+
   exportDocx: async (examId: string, includeAnswers = true): Promise<Blob> => {
     const token = getToken()
     const response = await fetch(
@@ -551,7 +564,7 @@ export const examsApi = {
     if (!response.ok) throw new Error('Export DOCX thất bại')
     return response.blob()
   },
-  
+
   getQualitySummary: async (): Promise<QualitySummary> => {
     return apiFetch<QualitySummary>('/exams/quality-summary')
   },

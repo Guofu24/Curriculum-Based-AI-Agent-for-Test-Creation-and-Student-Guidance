@@ -327,6 +327,15 @@ Trả lời ngắn Format (THPT 2025 — điền kết quả số):
   "chapter": "Chương 1"
 }
 
+## QUY TẮC NỘI DUNG BẮT BUỘC:
+- KHÔNG được output markdown heading (# ## ###) trong stem hoặc options
+- KHÔNG được output tên heading của sách như "Chương 2: Khí lí tưởng" làm option
+- KHÔNG được dùng boilerplate như "Theo nội dung đã học:", "Bài toán tổng hợp:", "Phân tích sâu và đánh giá:"
+- KHÔNG được để options trùng nhau hoặc chứa nội dung giống hệt nhau
+- Stem PHẢI là câu hỏi hoặc bài toán thực sự — có ít nhất 15 từ, có dấu hỏi hoặc yêu cầu rõ ràng
+- Options MCQ PHẢI là câu trả lời thực sự (số, định nghĩa, phát biểu) — không được là tên chương hay heading
+- Câu Đúng-Sai: mỗi mệnh đề phải là phát biểu khoa học cụ thể, có thể kiểm chứng
+
 Trả về JSON array (không có key bọc ngoài):
 [câu_hỏi_1]"""
 
@@ -389,6 +398,84 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         self.latex_skill = LatexRendererSkill()
         self.redis = redis_client
 
+    @tracer.agent_span("builder_single")
+    async def build_single_question(
+        self,
+        question_id: str,
+        retrieved_context: list[dict],
+        extra_prompt: str = "",
+        existing_questions: list[dict] | None = None,
+        trace_id: str = "",
+    ) -> dict | None:
+        """
+        Regenerate a single question by question_id with an optional prompt.
+
+        Used by the partial-regenerate endpoint at CP2 so teachers can
+        refine individual questions without triggering full pipeline restart.
+
+        Finds the existing question's slot metadata (type, bloom, chapter) and
+        calls _generate_single_slot with extra_prompt injected into scope_restriction.
+
+        Returns the regenerated question dict, or None on failure.
+        """
+        existing_questions = existing_questions or []
+
+        # Find the existing question to get its slot metadata
+        existing_q = next(
+            (q for q in existing_questions if q.get("question_id") == question_id),
+            None,
+        )
+        if not existing_q:
+            logger.warning("build_single_question: question_id %r not found", question_id)
+            return None
+
+        # Reconstruct a blueprint slot from the existing question
+        slot: dict = {
+            "question_id": question_id,
+            "type": existing_q.get("type", "mcq"),
+            "bloom_level": existing_q.get("bloom_level", "thong_hieu"),
+            "chapter": existing_q.get("chapter", ""),
+            "section": existing_q.get("section", ""),
+            "topic_hint": existing_q.get("topic_hint", ""),
+            "estimated_difficulty": existing_q.get("estimated_difficulty", 0.5),
+            "content_type": existing_q.get("content_type", "text"),
+        }
+
+        # Build chapter-filtered context
+        context_all = self._build_context_for_llm(retrieved_context)
+        chapter = slot.get("chapter", "")
+        topic_context_map = self._build_topic_context_map(retrieved_context)
+        topic_chunks = topic_context_map.get(chapter, [])
+        question_context = (
+            self._build_context_for_llm(topic_chunks) if topic_chunks else context_all[:8000]
+        )
+
+        # Inject extra_prompt as additional scope_restriction line
+        scope_restriction = ""
+        if extra_prompt:
+            scope_restriction = (
+                f"## Yêu cầu chỉnh sửa từ giảng viên (PHẢI tuân theo):\n{extra_prompt}\n"
+            )
+
+        topics_used = [q.get("topic_hint", "") for q in existing_questions]
+
+        question, warnings = await self._generate_single_slot(
+            slot=slot,
+            context=context_all[:8000],
+            question_context=question_context,
+            scope_restriction=scope_restriction,
+            topics_used=topics_used,
+            slot_number=0,
+        )
+
+        if warnings:
+            logger.info(
+                "build_single_question %r warnings: %s",
+                question_id, "; ".join(warnings),
+            )
+
+        return question
+
     @tracer.agent_span("builder_agent")
     async def build(
         self,
@@ -399,6 +486,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         scope_chapters: list[str] | None = None,
         trace_id: str = "",
     ) -> BuilderOutput:
+
         """Build questions from blueprint."""
         start_time = time.time()
         trace_id = trace_id or str(time.time())

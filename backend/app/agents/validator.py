@@ -127,11 +127,19 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
 - answer_correct = false VÀ confidence > 0.7
 - bloom_compliant = false VÀ confidence > 0.8
 - scope_violation rõ ràng (có tên chapter cụ thể ngoài scope)
+- content_quality = false (câu hỏi vô nghĩa, chứa markdown artifact, stem không có dấu hỏi/yêu cầu)
 
 ## Confidence scoring:
 - confidence > 0.8: rất chắc chắn → reject được
 - confidence 0.5-0.8: khá chắc → warn nhưng không reject tự động
 - confidence < 0.5: không chắc → skip
+
+## Content quality — thêm issue nếu:
+- stem chứa markdown heading (bắt đầu bằng # hoặc ## hoặc ###)
+- stem chứa boilerplate như "Theo nội dung đã học:", "Bài toán tổng hợp:", "Phân tích sâu"
+- options của MCQ là tên chương/heading (bắt đầu bằng # hoặc chứa "Chương X:" mà không có nội dung khác)
+- stem dưới 10 từ và không có dấu hỏi
+- options của MCQ trùng nhau (2 options giống hệt nhau)
 """
 
     # Domain 5B: Batch size for validation
@@ -187,6 +195,78 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
 
         # Build validation context once (reused across all batches)
         context_str = self._build_validation_context(retrieved_context)
+
+        # ── Content-quality pre-check (no LLM needed) ──────────────────────────
+        BOILERPLATE_PATTERNS = (
+            "Theo nội dung đã học:",
+            "Bài toán tổng hợp:",
+            "Phân tích sâu và đánh giá:",
+            "Phân tích sâu",
+            "Bài toán tổng hợp",
+        )
+        for q in questions:
+            q_id = q.get("question_id", "?")
+            stem = q.get("stem", "")
+            q_type = q.get("type", "mcq")
+
+            # Detect markdown heading in stem
+            if stem.strip().startswith(("# ", "## ", "### ")):
+                all_issues.append({
+                    "question_id": q_id,
+                    "issue_type": "content_quality",
+                    "detail": f"Stem bắt đầu bằng markdown heading: {stem[:80]!r}",
+                    "suggestion": "Viết lại stem thành câu hỏi thực sự, không dùng heading.",
+                })
+                continue
+
+            # Detect boilerplate prefix
+            for bp in BOILERPLATE_PATTERNS:
+                if bp in stem:
+                    all_issues.append({
+                        "question_id": q_id,
+                        "issue_type": "content_quality",
+                        "detail": f"Stem chứa boilerplate: {bp!r}",
+                        "suggestion": "Viết lại stem thành câu hỏi cụ thể không có boilerplate.",
+                    })
+                    break
+
+            # Detect MCQ options that are chapter headings
+            if q_type == "mcq":
+                options = q.get("options", {})
+                option_values = list(options.values()) if isinstance(options, dict) else []
+                for opt_val in option_values:
+                    opt_str = str(opt_val)
+                    if opt_str.strip().startswith(("# ", "## ")) or (
+                        "Chương" in opt_str and ":" in opt_str and len(opt_str) < 50
+                        and not any(c.isdigit() for c in opt_str[opt_str.find(":")+1:])
+                    ):
+                        all_issues.append({
+                            "question_id": q_id,
+                            "issue_type": "content_quality",
+                            "detail": f"Option chứa heading/tên chương: {opt_str[:60]!r}",
+                            "suggestion": "Thay options bằng phát biểu/giá trị khoa học thực sự.",
+                        })
+                        break
+
+                # Detect duplicate options
+                stripped_opts = [str(v).strip() for v in option_values]
+                if len(stripped_opts) != len(set(stripped_opts)):
+                    all_issues.append({
+                        "question_id": q_id,
+                        "issue_type": "content_quality",
+                        "detail": "Options MCQ có giá trị trùng nhau.",
+                        "suggestion": "Đảm bảo 4 options khác nhau.",
+                    })
+
+            # Detect too-short stem (< 10 words, no question mark)
+            word_count = len(stem.split())
+            if word_count < 10 and "?" not in stem and "Tính" not in stem and "Xác định" not in stem:
+                all_issues.append({
+                    "question_id": q_id,
+                    "issue_type": "content_quality",
+                    "detail": f"Stem quá ngắn ({word_count} từ) và không có câu hỏi rõ ràng.",
+                    "suggestion": "Bổ sung ngữ cảnh và câu hỏi cụ thể.",
+                })
 
         # Batch questions into groups of BATCH_SIZE
         total_batches = (len(questions) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
@@ -301,13 +381,32 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
         )
 
     def _build_validation_context(self, retrieved_context: list[dict] | None) -> str:
-        """Build context string for validation prompt."""
+        """Build context string for validation prompt.
+
+        Samples up to 50 chunks evenly across chapters so that
+        all chapters in scope get represented, not just the first 20.
+        """
         if not retrieved_context:
             return "Không có context — chỉ dựa vào câu hỏi để kiểm tra."
 
+        # Group by chapter
+        from collections import defaultdict
+        by_chapter: dict[str, list[dict]] = defaultdict(list)
+        for c in retrieved_context:
+            by_chapter[c.get("chapter", "Unknown")].append(c)
+
+        # Sample up to ceil(50 / num_chapters) chunks per chapter
+        import math
+        n_chapters = max(len(by_chapter), 1)
+        per_chapter = max(1, math.ceil(50 / n_chapters))
+        sampled: list[dict] = []
+        for ch_chunks in by_chapter.values():
+            sampled.extend(ch_chunks[:per_chapter])
+        sampled = sampled[:50]  # hard cap
+
         chunks = [
             f"[{c.get('chunk_id', '?')}] {c.get('chapter', '')}: {c.get('content', '')[:300]}"
-            for c in retrieved_context[:20]
+            for c in sampled
         ]
         return "\n\n".join(chunks)
 

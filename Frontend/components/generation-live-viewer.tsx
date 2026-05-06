@@ -26,6 +26,10 @@ import {
   FileText,
   ListChecks,
   Info,
+  Pencil,
+  RefreshCw,
+  MessageCircle,
+  Send,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -126,6 +130,7 @@ type WsMessage =
   | CompletedEvent
   | PipelinePausedEvent
   | ReasoningChunkEvent
+  | { type: "clarification_needed"; data: { clarification_questions: ClarificationQuestion[] } }
   | { type: string; [key: string]: unknown }
 
 // ─── Supporting types ──────────────────────────────────────────────────────────
@@ -170,6 +175,11 @@ interface ValidationIssue {
   detail?: string
   message?: string
   suggestion?: string
+}
+
+interface ClarificationQuestion {
+  question_id: string
+  question: string
 }
 
 interface CostReport {
@@ -257,6 +267,7 @@ export function GenerationLiveViewer({
   const [hitlRejecting, setHitlRejecting] = useState(false)
   const [rejectDialogOpen, setRejectDialogOpen] = useState(false)
   const [rejectFeedback, setRejectFeedback] = useState("")
+  const [lastSeenCheckpoint, setLastSeenCheckpoint] = useState<number | null>(null)
 
   // Blueprint
   const [blueprintSlots, setBlueprintSlots] = useState<BlueprintSlot[]>([])
@@ -275,6 +286,16 @@ export function GenerationLiveViewer({
   const [completionBlueprint, setCompletionBlueprint] = useState<BlueprintSlot[]>([])
   const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
   const [costReport, setCostReport] = useState<CostReport | null>(null)
+
+  // Per-question edit state (CP2)
+  const [selectedQuestionId, setSelectedQuestionId] = useState<string | null>(null)
+  const [questionEditPrompt, setQuestionEditPrompt] = useState<string>("")
+  const [questionRegenerating, setQuestionRegenerating] = useState<string | null>(null)
+
+  // Clarification state — shown when outline needs more info from user
+  const [clarificationQuestions, setClarificationQuestions] = useState<ClarificationQuestion[]>([])
+  const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({})
+  const [clarificationSubmitting, setClarificationSubmitting] = useState(false)
 
   // Unified stream feed — accumulates all events in order
   const [feedItems, setFeedItems] = useState<FeedItem[]>([])
@@ -315,6 +336,8 @@ export function GenerationLiveViewer({
   const activeCheckpointRef = useRef<number | null>(null)
   activeCheckpointRef.current = activeCheckpoint
   const lastSeenCheckpointRef = useRef<number | null>(null)
+  lastSeenCheckpointRef.current = lastSeenCheckpoint
+
   const hitlApprovedRef = useRef(false)
   const blueprintSlotsRef = useRef<BlueprintSlot[]>([])
   blueprintSlotsRef.current = blueprintSlots
@@ -380,9 +403,24 @@ export function GenerationLiveViewer({
           }
           setQuestions((prev) => {
             const qId = q.question_id
-            if (qId && prev.some((existing) => existing.question_id === qId)) return prev
+            // If this question already exists (e.g. validator retry rebuild), replace it in-place
+            const existingIdx = qId ? prev.findIndex((ex) => ex.question_id === qId) : -1
+            if (existingIdx !== -1) {
+              const next = [...prev]
+              next[existingIdx] = q
+              // Also update feedItems in-place
+              setFeedItems((f) =>
+                f.map((fi) =>
+                  fi.kind === 'question' &&
+                  (fi as Extract<FeedItem, { kind: 'question' }>).question.question_id === qId
+                    ? { ...fi, question: q }
+                    : fi
+                )
+              )
+              return next
+            }
+            // New question — append
             const next = [...prev, q]
-            // Also add to feed
             setFeedItems((f) => {
               if (qId && f.some((fi) => fi.kind === 'question' && (fi as {id:string;kind:'question';question:QuestionGeneratedEvent['question'];index:number}).question.question_id === qId)) return f
               return [...f, { id: `q-${qId || next.length}`, kind: 'question' as const, question: q, index: next.length - 1 }]
@@ -539,6 +577,37 @@ export function GenerationLiveViewer({
           break
         }
 
+        case "question_updated": {
+          // CP2 per-question regenerate: swap out the updated question in-place
+          const updatedQ = (msg as { type: string; question_id: string; question: QuestionGeneratedEvent["question"] }).question
+          const updatedId = (msg as { type: string; question_id: string }).question_id
+          if (!updatedQ || !updatedId) break
+          setQuestions((prev) =>
+            prev.map((q) => (q.question_id === updatedId ? updatedQ : q))
+          )
+          setFeedItems((prev) =>
+            prev.map((fi) =>
+              fi.kind === "question" &&
+              (fi as Extract<FeedItem, { kind: "question" }>).question.question_id === updatedId
+                ? { ...fi, question: updatedQ }
+                : fi
+            )
+          )
+          setQuestionRegenerating(null)
+          break
+        }
+
+        case "clarification_needed": {
+          const e = msg as { type: "clarification_needed"; data: { clarification_questions: ClarificationQuestion[] } }
+          const qs = e.data?.clarification_questions ?? []
+          if (qs.length > 0) {
+            setClarificationQuestions(qs)
+            setClarificationAnswers(Object.fromEntries(qs.map((q) => [q.question_id, ""])))
+          }
+          setIsGenerating(false)
+          break
+        }
+
         default:
           break
       }
@@ -584,8 +653,6 @@ export function GenerationLiveViewer({
 
   // ─── HITL approval ──────────────────────────────────────────────────────────
 
-  // Track which checkpoint the user last saw (so we can still show it in the panel)
-  const [lastSeenCheckpoint, setLastSeenCheckpoint] = useState<number | null>(null)
 
   const handleApprove = async () => {
     const cp = lastSeenCheckpointRef.current ?? activeCheckpointRef.current ?? 1
@@ -637,6 +704,41 @@ export function GenerationLiveViewer({
     router.push(`/dashboard/exams/${examId}`)
   }
 
+  // ─── Clarification submit ────────────────────────────────────────────────────
+
+  const handleClarificationSubmit = async () => {
+    if (clarificationSubmitting) return
+    const unanswered = clarificationQuestions.filter(
+      (q) => !(clarificationAnswers[q.question_id] ?? "").trim()
+    )
+    if (unanswered.length > 0) return
+
+    setClarificationSubmitting(true)
+    try {
+      const answersText = clarificationQuestions
+        .map((q) => `${q.question}: ${clarificationAnswers[q.question_id]}`)
+        .join("\n")
+      const backendBase = `${window.location.protocol}//${window.location.hostname}:8000`
+      const res = await fetch(`${backendBase}/api/exams/${examId}/clarify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ answers: clarificationAnswers, answers_text: answersText }),
+      })
+      if (!res.ok) {
+        console.error("[Clarification] submit failed", res.status)
+        return
+      }
+      setClarificationQuestions([])
+      setClarificationAnswers({})
+      setIsGenerating(true)
+    } catch (err) {
+      console.error("[Clarification] submit error", err)
+    } finally {
+      setClarificationSubmitting(false)
+    }
+  }
+
   // ─── Count questions by type ─────────────────────────────────────────────────
 
   const mcqCount = questions.filter(q => (q.type || "mcq") === "mcq").length
@@ -646,6 +748,7 @@ export function GenerationLiveViewer({
 
   return (
     <div className="flex flex-col min-h-screen bg-background">
+
       {/* ── Header ── */}
       <header className="flex items-center justify-between px-6 py-4 border-b bg-card/80 backdrop-blur-sm">
         <div className="flex items-center gap-3">
@@ -1058,6 +1161,95 @@ export function GenerationLiveViewer({
                 <p className="text-xs text-muted-foreground mt-2">
                   {questions.length} câu hỏi đã được tạo
                 </p>
+
+                {/* Per-question list for CP2 editing */}
+                {questions.length > 0 && (
+                  <div className="mt-3 space-y-1.5">
+                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
+                      Chỉnh sửa từng câu
+                    </p>
+                    <div className="max-h-64 overflow-y-auto space-y-1 pr-0.5">
+                      {questions.map((q, i) => {
+                        const qId = q.question_id || `q-${i}`
+                        const isSelected = selectedQuestionId === qId
+                        const isRegenerating = questionRegenerating === qId
+                        const bloomLvl = q.bloom_level as BloomLevel | undefined
+                        const bloomInfo = bloomLvl && BLOOM_CONFIG[bloomLvl] ? BLOOM_CONFIG[bloomLvl] : null
+                        const stem = q.stem || q.content || ""
+                        return (
+                          <div key={qId} className="rounded-lg border border-violet-100 bg-white/60 overflow-hidden">
+                            {/* Question summary row */}
+                            <div
+                              className="flex items-center gap-2 px-2.5 py-2 cursor-pointer hover:bg-violet-50/50 transition-colors"
+                              onClick={() => {
+                                setSelectedQuestionId(isSelected ? null : qId)
+                                setQuestionEditPrompt("")
+                              }}
+                            >
+                              <span className="text-[10px] text-muted-foreground font-mono w-6 shrink-0">{i + 1}.</span>
+                              {bloomInfo && (
+                                <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-medium shrink-0", bloomInfo.bg, bloomInfo.color)}>
+                                  {bloomInfo.short}
+                                </span>
+                              )}
+                              <span className="text-xs text-foreground truncate flex-1">
+                                {stem.slice(0, 60)}{stem.length > 60 ? "..." : ""}
+                              </span>
+                              <Pencil className="h-3 w-3 text-muted-foreground shrink-0" />
+                            </div>
+
+                            {/* Inline edit panel */}
+                            {isSelected && (
+                              <div className="border-t border-violet-100 bg-violet-50/30 p-2.5 space-y-2">
+                                <textarea
+                                  className="w-full text-xs rounded border border-violet-200 bg-white/80 px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-violet-300"
+                                  rows={2}
+                                  placeholder="Nhập yêu cầu chỉnh sửa câu này... (để trống để tạo lại ngẫu nhiên)"
+                                  value={questionEditPrompt}
+                                  onChange={(e) => setQuestionEditPrompt(e.target.value)}
+                                  disabled={isRegenerating}
+                                />
+                                <div className="flex gap-1.5">
+                                  <button
+                                    className="flex items-center gap-1 text-[10px] px-2.5 py-1.5 rounded bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
+                                    disabled={isRegenerating}
+                                    onClick={async () => {
+                                      setQuestionRegenerating(qId)
+                                      try {
+                                        await examsApi.partialRegenerate(examId, {
+                                          question_id: qId,
+                                          prompt: questionEditPrompt,
+                                        })
+                                        setSelectedQuestionId(null)
+                                        setQuestionEditPrompt("")
+                                      } catch (e) {
+                                        console.error("Partial regenerate failed:", e)
+                                        setQuestionRegenerating(null)
+                                      }
+                                    }}
+                                  >
+                                    {isRegenerating ? (
+                                      <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                                    ) : (
+                                      <RefreshCw className="h-2.5 w-2.5" />
+                                    )}
+                                    {isRegenerating ? "Đang tạo..." : "Tạo lại câu này"}
+                                  </button>
+                                  <button
+                                    className="flex items-center gap-1 text-[10px] px-2 py-1.5 rounded border border-violet-200 text-violet-700 hover:bg-violet-100 transition-colors"
+                                    onClick={() => { setSelectedQuestionId(null); setQuestionEditPrompt("") }}
+                                  >
+                                    Hủy
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {hitlApproved ? (
@@ -1078,7 +1270,7 @@ export function GenerationLiveViewer({
                     onClick={openRejectDialog} disabled={hitlApproving || hitlRejecting}>
                     {hitlRejecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       : <X className="h-3.5 w-3.5" />}
-                    Yêu cầu sửa
+                    Yêu cầu sửa tất cả
                   </Button>
                 </div>
               )}
@@ -1310,9 +1502,68 @@ export function GenerationLiveViewer({
               }
 
               if (item.kind === 'question') {
+                const qId = item.question.question_id
+                const isSelected = selectedQuestionId === qId
+                const isRegenerating = questionRegenerating === qId
                 return (
                   <div key={item.id} className="py-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
                     <QuestionCard question={item.question} index={item.index} />
+                    {/* Per-question edit button — only show at CP2 */}
+                    {activeCheckpoint === 2 && (
+                      <div className="mt-1.5 px-1">
+                        {!isSelected ? (
+                          <button
+                            className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-violet-700 transition-colors"
+                            onClick={() => { setSelectedQuestionId(qId ?? null); setQuestionEditPrompt("") }}
+                          >
+                            <Pencil className="h-3 w-3" />
+                            Chỉnh sửa câu này
+                          </button>
+                        ) : (
+                          <div className="rounded-lg border border-violet-200 bg-violet-50/50 p-2.5 space-y-2">
+                            <textarea
+                              className="w-full text-xs rounded border border-violet-200 bg-white/80 px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-violet-300"
+                              rows={2}
+                              placeholder="Nhập yêu cầu chỉnh sửa câu này... (để trống để tạo lại ngẫu nhiên)"
+                              value={questionEditPrompt}
+                              onChange={(e) => setQuestionEditPrompt(e.target.value)}
+                              disabled={isRegenerating}
+                              autoFocus
+                            />
+                            <div className="flex gap-1.5">
+                              <button
+                                className="flex items-center gap-1 text-[11px] px-3 py-1.5 rounded bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
+                                disabled={!!isRegenerating}
+                                onClick={async () => {
+                                  setQuestionRegenerating(qId ?? null)
+                                  try {
+                                    await examsApi.partialRegenerate(examId, {
+                                      question_id: qId!,
+                                      prompt: questionEditPrompt || undefined,
+                                    })
+                                    setSelectedQuestionId(null)
+                                    setQuestionEditPrompt("")
+                                  } catch (err) {
+                                    console.error("Partial regenerate failed:", err)
+                                    setQuestionRegenerating(null)
+                                  }
+                                }}
+                              >
+                                {isRegenerating
+                                  ? <><Loader2 className="h-3 w-3 animate-spin" /> Đang tạo...</>
+                                  : <><RefreshCw className="h-3 w-3" /> Tạo lại câu này</>}
+                              </button>
+                              <button
+                                className="text-[11px] px-2.5 py-1.5 rounded border border-violet-200 text-violet-700 hover:bg-violet-100 transition-colors"
+                                onClick={() => { setSelectedQuestionId(null); setQuestionEditPrompt("") }}
+                              >
+                                Hủy
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )
               }
@@ -1367,6 +1618,50 @@ export function GenerationLiveViewer({
                   <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={handleViewExam}>
                     Xem đề đầy đủ <ChevronRight className="h-4 w-4 ml-1" />
                   </Button>
+                </div>
+              </div>
+            )}
+
+            {/* ── Inline clarification chat ── */}
+            {clarificationQuestions.length > 0 && (
+              <div className="py-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                {/* AI bubble */}
+                <div className="flex gap-3 mb-3">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-full border bg-amber-100 border-amber-300 text-amber-700 shrink-0">
+                    <MessageCircle className="h-3.5 w-3.5" />
+                  </div>
+                  <div className="flex-1 rounded-xl rounded-tl-none bg-amber-50 border border-amber-200 px-4 py-3 space-y-3">
+                    <p className="text-xs font-semibold text-amber-700">AI cần thêm thông tin</p>
+                    {clarificationQuestions.map((q, idx) => (
+                      <div key={q.question_id} className="space-y-1.5">
+                        <p className="text-sm text-foreground leading-snug">
+                          <span className="text-muted-foreground mr-1.5">{idx + 1}.</span>
+                          {q.question}
+                        </p>
+                        <textarea
+                          rows={2}
+                          className="w-full rounded-lg border border-amber-200 bg-white/80 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-amber-300 resize-none"
+                          placeholder="Nhập câu trả lời..."
+                          value={clarificationAnswers[q.question_id] ?? ""}
+                          onChange={(e) =>
+                            setClarificationAnswers((prev) => ({ ...prev, [q.question_id]: e.target.value }))
+                          }
+                        />
+                      </div>
+                    ))}
+                    <button
+                      onClick={handleClarificationSubmit}
+                      disabled={
+                        clarificationSubmitting ||
+                        clarificationQuestions.some((q) => !(clarificationAnswers[q.question_id] ?? "").trim())
+                      }
+                      className="flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {clarificationSubmitting
+                        ? <><Loader2 className="h-4 w-4 animate-spin" />Đang gửi...</>
+                        : <><Send className="h-4 w-4" />Gửi</>}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1619,6 +1914,20 @@ function TypingText({ text }: { text: string }) {
 
 // ─── QuestionCard sub-component ───────────────────────────────────────────────
 
+/** Returns true only if text likely contains LaTeX math delimiters */
+function hasMath(text: string): boolean {
+  return text.includes('$') || text.includes('\\(') || text.includes('\\[')
+}
+
+/** Render text: use LatexRenderer only when math is detected, else plain span */
+function MathText({ children, className }: { children: string; className?: string }) {
+  if (!children) return null
+  if (hasMath(children)) {
+    return <LatexRenderer className={className}>{children}</LatexRenderer>
+  }
+  return <span className={className}>{children}</span>
+}
+
 function QuestionCard({
   question,
   index,
@@ -1692,7 +2001,9 @@ function QuestionCard({
 
       {/* Stem */}
       {stem && (
-        <p className="text-sm text-foreground leading-relaxed mb-3">{stem}</p>
+        <div className="text-sm text-foreground leading-relaxed mb-3">
+          <MathText>{stem}</MathText>
+        </div>
       )}
 
       {/* Options for MCQ */}
@@ -1706,7 +2017,9 @@ function QuestionCard({
               <span className="text-xs font-semibold text-muted-foreground w-5 shrink-0 mt-0.5">
                 {String.fromCharCode(65 + oi)}.
               </span>
-              <span className="text-sm text-foreground">{opt.text}</span>
+              <span className="text-sm text-foreground">
+                <MathText>{opt.text}</MathText>
+              </span>
             </div>
           ))}
         </div>

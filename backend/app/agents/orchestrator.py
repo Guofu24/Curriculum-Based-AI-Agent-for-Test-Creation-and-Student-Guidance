@@ -644,7 +644,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 "exam_id": exam_id,
             }
         else:
-            # G8 (checkpoint 2 reject): Queue Celery task for regeneration
+            # CP2 rejected — resume the LangGraph with approved=False so
+            # wait_for_review can save feedback and the pipeline can regenerate.
             if not session:
                 return {
                     "status": "failed",
@@ -657,26 +658,48 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             if direct_edits:
                 original_config["direct_edits"] = direct_edits
 
-            # Store the review feedback for the regeneration task
+            # Save rejection feedback to session for the regeneration task
             session["review_feedback"] = feedback
             session["direct_edits"] = direct_edits
             session_key = self.short_term._session_key(exam_id, user_id)
             await self.redis.set_json(session_key, session, ttl=7200)
 
-            # Dispatch Celery task — do NOT call generate_exam directly (would block HTTP)
+            # Mark checkpoint 2 as rejected in Redis so wait_for_review reads it on resume
+            await self.redis.set(f"hitl:approved:{exam_id}:2", "rejected", ttl=3600)
+
+            # Resume the interrupted LangGraph graph with rejection + feedback
             try:
-                from app.tasks.exam_task import generate_exam_task
-                generate_exam_task.delay(
-                    exam_id=exam_id,
-                    user_id=user_id,
-                    document_id=session.get("document_id"),
-                    scope=session.get("scope", []),
-                    exam_config={**original_config, "review_feedback": feedback},
-                    user_prompt=original_config.get("user_prompt", ""),
-                    extra_instructions=feedback,
+                from langgraph.types import Command
+                from app.agents.graph.builder import build_exam_graph
+                graph = build_exam_graph()
+                config = {"configurable": {"thread_id": exam_id, "recursion_limit": 500}}
+                logger.info(
+                    "Resuming graph for exam %s at CP2 with approved=False, feedback=%r",
+                    exam_id, feedback,
                 )
-            except Exception:
-                pass  # Non-blocking
+                await graph.ainvoke(
+                    Command(resume={"approved": False, "feedback": feedback or ""}),
+                    config=config,
+                ) or {}
+            except Exception as e:
+                if "interrupt" in str(e).lower() or "nothing to resume" in str(e).lower():
+                    logger.info("No interrupt to resume for CP2 exam %s: %s", exam_id, e)
+                else:
+                    logger.warning("Could not resume CP2 graph for exam %s: %s", exam_id, e)
+                # Fallback: dispatch Celery task for regeneration
+                try:
+                    from app.tasks.exam_task import generate_exam_task
+                    generate_exam_task.delay(
+                        exam_id=exam_id,
+                        user_id=user_id,
+                        document_id=session.get("document_id"),
+                        scope=session.get("scope", []),
+                        exam_config={**original_config, "review_feedback": feedback},
+                        user_prompt=original_config.get("user_prompt", ""),
+                        extra_instructions=feedback,
+                    )
+                except Exception:
+                    pass
 
             # Log rejection FeedbackEvent
             try:

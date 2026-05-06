@@ -17,6 +17,9 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
     rejection feedback as exam_config["outline_feedback"] so LLM regenerates
     the blueprint with teacher feedback incorporated.
 
+    Also maintains blueprint_history so the outline agent can see all
+    previously generated blueprints across rejection cycles.
+
     Args:
         state: Must contain retrieved_context, exam_config, blueprint_feedback (optional).
 
@@ -33,6 +36,12 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
     cost_report = dict(state.get("cost_report", {}))
     warnings = list(state.get("warnings", []))
 
+    # ── Blueprint history tracking ───────────────────────────────────────────
+    # Keep a running list of all blueprints generated in prior rejection cycles.
+    # This gives the outline agent "memory" of what was already tried.
+    blueprint_history = list(state.get("blueprint_history") or [])
+    current_blueprint = state.get("blueprint", [])
+
     # G8: Inject rejection feedback into exam_config for re-generation
     rejection_history = state.get("checkpoint_1_rejection_history", [])
     print(f"[create_outline] exam_id={exam_id}, rejection_history_len={len(rejection_history)}, entries={[r.get('feedback','')[:60] for r in rejection_history]}", flush=True)
@@ -41,9 +50,14 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
         if last_feedback:
             exam_config["outline_feedback"] = last_feedback
             # Pass the current blueprint so LLM can modify it (not generate from scratch)
-            current_blueprint = state.get("blueprint", [])
             if current_blueprint:
                 exam_config["current_blueprint"] = current_blueprint
+                # Append to history BEFORE this new generation round
+                blueprint_history.append({
+                    "round": len(rejection_history),
+                    "feedback": last_feedback,
+                    "blueprint": current_blueprint,
+                })
             warnings.append("Injecting blueprint rejection feedback for regeneration")
             print(f"[create_outline] FEEDBACK INJECTED (from state): {last_feedback[:100]}", flush=True)
     else:
@@ -59,13 +73,21 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
                 _feedback = _data.get("feedback", "")
                 if _feedback:
                     exam_config["outline_feedback"] = _feedback
-                    current_blueprint = state.get("blueprint", [])
                     if current_blueprint:
                         exam_config["current_blueprint"] = current_blueprint
+                        blueprint_history.append({
+                            "round": 1,
+                            "feedback": _feedback,
+                            "blueprint": current_blueprint,
+                        })
                     warnings.append("Injecting blueprint rejection feedback from Redis fallback")
                     print(f"[create_outline] FEEDBACK INJECTED (from Redis): {_feedback[:100]}", flush=True)
         except Exception as _e:
             print(f"[create_outline] Redis fallback failed: {_e}", flush=True)
+
+    # Pass full blueprint history to outline agent so it can avoid repeating mistakes
+    if blueprint_history:
+        exam_config["blueprint_history"] = blueprint_history
 
     print(f"[create_outline] exam_id={exam_id}, retrieved_context_chunks={len(retrieved_context)}, calling OutlineAgent...", flush=True)
 
@@ -114,9 +136,11 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
             "warnings": outline_result.warnings or [],
         },
         "blueprint": blueprint,
+        "blueprint_history": blueprint_history,
         "distribution_summary": distribution_summary,
         "cost_report": cost_report,
         "current_agent": AgentRole.OUTLINE,
         "warnings": warnings,
         "updated_at": state.get("updated_at"),
     }
+
