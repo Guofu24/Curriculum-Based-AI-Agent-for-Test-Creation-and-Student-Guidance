@@ -2,11 +2,19 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { DashboardHeader } from '@/components/dashboard-header'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog'
 import {
   Table,
   TableBody,
@@ -30,6 +38,8 @@ import {
   Sparkles,
   ArrowRight,
   Eye,
+  BookOpen,
+  Upload,
 } from 'lucide-react'
 import { examsApi, Exam, QualitySummary } from '@/lib/api'
 import { StatusBadge } from '@/components/status-badge'
@@ -66,9 +76,11 @@ const chartConfig = {
 } satisfies ChartConfig
 
 export default function DashboardPage() {
+  const router = useRouter()
   const [recentExams, setRecentExams] = useState<Exam[]>([])
   const [qualitySummary, setQualitySummary] = useState<QualitySummary | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [showSourceDialog, setShowSourceDialog] = useState(false)
 
   useEffect(() => {
     async function fetchData() {
@@ -115,11 +127,9 @@ export default function DashboardPage() {
                 Tổng quan hệ thống tạo đề thi tự động
               </p>
             </div>
-            <Button asChild>
-              <Link href="/dashboard/generate">
-                <Sparkles className="mr-2 h-4 w-4" />
-                Tạo đề mới
-              </Link>
+            <Button onClick={() => setShowSourceDialog(true)}>
+              <Sparkles className="mr-2 h-4 w-4" />
+              Tạo đề mới
             </Button>
           </div>
 
@@ -247,11 +257,9 @@ export default function DashboardPage() {
                   <div className="flex flex-col items-center justify-center py-8 text-center">
                     <ClipboardList className="h-12 w-12 text-muted-foreground/50 mb-4" />
                     <p className="text-muted-foreground">Chưa có đề thi nào</p>
-                    <Button className="mt-4" asChild>
-                      <Link href="/dashboard/generate">
-                        <Sparkles className="mr-2 h-4 w-4" />
-                        Tạo đề đầu tiên
-                      </Link>
+                    <Button className="mt-4" onClick={() => setShowSourceDialog(true)}>
+                      <Sparkles className="mr-2 h-4 w-4" />
+                      Tạo đề đầu tiên
                     </Button>
                   </div>
                 ) : (
@@ -314,7 +322,7 @@ export default function DashboardPage() {
                 <QuickActionCard
                   title="Tạo đề mới"
                   description="Sinh đề thi từ tài liệu"
-                  href="/dashboard/generate"
+                  onClick={() => setShowSourceDialog(true)}
                   icon={Sparkles}
                 />
                 <QuickActionCard
@@ -334,6 +342,62 @@ export default function DashboardPage() {
           </Card>
         </div>
       </main>
+
+      {/* Knowledge Source Dialog */}
+      <Dialog open={showSourceDialog} onOpenChange={setShowSourceDialog}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Chọn nguồn kiến thức</DialogTitle>
+            <DialogDescription>
+              Bạn muốn sinh đề từ tài liệu của mình hay dùng kiến thức sẵn có?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 mt-2">
+            <Card
+              className="cursor-pointer border-2 transition-all hover:border-primary hover:bg-primary/5"
+              onClick={() => { setShowSourceDialog(false); router.push('/dashboard/generate') }}
+            >
+              <CardContent className="pt-6 pb-5">
+                <div className="flex items-start gap-4">
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                    <Upload className="h-6 w-6" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-base">Tôi đã có tài liệu</h3>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Upload PDF / DOCX / PPTX và sinh đề từ nội dung của bạn
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card
+              className="cursor-pointer border-2 transition-all hover:border-amber-500 hover:bg-amber-500/5"
+              onClick={() => { setShowSourceDialog(false); router.push('/dashboard/generate/textbook') }}
+            >
+              <CardContent className="pt-6 pb-5">
+                <div className="flex items-start gap-4">
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 text-amber-500">
+                    <BookOpen className="h-6 w-6" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="font-semibold text-base">Dùng kiến thức có sẵn</h3>
+                      <Badge variant="outline" className="text-amber-500 border-amber-500/40 bg-amber-500/10 text-xs">
+                        Vật lí 12
+                      </Badge>
+                    </div>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Hệ thống đã có sẵn kiến thức SGK Vật lí 12 — không cần upload tài liệu
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }
@@ -378,28 +442,33 @@ function QuickActionCard({
   title,
   description,
   href,
+  onClick,
   icon: Icon,
 }: {
   title: string
   description: string
-  href: string
+  href?: string
+  onClick?: () => void
   icon: React.ElementType
 }) {
-  return (
-    <Link href={href}>
-      <Card className="hover:bg-accent/50 transition-colors cursor-pointer h-full">
-        <CardContent className="pt-6">
-          <div className="flex items-start gap-4">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <Icon className="h-5 w-5" />
-            </div>
-            <div>
-              <h3 className="font-semibold">{title}</h3>
-              <p className="text-sm text-muted-foreground">{description}</p>
-            </div>
+  const inner = (
+    <Card className="hover:bg-accent/50 transition-colors cursor-pointer h-full">
+      <CardContent className="pt-6">
+        <div className="flex items-start gap-4">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <Icon className="h-5 w-5" />
           </div>
-        </CardContent>
-      </Card>
-    </Link>
+          <div>
+            <h3 className="font-semibold">{title}</h3>
+            <p className="text-sm text-muted-foreground">{description}</p>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   )
+
+  if (onClick) {
+    return <div onClick={onClick}>{inner}</div>
+  }
+  return <Link href={href!}>{inner}</Link>
 }

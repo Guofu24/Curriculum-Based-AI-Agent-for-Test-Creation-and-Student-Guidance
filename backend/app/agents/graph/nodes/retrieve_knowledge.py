@@ -38,21 +38,33 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
 
     retrieval_agent = RetrievalAgent(redis=redis_client)
     bloom_targets = list(exam_config.get("bloom_distribution", {}).keys())
+    textbook_namespace = state.get("textbook_namespace") or None
 
     # Stream reasoning start
     scope_str = ', '.join(scope) if scope else 'toàn bộ'
+    source_label = f"namespace '{textbook_namespace}'" if textbook_namespace else f"document {document_id or '?'}"
     _emit(state, {
         "type": "reasoning_chunk",
         "step_id": "step-1",
-        "chunk": f"Tìm kiếm kiến thức trong phạm vi: {scope_str}\nMục tiêu Bloom: {', '.join(bloom_targets) or 'all'}\n",
+        "chunk": f"Tìm kiếm kiến thức từ {source_label} trong phạm vi: {scope_str}\n",
     })
 
-    retrieval_result = await retrieval_agent.retrieve(
-        document_id=document_id,
-        scope_chapters=scope,
-        bloom_targets=bloom_targets,
-        trace_id=exam_id,
-    )
+    if textbook_namespace:
+        retrieval_result = await retrieval_agent.retrieve_textbook(
+            textbook_namespace=textbook_namespace,
+            scope_chapters=scope,
+            bloom_targets=bloom_targets,
+            trace_id=exam_id,
+            scope_sections=list(exam_config.get("scope_sections") or []),
+        )
+    else:
+        retrieval_result = await retrieval_agent.retrieve(
+            document_id=document_id,
+            scope_chapters=scope,
+            bloom_targets=bloom_targets,
+            trace_id=exam_id,
+            scope_sections=list(exam_config.get("scope_sections") or []),
+        )
 
     retrieved_chunks = getattr(retrieval_result, "retrieved_chunks", [])
     coverage_map = getattr(retrieval_result, "coverage_map", {})

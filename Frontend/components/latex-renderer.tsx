@@ -58,7 +58,12 @@ function parseSegments(raw: string): Segment[] {
 
 function SafeInlineMath({ latex }: { latex: string }) {
   try {
-    return <InlineMath math={latex} />
+    // Suppress KaTeX strict-mode warnings (e.g. Unicode chars in math mode)
+    const origWarn = console.warn
+    console.warn = () => {}
+    const result = <InlineMath math={latex} />
+    console.warn = origWarn
+    return result
   } catch {
     return <code className="text-red-500">{`$${latex}$`}</code>
   }
@@ -66,7 +71,11 @@ function SafeInlineMath({ latex }: { latex: string }) {
 
 function SafeBlockMath({ latex }: { latex: string }) {
   try {
-    return <BlockMath math={latex} />
+    const origWarn = console.warn
+    console.warn = () => {}
+    const result = <BlockMath math={latex} />
+    console.warn = origWarn
+    return result
   } catch {
     return <code className="text-red-500">{`$$${latex}$$`}</code>
   }

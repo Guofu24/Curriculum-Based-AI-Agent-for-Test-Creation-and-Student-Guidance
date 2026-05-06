@@ -35,10 +35,10 @@ import {
   Layers,
   Calendar,
   Trash2,
+  Check,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { documentsApi, Document, CurriculumNode as APICurriculumNode } from '@/lib/api'
-import { CurriculumTree, FlatCurriculumNode } from '@/components/curriculum-tree'
 import { StatusBadge } from '@/components/status-badge'
 import { formatDateTime, formatFileSize } from '@/lib/format'
 import { Spinner } from '@/components/ui/spinner'
@@ -52,7 +52,12 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
   const router = useRouter()
   const [document, setDocument] = useState<Document | null>(null)
   const [curriculumNodes, setCurriculumNodes] = useState<APICurriculumNode[]>([])
+  // Chapter-level selection (always collapsed by default)
   const [selectedChapterIds, setSelectedChapterIds] = useState<Set<string>>(new Set())
+  // Section-level selection, keyed by chapter_id
+  const [selectedSectionIds, setSelectedSectionIds] = useState<Record<string, Set<string>>>({})
+  // Track which chapters have their sections dropdown open
+  const [openChapterIds, setOpenChapterIds] = useState<Set<string>>(new Set())
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [isReprocessing, setIsReprocessing] = useState(false)
@@ -68,15 +73,10 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
           documentsApi.get(id),
           documentsApi.getCurriculumTree(id).catch(() => []),
         ])
-        
+
         setDocument(docRes)
         setCurriculumNodes(curriculumRes)
-        
-        // Initialize selected chapters
-        const chapters = curriculumRes
-          .filter(node => node.level === 1)
-          .map(node => node.id)
-        setSelectedChapterIds(new Set(chapters))
+        // NO auto-select — user must choose manually
       } catch (error) {
         console.error('Failed to fetch document:', error)
         toast.error('Không thể tải thông tin tài liệu')
@@ -88,10 +88,119 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
     fetchData()
   }, [id])
 
+  // Build tree helpers
+  const chapters = useMemo(() =>
+    curriculumNodes.filter(node => node.level === 1),
+    [curriculumNodes]
+  )
+  const getSectionsForChapter = (chapterId: string) =>
+    curriculumNodes.filter(node => node.level === 2 && node.parent_id === chapterId)
+  const getSubsectionsForSection = (sectionId: string) =>
+    curriculumNodes.filter(node => node.level === 3 && node.parent_id === sectionId)
+
+  // ── Chapter toggle ──────────────────────────────────────────────────────────
+  const toggleChapter = (chapterId: string) => {
+    setSelectedChapterIds(prev => {
+      const next = new Set(prev)
+      if (next.has(chapterId)) {
+        next.delete(chapterId)
+        // Also clear all sections under this chapter
+        setSelectedSectionIds(prevSec => {
+          const nextSec = { ...prevSec }
+          delete nextSec[chapterId]
+          return nextSec
+        })
+      } else {
+        next.add(chapterId)
+      }
+      return next
+    })
+  }
+
+  // ── Section toggle ─────────────────────────────────────────────────────────
+  const toggleSection = (chapterId: string, sectionId: string) => {
+    setSelectedSectionIds(prev => {
+      const chapterSections = prev[chapterId] ?? new Set()
+      const next = new Set(chapterSections)
+      if (next.has(sectionId)) {
+        next.delete(sectionId)
+      } else {
+        next.add(sectionId)
+      }
+      return { ...prev, [chapterId]: next }
+    })
+  }
+
+  // ── Select / deselect all sections within a chapter ───────────────────────
+  const selectAllSections = (chapterId: string) => {
+    const sections = getSectionsForChapter(chapterId)
+    const allSectionIds = sections.map(s => s.id)
+    const currentlyAllSelected = allSectionIds.every(sid =>
+      (selectedSectionIds[chapterId] ?? new Set()).has(sid)
+    )
+
+    if (currentlyAllSelected) {
+      // Deselect all
+      setSelectedSectionIds(prev => {
+        const next = { ...prev }
+        delete next[chapterId]
+        return next
+      })
+    } else {
+      // Select all
+      setSelectedSectionIds(prev => ({
+        ...prev,
+        [chapterId]: new Set(allSectionIds),
+      }))
+    }
+  }
+
+  // ── Open / close sections dropdown for a chapter ──────────────────────────
+  const toggleOpenChapter = (chapterId: string) => {
+    setOpenChapterIds(prev => {
+      const next = new Set(prev)
+      if (next.has(chapterId)) {
+        next.delete(chapterId)
+      } else {
+        next.add(chapterId)
+      }
+      return next
+    })
+  }
+
+  // ── Save curriculum ───────────────────────────────────────────────────────
   const handleSaveCurriculum = async () => {
+    // If chapter selected but no specific sections → treat as "whole chapter"
+    // If chapter deselected → not included
+    // If section selected → include only those sections
+    const nodesToSave = curriculumNodes.filter(node => {
+      if (node.level === 1) {
+        return selectedChapterIds.has(node.id)
+      }
+      if (node.level === 2) {
+        const parentId = node.parent_id ?? ''
+        const isParentSelected = selectedChapterIds.has(parentId)
+        if (!isParentSelected) return false
+        const selectedInParent = selectedSectionIds[parentId]
+        // If specific sections selected, use them; otherwise include all
+        return !selectedInParent || selectedInParent.size === 0 || selectedInParent.has(node.id)
+      }
+      // Subsections: only include if parent section is included
+      if (node.level === 3) {
+        const parentId = node.parent_id ?? ''
+        const grandparentId = curriculumNodes.find(n => n.id === parentId)?.parent_id ?? ''
+        const isParentChapterSelected = selectedChapterIds.has(grandparentId)
+        if (!isParentChapterSelected) return false
+        const selectedInChapter = selectedSectionIds[grandparentId]
+        if (!selectedInChapter || selectedInChapter.size === 0) return true
+        return selectedInChapter.has(parentId)
+      }
+      return false
+    })
+
     setIsSaving(true)
     try {
-      await documentsApi.updateCurriculumTree(id, curriculumNodes)
+      await documentsApi.updateCurriculumTree(id, nodesToSave)
       toast.success('Đã lưu cấu trúc chương')
     } catch (error) {
       toast.error('Lưu thất bại')
@@ -123,10 +232,9 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
       setDocument(updated)
       const tree = await documentsApi.getCurriculumTree(id)
       setCurriculumNodes(tree)
-      const chapters = tree
-        .filter(node => node.level === 1)
-        .map(node => node.id)
-      setSelectedChapterIds(new Set(chapters))
+      // Reset selections
+      setSelectedChapterIds(new Set())
+      setSelectedSectionIds({})
     } catch (error) {
       toast.error('Không thể quét lại cấu trúc')
     } finally {
@@ -153,26 +261,14 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
     }
   }
 
-  const toggleChapter = (nodeId: string) => {
-    setSelectedChapterIds(prev => {
-      const next = new Set(prev)
-      if (next.has(nodeId)) {
-        next.delete(nodeId)
-      } else {
-        next.add(nodeId)
-      }
-      return next
-    })
-  }
-
   const handleEditTitle = (nodeId: string, currentTitle: string) => {
     setEditingNode(nodeId)
     setEditValue(currentTitle)
   }
 
   const handleSaveTitle = (nodeId: string) => {
-    setCurriculumNodes(prev => 
-      prev.map(node => 
+    setCurriculumNodes(prev =>
+      prev.map(node =>
         node.id === nodeId ? { ...node, title: editValue } : node
       )
     )
@@ -224,10 +320,9 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
     )
   }
 
-  // Build tree structure from flat curriculum
-  const chapters = curriculumNodes.filter(node => node.level === 1)
-  const getChildren = (parentId: string) => 
-    curriculumNodes.filter(node => node.parent_id === parentId)
+  const selectedCount = selectedChapterIds.size + Object.values(selectedSectionIds).reduce(
+    (acc, s) => acc + s.size, 0
+  )
 
   return (
     <>
@@ -235,7 +330,7 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
         { label: 'Tài liệu', href: '/dashboard/documents' },
         { label: document.original_filename }
       ]} />
-      
+
       <main className="flex-1 overflow-auto">
         <div className="container mx-auto p-6 space-y-6">
           {/* Header */}
@@ -322,6 +417,21 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
                   label="Ngày upload"
                   value={formatDateTime(document.created_at)}
                 />
+                <div className="pt-2 border-t">
+                  <p className="text-sm text-muted-foreground mb-1">Đã chọn</p>
+                  <p className="text-lg font-semibold">
+                    {selectedCount === 0 ? (
+                      <span className="text-muted-foreground">Chưa chọn gì</span>
+                    ) : (
+                      <>
+                        {selectedChapterIds.size} chương
+                        {Object.values(selectedSectionIds).reduce((a, b) => a + b.size, 0) > 0 && (
+                          <> + {Object.values(selectedSectionIds).reduce((a, b) => a + b.size, 0)} phần</>
+                        )}
+                      </>
+                    )}
+                  </p>
+                </div>
               </CardContent>
             </Card>
 
@@ -331,17 +441,31 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
                 <div>
                   <CardTitle>Cấu trúc chương</CardTitle>
                   <CardDescription>
-                    Chọn các chương sẽ sử dụng khi tạo đề
+                    Chọn các chương và phần để sử dụng khi tạo đề. Để trống để bỏ chọn tất cả.
                   </CardDescription>
                 </div>
-                <Button onClick={handleSaveCurriculum} disabled={isSaving}>
-                  {isSaving ? (
-                    <Spinner className="mr-2" />
-                  ) : (
-                    <Save className="mr-2 h-4 w-4" />
-                  )}
-                  Lưu thay đổi
-                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setSelectedChapterIds(new Set())
+                      setSelectedSectionIds({})
+                      toast.info('Đã bỏ chọn tất cả')
+                    }}
+                    disabled={selectedCount === 0}
+                  >
+                    Bỏ chọn tất cả
+                  </Button>
+                  <Button onClick={handleSaveCurriculum} disabled={isSaving}>
+                    {isSaving ? (
+                      <Spinner className="mr-2" />
+                    ) : (
+                      <Save className="mr-2 h-4 w-4" />
+                    )}
+                    Lưu thay đổi
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent>
                 {chapters.length === 0 ? (
@@ -353,22 +477,135 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {chapters.map((chapter) => (
-                      <ChapterNode
-                        key={chapter.id}
-                        node={chapter}
-                        children={getChildren(chapter.id)}
-                        getChildren={getChildren}
-                        isSelected={selectedChapterIds.has(chapter.id)}
-                        onToggle={() => toggleChapter(chapter.id)}
-                        editingNode={editingNode}
-                        editValue={editValue}
-                        setEditValue={setEditValue}
-                        onEditTitle={handleEditTitle}
-                        onSaveTitle={handleSaveTitle}
-                        onCancelEdit={() => setEditingNode(null)}
-                      />
-                    ))}
+                    {chapters.map((chapter) => {
+                      const sections = getSectionsForChapter(chapter.id)
+                      const isChapterSelected = selectedChapterIds.has(chapter.id)
+                      const isOpen = openChapterIds.has(chapter.id)
+                      const selectedInChapter = selectedSectionIds[chapter.id] ?? new Set()
+                      const allSectionIds = sections.map(s => s.id)
+                      const allSectionsSelected = sections.length > 0 &&
+                        allSectionIds.every(sid => selectedInChapter.has(sid))
+                      const someSectionsSelected = sections.length > 0 &&
+                        allSectionIds.some(sid => selectedInChapter.has(sid)) && !allSectionsSelected
+
+                      return (
+                        <div key={chapter.id} className="space-y-1">
+                          {/* Chapter row */}
+                          <div className="flex items-center gap-2 rounded-lg p-2 hover:bg-muted/50 transition-colors">
+                            <Checkbox
+                              checked={isChapterSelected}
+                              onCheckedChange={() => toggleChapter(chapter.id)}
+                              className="shrink-0"
+                            />
+
+                            <span className="flex-1 text-sm font-medium">
+                              {chapter.title}
+                            </span>
+
+                            {sections.length > 0 && (
+                              <>
+                                {/* Section count badge */}
+                                <Badge variant="secondary" className="text-xs">
+                                  {selectedInChapter.size > 0
+                                    ? `${selectedInChapter.size}/${sections.length} phần`
+                                    : `${sections.length} phần`}
+                                </Badge>
+
+                                {/* Expand / collapse sections */}
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-6 w-6"
+                                  onClick={() => toggleOpenChapter(chapter.id)}
+                                  title={isOpen ? 'Thu gọn' : 'Mở rộng'}
+                                >
+                                  {isOpen ? (
+                                    <ChevronDown className="h-4 w-4" />
+                                  ) : (
+                                    <ChevronRight className="h-4 w-4" />
+                                  )}
+                                </Button>
+                              </>
+                            )}
+                          </div>
+
+                          {/* Sections dropdown */}
+                          {sections.length > 0 && (
+                            <Collapsible open={isOpen}>
+                              <CollapsibleContent>
+                                <div className="pl-10 pr-2 pb-2 space-y-1">
+                                  {/* Select All + header */}
+                                  <div className="flex items-center gap-2 py-1">
+                                    <Checkbox
+                                      checked={allSectionsSelected}
+                                      // indeterminate is tricky with shadcn, handle manually
+                                      onCheckedChange={() => selectAllSections(chapter.id)}
+                                      className="shrink-0"
+                                    />
+                                    <span
+                                      className="flex-1 text-xs text-muted-foreground cursor-pointer hover:text-foreground"
+                                      onClick={() => selectAllSections(chapter.id)}
+                                    >
+                                      {allSectionsSelected ? 'Bỏ chọn tất cả phần' : 'Chọn tất cả phần'}
+                                    </span>
+                                  </div>
+
+                                  {/* Individual sections */}
+                                  {sections.map((section) => {
+                                    const isSectionSelected = selectedInChapter.has(section.id)
+
+                                    return (
+                                      <div key={section.id}>
+                                        <div className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted/30 transition-colors">
+                                          <Checkbox
+                                            checked={isSectionSelected}
+                                            onCheckedChange={() =>
+                                              toggleSection(chapter.id, section.id)
+                                            }
+                                            className="shrink-0"
+                                          />
+                                          <span
+                                            className={`flex-1 text-xs cursor-pointer ${
+                                              isSectionSelected
+                                                ? 'font-medium'
+                                                : 'text-muted-foreground'
+                                            }`}
+                                            onClick={() =>
+                                              toggleSection(chapter.id, section.id)
+                                            }
+                                          >
+                                            {section.title}
+                                          </span>
+                                        </div>
+
+                                        {/* Subsections */}
+                                        {(() => {
+                                          const subs = getSubsectionsForSection(section.id)
+                                          if (subs.length === 0) return null
+                                          return (
+                                            <div className="pl-10 space-y-0.5">
+                                              {subs.map(sub => (
+                                                <div
+                                                  key={sub.id}
+                                                  className="flex items-center gap-2 rounded px-2 py-1 hover:bg-muted/20 transition-colors text-xs text-muted-foreground"
+                                                >
+                                                  <span className="w-3 h-3 rounded-sm border border-muted-foreground/30 inline-block shrink-0" />
+                                                  <span>{sub.title}</span>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )
+                                        })()}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              </CollapsibleContent>
+                            </Collapsible>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
               </CardContent>
@@ -383,7 +620,7 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
           <AlertDialogHeader>
             <AlertDialogTitle>Xóa tài liệu?</AlertDialogTitle>
             <AlertDialogDescription>
-              Bạn có chắc muốn xóa &quot;{document.original_filename}&quot;? 
+              Bạn có chắc muốn xóa &quot;{document.original_filename}&quot;?
               Tất cả dữ liệu liên quan sẽ bị xóa vĩnh viễn.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -402,14 +639,14 @@ export default function DocumentDetailPage({ params }: { params: Promise<PagePar
   )
 }
 
-function InfoRow({ 
-  icon: Icon, 
-  label, 
-  value 
-}: { 
+function InfoRow({
+  icon: Icon,
+  label,
+  value
+}: {
   icon: React.ElementType
   label: string
-  value: string 
+  value: string
 }) {
   return (
     <div className="flex items-center gap-3">
@@ -420,120 +657,6 @@ function InfoRow({
         <p className="text-sm text-muted-foreground">{label}</p>
         <p className="font-medium truncate">{value}</p>
       </div>
-    </div>
-  )
-}
-
-function ChapterNode({
-  node,
-  children,
-  getChildren,
-  isSelected,
-  onToggle,
-  editingNode,
-  editValue,
-  setEditValue,
-  onEditTitle,
-  onSaveTitle,
-  onCancelEdit,
-}: {
-  node: APICurriculumNode
-  children: APICurriculumNode[]
-  getChildren: (id: string) => APICurriculumNode[]
-  isSelected: boolean
-  onToggle: () => void
-  editingNode: string | null
-  editValue: string
-  setEditValue: (value: string) => void
-  onEditTitle: (id: string, title: string) => void
-  onSaveTitle: (id: string) => void
-  onCancelEdit: () => void
-}) {
-  const [isOpen, setIsOpen] = useState(true)
-  const hasChildren = children.length > 0
-  const isEditing = editingNode === node.id
-
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center gap-2 rounded-lg p-2 hover:bg-muted/50 transition-colors">
-        {hasChildren ? (
-          <Collapsible open={isOpen} onOpenChange={setIsOpen}>
-            <CollapsibleTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-6 w-6">
-                {isOpen ? (
-                  <ChevronDown className="h-4 w-4" />
-                ) : (
-                  <ChevronRight className="h-4 w-4" />
-                )}
-              </Button>
-            </CollapsibleTrigger>
-          </Collapsible>
-        ) : (
-          <div className="w-6" />
-        )}
-
-        {node.level === 1 && (
-          <Checkbox
-            checked={isSelected}
-            onCheckedChange={onToggle}
-            className="shrink-0"
-          />
-        )}
-
-        {isEditing ? (
-          <div className="flex-1 flex items-center gap-2">
-            <Input
-              value={editValue}
-              onChange={(e) => setEditValue(e.target.value)}
-              className="h-8"
-              autoFocus
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') onSaveTitle(node.id)
-                if (e.key === 'Escape') onCancelEdit()
-              }}
-            />
-            <Button size="sm" onClick={() => onSaveTitle(node.id)}>
-              Lưu
-            </Button>
-          </div>
-        ) : (
-          <span
-            className="flex-1 text-sm cursor-pointer hover:text-primary"
-            onClick={() => onEditTitle(node.id, node.title)}
-          >
-            {node.title}
-          </span>
-        )}
-
-        {node.chunk_count !== undefined && (
-          <Badge variant="secondary" className="text-xs">
-            {node.chunk_count} chunks
-          </Badge>
-        )}
-      </div>
-
-      {hasChildren && (
-        <Collapsible open={isOpen}>
-          <CollapsibleContent className="pl-6 space-y-1">
-            {children.map((child) => (
-              <ChapterNode
-                key={child.id}
-                node={child}
-                children={getChildren(child.id)}
-                getChildren={getChildren}
-                isSelected={false}
-                onToggle={() => {}}
-                editingNode={editingNode}
-                editValue={editValue}
-                setEditValue={setEditValue}
-                onEditTitle={onEditTitle}
-                onSaveTitle={onSaveTitle}
-                onCancelEdit={onCancelEdit}
-              />
-            ))}
-          </CollapsibleContent>
-        </Collapsible>
-      )}
     </div>
   )
 }

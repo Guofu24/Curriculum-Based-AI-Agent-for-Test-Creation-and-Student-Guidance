@@ -106,6 +106,7 @@ class RetrievalAgent:
         bloom_targets: list[str] | None = None,
         query_hints: list[str] | None = None,
         trace_id: str = "",
+        scope_sections: list[str] | None = None,
     ) -> RetrievalOutput:
         """Main retrieval method."""
         start_time = time.time()
@@ -176,40 +177,90 @@ class RetrievalAgent:
                 )
             warnings.extend(supplement_warnings)
 
-            # Step 3: Per-chapter rerank — ensures every chapter retains context.
-            # Global rerank would let dominant chapters crowd out others.
+            # Step 3: Rerank — guarantee scope chapters BEFORE token budget cut.
+            #
+            # Bug fix: the old per-chapter rerank grouped ALL chunks (from all 29
+            # chapters in the document), then divided budget equally. With 29 chapters
+            # sharing RAG_TOP_K_AFTER_RERANK=30, scope chapters got ~1 chunk each,
+            # and _enforce_token_budget later cut them entirely when sorting by score.
+            #
+            # Fix: (1) normalize scope_chapter IDs once, (2) separate scope vs
+            # non-scope chunks, (3) guarantee each scope chapter >= MIN_SCOPE_CHUNKS
+            # before the token-budget cut, (4) only fill remaining budget with
+            # non-scope chunks.
             rerank_total = settings.RAG_TOP_K_AFTER_RERANK  # e.g. 30
+            MIN_SCOPE_CHUNKS = 5  # minimum chunks per scope chapter
 
-            # Group chunks by chapter
-            by_chapter: dict[str, list[dict]] = {}
+            # Normalize scope chapter IDs once (handles ch18 → ch18, roman numerals, etc.)
+            scope_ch_ids: set[str] = set()
+            for ch in scope_chapters:
+                nid = normalize_chapter_id(ch)
+                scope_ch_ids.add(nid)
+                scope_ch_ids.add(ch)  # also keep original string
+
+            # Separate scope vs non-scope chunks
+            scope_chunks: list[dict] = []
+            non_scope_chunks: list[dict] = []
+            scope_seen: set[str] = set()  # track chunk_ids to avoid duplicates
+            non_scope_seen: set[str] = set()
+
             for chunk in all_chunks:
-                ch = chunk.get("metadata", {}).get("chapter", "unknown")
-                by_chapter.setdefault(ch, []).append(chunk)
+                ch_raw = chunk.get("metadata", {}).get("chapter", "")
+                ch_id = normalize_chapter_id(ch_raw)
+                # Also check raw chapter string directly
+                is_scope = ch_id in scope_ch_ids or ch_raw in scope_ch_ids
+                chunk_id = chunk.get("chunk_id", "")
+                if is_scope:
+                    if chunk_id not in scope_seen:
+                        scope_seen.add(chunk_id)
+                        scope_chunks.append(chunk)
+                else:
+                    if chunk_id not in non_scope_seen:
+                        non_scope_seen.add(chunk_id)
+                        non_scope_chunks.append(chunk)
 
-            num_chapters = max(len(by_chapter), 1)
-            per_chapter_k = max(rerank_total // num_chapters, 5)  # at least 5 per chapter
+            # Per-scope-chapter rerank: keep top-N per chapter (but at least MIN_SCOPE_CHUNKS)
+            num_scope = max(len(scope_ch_ids), 1)
+            per_scope_k = max(rerank_total // num_scope, MIN_SCOPE_CHUNKS)
 
             logger.info(
-                "Reranking %d chunks across %d chapters (top %d per chapter)",
-                len(all_chunks), num_chapters, per_chapter_k,
+                "Rerank: %d scope chunks across %d scope chapters (top %d each), "
+                "%d non-scope chunks (global pool)",
+                len(scope_chunks), num_scope, per_scope_k, len(non_scope_chunks),
             )
 
-            reranked_all: list[dict] = []
-            query_text = " ".join(expanded_queries)
+            # Group scope chunks by normalized chapter_id
+            scope_by_ch: dict[str, list[dict]] = {}
+            for chunk in scope_chunks:
+                ch_id = normalize_chapter_id(chunk.get("metadata", {}).get("chapter", ""))
+                if ch_id not in scope_by_ch:
+                    scope_by_ch[ch_id] = []
+                scope_by_ch[ch_id].append(chunk)
 
-            for ch, ch_chunks in by_chapter.items():
-                if len(ch_chunks) <= per_chapter_k:
-                    # No need to rerank — keep all
-                    reranked_all.extend(ch_chunks)
+            # Rerank each scope chapter independently
+            query_text = " ".join(expanded_queries)
+            reranked_scope: list[dict] = []
+            for ch_id, ch_chunks in scope_by_ch.items():
+                if len(ch_chunks) <= per_scope_k:
+                    reranked_scope.extend(ch_chunks)
                 else:
                     reranked = await self._rerank_chunks(
                         query=query_text,
                         chunks=ch_chunks,
-                        top_k=per_chapter_k,
+                        top_k=per_scope_k,
                     )
-                    reranked_all.extend(reranked)
+                    reranked_scope.extend(reranked)
 
-            all_chunks = reranked_all
+            # Remaining budget after scope chapters
+            remaining_budget = rerank_total - len(reranked_scope)
+            if remaining_budget > 0 and non_scope_chunks:
+                # Sort non-scope by score, keep top remaining_budget
+                non_scope_sorted = sorted(
+                    non_scope_chunks, key=lambda c: c.get("score", 0), reverse=True
+                )
+                reranked_scope.extend(non_scope_sorted[:remaining_budget])
+
+            all_chunks = reranked_scope
 
             # Enforce token budget cap (Phase 1 guard)
             all_chunks, token_warning = self._enforce_token_budget(
@@ -217,6 +268,33 @@ class RetrievalAgent:
             )
             if token_warning:
                 warnings.append(token_warning)
+
+            # ── Section filter: keep only chunks whose section matches scope_sections ──
+            if scope_sections:
+                import unicodedata
+                def _strip_d(s: str) -> str:
+                    nfd = unicodedata.normalize("NFD", s.strip().lower())
+                    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+                scope_sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
+                if scope_sec_set:
+                    filtered_chunks: list[dict] = []
+                    all_section_titles: set[str] = set()
+                    for chunk in all_chunks:
+                        chunk_sec = (chunk.get("metadata", {}).get("section") or "").strip()
+                        chunk_sec_norm = _strip_d(chunk_sec)
+                        if chunk_sec_norm:
+                            all_section_titles.add(chunk_sec_norm)
+                        if chunk_sec_norm and chunk_sec_norm in scope_sec_set:
+                            filtered_chunks.append(chunk)
+                    logger.info(
+                        "[retrieve] scope_sections=%r → filtered %d chunks (from %d). "
+                        "Chunk sections found: %s",
+                        sorted(scope_sec_set), len(filtered_chunks), len(all_chunks),
+                        sorted(all_section_titles),
+                    )
+                    if filtered_chunks:
+                        all_chunks = filtered_chunks
+                    # If filtering removed everything, warn but keep chunks (fallback)
 
             # Build coverage map
             coverage_map: dict[str, list[str]] = {}
@@ -269,6 +347,114 @@ class RetrievalAgent:
                 execution_time_ms=elapsed_ms,
                 token_usage=TokenUsage(),
                 warnings=warnings,
+                trace_id=trace_id,
+                retrieved_chunks=[],
+                coverage_map={},
+            )
+
+    async def retrieve_textbook(
+        self,
+        textbook_namespace: str,
+        scope_chapters: list[str],
+        bloom_targets: list[str] | None = None,
+        query_hints: list[str] | None = None,
+        trace_id: str = "",
+        scope_sections: list[str] | None = None,
+    ) -> RetrievalOutput:
+        """
+        Retrieval for built-in textbook knowledge (admin-uploaded namespace).
+        Queries Pinecone namespace directly without a document_id.
+        Filters by chapter name (metadata.chapter) and optionally by title (section).
+        """
+        start_time = time.time()
+        metrics = AgentMetrics(trace_id=trace_id)
+        warnings: list[str] = []
+
+        try:
+            expanded_queries = await self._expand_queries(
+                scope_chapters, bloom_targets or [], query_hints or []
+            )
+
+            query_text = " ".join(expanded_queries[:3])
+            embedding = await self.embedder.embed_text(query_text)
+
+            # Build chapter filter: {"chapter": {"$in": [...]}} if chapters specified
+            filter_meta: dict | None = None
+            if scope_chapters:
+                filter_meta = {"chapter": {"$in": scope_chapters}}
+
+            top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(scope_chapters), 3)
+            all_chunks = await self.vector_store.query_textbook_namespace(
+                namespace=textbook_namespace,
+                query_embedding=embedding,
+                top_k=min(top_k, 100),
+                filter_metadata=filter_meta,
+            )
+
+            # Section filter
+            if scope_sections and all_chunks:
+                import unicodedata
+                def _strip_d(s: str) -> str:
+                    nfd = unicodedata.normalize("NFD", s.strip().lower())
+                    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+                sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
+                filtered = [
+                    c for c in all_chunks
+                    if _strip_d(c.get("metadata", {}).get("title") or "") in sec_set
+                    or _strip_d(c.get("metadata", {}).get("section") or "") in sec_set
+                ]
+                if filtered:
+                    all_chunks = filtered
+
+            all_chunks, token_warning = self._enforce_token_budget(
+                all_chunks, max_tokens=settings.MAX_CONTEXT_TOKENS
+            )
+            if token_warning:
+                warnings.append(token_warning)
+
+            coverage_map: dict[str, list[str]] = {}
+            for chunk in all_chunks:
+                ch = chunk.get("metadata", {}).get("chapter", "unknown")
+                coverage_map.setdefault(ch, []).append(chunk["chunk_id"])
+
+            retrieved_chunks = [
+                {
+                    "chunk_id": c["chunk_id"],
+                    "chapter": c["metadata"].get("chapter", ""),
+                    "chapter_id": c["metadata"].get("chapter", ""),  # use chapter name as id
+                    "section": c["metadata"].get("title") or c["metadata"].get("section", ""),
+                    "content": c["metadata"].get("content", ""),
+                    "content_type": c["metadata"].get("content_type", "text"),
+                    "relevance_score": c.get("score", 0.0),
+                    "latex_repr": c["metadata"].get("latex_repr"),
+                }
+                for c in all_chunks
+            ]
+
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            logger.info(
+                "[retrieve_textbook] namespace='%s', chapters=%r, got %d chunks",
+                textbook_namespace, scope_chapters, len(retrieved_chunks),
+            )
+            return RetrievalOutput(
+                status=AgentStatus.SUCCESS if retrieved_chunks else AgentStatus.PARTIAL,
+                agent_name="retrieval",
+                execution_time_ms=elapsed_ms,
+                token_usage=TokenUsage(),
+                warnings=warnings,
+                trace_id=trace_id,
+                retrieved_chunks=retrieved_chunks,
+                coverage_map=coverage_map,
+            )
+
+        except Exception as e:
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            return RetrievalOutput(
+                status=AgentStatus.PARTIAL,
+                agent_name="retrieval",
+                execution_time_ms=elapsed_ms,
+                token_usage=TokenUsage(),
+                warnings=[f"Textbook retrieval failed: {e}"],
                 trace_id=trace_id,
                 retrieved_chunks=[],
                 coverage_map={},
@@ -336,29 +522,47 @@ Trả về JSON:
         G10: Uses asyncio.gather(return_exceptions=True) so 1 chapter failure
         doesn't fail the entire retrieval — logs warning and continues.
         Domain 2B: Each chapter query has a hard 5-second timeout.
+
+        Special case: if chapters=["_all"], skip filter to retrieve from entire doc.
         """
         CHAPTER_TIMEOUT = 30.0  # seconds — needs headroom for embedding + Pinecone query
 
-        async def _query_one_with_timeout(chapter: str) -> tuple[str, list[dict] | Exception]:
+        is_all = len(chapters) == 1 and chapters[0] == "_all"
+
+        async def _query_one_with_timeout(chapter: str, position: int) -> tuple[str, list[dict] | Exception]:
             """Query one chapter with hard timeout."""
             try:
-                result = await asyncio.wait_for(
-                    self._retrieve_for_chapter(
-                        document_id=document_id,
-                        chapter=chapter,
-                        queries=expanded_queries,
+                if is_all:
+                    # _all: query entire document without chapter filter
+                    query_text = " ".join(expanded_queries[:3])
+                    embedding = await self.embedder.embed_text(query_text)
+                    results = await self.vector_store.query_namespace(
+                        doc_id=document_id,
+                        chapter_id="_all",
+                        query_embedding=embedding,
                         top_k=top_k,
                         content_types=content_types,
-                    ),
-                    timeout=CHAPTER_TIMEOUT,
-                )
-                return chapter, result
+                    )
+                    return chapter, results
+                else:
+                    result = await asyncio.wait_for(
+                        self._retrieve_for_chapter(
+                            document_id=document_id,
+                            chapter=chapter,
+                            queries=expanded_queries,
+                            top_k=top_k,
+                            content_types=content_types,
+                            position=position,
+                        ),
+                        timeout=CHAPTER_TIMEOUT,
+                    )
+                    return chapter, result
             except asyncio.TimeoutError:
                 return chapter, TimeoutError(f"Chapter '{chapter}' retrieval timed out after {CHAPTER_TIMEOUT}s")
             except Exception as e:
                 return chapter, e
 
-        tasks = [_query_one_with_timeout(ch) for ch in chapters]
+        tasks = [_query_one_with_timeout(ch, i) for i, ch in enumerate(chapters)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_chunks: list[dict] = []
@@ -425,7 +629,7 @@ Trả về JSON:
             # Use chapter-specific embedding for better relevance
             chapter_query = f"{chapter} {' '.join(expanded_queries[:2])}"
             try:
-                ch_embedding = await self.embedder.embed_text(chapter_query)
+                        ch_embedding = await self.embedder.embed_text(chapter_query)
             except Exception:
                 ch_embedding = embedding  # Fallback to generic embedding
 
@@ -447,7 +651,8 @@ Trả về JSON:
                 else:
                     # 0 results — possibly indexed with a different chapter_id
                     # (e.g. "ch_e" instead of "ch6" due to heading tree renumbering).
-                    fallback_ids = _build_chapter_id_variants(ch_id, scope_chapters.index(chapter))
+                    pos = scope_chapters.index(chapter) if chapter in scope_chapters else 0
+                    fallback_ids = _build_chapter_id_variants(ch_id, pos)
                     logger.info(
                         "[supplement] chapter=%r → 0 results, trying variants: %s",
                         chapter, fallback_ids,
@@ -564,11 +769,14 @@ Trả về JSON:
         queries: list[str],
         top_k: int = 20,
         content_types: list[str] | None = None,
+        position: int = 0,
     ) -> list[dict]:
-        """Retrieve chunks for a specific chapter."""
+        """Retrieve chunks for a specific chapter using Pinecone metadata filter + variants fallback."""
         chapter_chunks = []
 
         chapter_id = normalize_chapter_id(chapter)
+
+        # Check if chapter is in scope_chapters for position lookup
         logger.info(
             "[_retrieve_for_chapter] doc=%s, chapter_input='%s', chapter_id='%s'",
             document_id, chapter, chapter_id,
@@ -585,20 +793,47 @@ Trả về JSON:
             )
             return []
 
-        # Query Pinecone — use query_namespace (doc_id + chapter_id, not document_id + chapter_ids)
+        # ── Primary query with Pinecone chapter_id filter ──
         results = await self.vector_store.query_namespace(
             doc_id=document_id,
             chapter_id=chapter_id,
             query_embedding=embedding,
             top_k=top_k,
             content_types=content_types,
+            filter_metadata={"chapter_id": {"$eq": chapter_id}},
         )
 
-        logger.info(
-            "[_retrieve_for_chapter] doc=%s, chapter_id='%s' → %d results",
-            document_id, chapter_id, len(results),
-        )
-        chapter_chunks.extend(results)
+        if results:
+            logger.info(
+                "[_retrieve_for_chapter] doc=%s, chapter_id='%s' → %d results (filtered)",
+                document_id, chapter_id, len(results),
+            )
+            chapter_chunks.extend(results)
+        else:
+            # ── Fallback: try chapter_id variants (renumbering mismatch) ──
+            variants = _build_chapter_id_variants(chapter_id, position)
+            logger.info(
+                "[_retrieve_for_chapter] chapter_id='%s' → 0 results, trying variants: %s",
+                chapter_id, variants,
+            )
+            for alt_id in variants:
+                if alt_id == chapter_id:
+                    continue
+                alt_results = await self.vector_store.query_namespace(
+                    doc_id=document_id,
+                    chapter_id=alt_id,
+                    query_embedding=embedding,
+                    top_k=top_k,
+                    content_types=content_types,
+                    filter_metadata={"chapter_id": {"$eq": alt_id}},
+                )
+                if alt_results:
+                    logger.info(
+                        "[_retrieve_for_chapter] alt_id='%s' → %d results",
+                        alt_id, len(alt_results),
+                    )
+                    chapter_chunks.extend(alt_results)
+                    break
 
         return chapter_chunks
 

@@ -15,14 +15,21 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Label } from '@/components/ui/label'
 import { FieldGroup, Field, FieldLabel, FieldDescription } from '@/components/ui/field'
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
+import {
   FileText,
   ChevronRight,
+  ChevronDown,
   ChevronLeft,
   Sparkles,
   Check,
   AlertCircle,
   BookOpen,
   Layers,
+  Upload,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -38,13 +45,17 @@ import { GenerationLiveViewer } from '@/components/generation-live-viewer'
 import { cn } from '@/lib/utils'
 
 type ExamType = 'mcq' | 'essay' | 'mixed'
+type ExamMode = 'standard' | 'thpt_2025'
 
 interface GenerationConfig {
   documentId: string
-  scope: string[]
+  selectedSections: Set<string>
+  examMode: ExamMode
   examType: ExamType
   mcqCount: number
   essayCount: number
+  dungSaiCount: number
+  shortAnswerCount: number
   bloomDistribution: Record<BloomLevel, number>
   userPrompt: string
   strictScope: boolean
@@ -53,10 +64,13 @@ interface GenerationConfig {
 
 const defaultConfig: GenerationConfig = {
   documentId: '',
-  scope: [],
+  selectedSections: new Set(),
+  examMode: 'standard',
   examType: 'mixed',
   mcqCount: 10,
   essayCount: 2,
+  dungSaiCount: 0,
+  shortAnswerCount: 0,
   bloomDistribution: {
     nhan_biet: 20,
     thong_hieu: 30,
@@ -68,6 +82,14 @@ const defaultConfig: GenerationConfig = {
   title: '',
 }
 
+const THPT_2025_CONFIG = {
+  mcqCount: 18,
+  dungSaiCount: 4,
+  shortAnswerCount: 6,
+  essayCount: 0,
+  bloomDistribution: { nhan_biet: 40, thong_hieu: 30, van_dung: 20, van_dung_cao: 10 } as Record<BloomLevel, number>,
+}
+
 const BLOOM_LABELS: Record<BloomLevel, string> = {
   nhan_biet: 'Nhận biết',
   thong_hieu: 'Thông hiểu',
@@ -77,10 +99,12 @@ const BLOOM_LABELS: Record<BloomLevel, string> = {
 
 export default function GeneratePage() {
   const router = useRouter()
-  const [step, setStep] = useState(1)
+  const [step, setStep] = useState(0)
   const [config, setConfig] = useState<GenerationConfig>(defaultConfig)
   const [documents, setDocuments] = useState<Document[]>([])
   const [curriculum, setCurriculum] = useState<CurriculumNode[]>([])
+  // Track which chapters have their sections dropdown open
+  const [openChapterIds, setOpenChapterIds] = useState<Set<string>>(new Set())
   const [isLoadingDocs, setIsLoadingDocs] = useState(true)
   const [isLoadingCurriculum, setIsLoadingCurriculum] = useState(false)
   const [examId, setExamId] = useState<string | null>(null)
@@ -91,7 +115,6 @@ export default function GeneratePage() {
     async function fetchDocuments() {
       try {
         const response = await documentsApi.list(1, 100)
-        // Accept both 'completed' (parsing done) and 'indexed' (fully processed with embeddings)
         const completed = response.items.filter(
           doc => doc.processing_status === 'completed' || doc.processing_status === 'indexed'
         )
@@ -114,9 +137,7 @@ export default function GeneratePage() {
       try {
         const nodes = await documentsApi.getCurriculumTree(config.documentId)
         setCurriculum(nodes)
-        // Select all chapters by default
-        const chapters = nodes.filter(n => n.level === 1).map(n => n.title)
-        setConfig(prev => ({ ...prev, scope: chapters }))
+        // NO auto-select — user must choose manually
       } catch (error) {
         console.error('Failed to fetch curriculum:', error)
       } finally {
@@ -126,17 +147,124 @@ export default function GeneratePage() {
     fetchCurriculum()
   }, [config.documentId])
 
-  const handleSelectDocument = (docId: string) => {
-    setConfig(prev => ({ ...prev, documentId: docId, scope: [] }))
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  const chapters = curriculum.filter(n => n.level === 1)
+  const getSectionsForChapter = (chapterId: string) =>
+    curriculum.filter(n => n.level === 2 && n.parent_id === chapterId)
+
+  // Chapters that have at least one section selected
+  const getSelectedChapterIds = (): Set<string> => {
+    const ids = new Set<string>()
+    config.selectedSections.forEach(secId => {
+      const node = curriculum.find(n => n.id === secId)
+      if (node?.parent_id) {
+        ids.add(node.parent_id)
+      }
+    })
+    return ids
   }
 
-  const toggleChapter = (chapter: string) => {
+  // ── Section toggle ────────────────────────────────────────────────────────
+
+  const toggleSection = (sectionId: string) => {
     setConfig(prev => {
-      const newScope = prev.scope.includes(chapter)
-        ? prev.scope.filter(c => c !== chapter)
-        : [...prev.scope, chapter]
-      return { ...prev, scope: newScope }
+      const next = new Set(prev.selectedSections)
+      if (next.has(sectionId)) {
+        next.delete(sectionId)
+      } else {
+        next.add(sectionId)
+      }
+      return { ...prev, selectedSections: next }
     })
+  }
+
+  // ── Select / deselect all sections within a chapter ──────────────────────
+
+  const selectAllSections = (chapterId: string) => {
+    const sections = getSectionsForChapter(chapterId)
+    const allSectionIds = sections.map(s => s.id)
+    const allSelected = allSectionIds.every(id => config.selectedSections.has(id))
+
+    if (allSelected) {
+      // Deselect all sections in this chapter
+      setConfig(prev => {
+        const next = new Set(prev.selectedSections)
+        allSectionIds.forEach(id => next.delete(id))
+        return { ...prev, selectedSections: next }
+      })
+    } else {
+      // Select all sections in this chapter
+      setConfig(prev => {
+        const next = new Set(prev.selectedSections)
+        allSectionIds.forEach(id => next.add(id))
+        return { ...prev, selectedSections: next }
+      })
+    }
+  }
+
+  // ── Open / close sections dropdown ──────────────────────────────────────
+
+  const toggleOpenChapter = (chapterId: string) => {
+    setOpenChapterIds(prev => {
+      const next = new Set(prev)
+      if (next.has(chapterId)) {
+        next.delete(chapterId)
+      } else {
+        next.add(chapterId)
+      }
+      return next
+    })
+  }
+
+  // ── Deselect all ────────────────────────────────────────────────────────
+
+  const handleDeselectAll = () => {
+    setConfig(prev => ({ ...prev, selectedSections: new Set() }))
+    toast.info('Đã bỏ chọn tất cả')
+  }
+
+  // ── Resolve scope for API ─────────────────────────────────────────────────
+
+  const getDisplayScope = (): string[] => {
+    const selectedNodeMap = new Map<string, CurriculumNode>()
+    config.selectedSections.forEach(id => {
+      const node = curriculum.find(n => n.id === id)
+      if (node) selectedNodeMap.set(id, node)
+    })
+
+    // Group by chapter
+    const byChapter = new Map<string, string[]>()
+    selectedNodeMap.forEach((node, id) => {
+      const parentId = node.parent_id ?? ''
+      if (!byChapter.has(parentId)) byChapter.set(parentId, [])
+      byChapter.get(parentId)!.push(node.title)
+    })
+
+    const result: string[] = []
+    byChapter.forEach((sectionTitles, chapterId) => {
+      const chapterNode = chapters.find(c => c.id === chapterId)
+      const chapterTitle = chapterNode?.title ?? chapterId
+      // If all sections of a chapter are selected → use just chapter title
+      const chapterSections = getSectionsForChapter(chapterId)
+      const allSectionsSelected = chapterSections.length > 0 &&
+        chapterSections.every(s => config.selectedSections.has(s.id))
+
+      if (allSectionsSelected) {
+        result.push(chapterTitle)
+      } else {
+        // Only selected sections
+        sectionTitles.forEach(title => {
+          result.push(`${chapterTitle} > ${title}`)
+        })
+      }
+    })
+
+    return result
+  }
+
+  const handleSelectDocument = (docId: string) => {
+    setConfig(prev => ({ ...prev, documentId: docId, selectedSections: new Set() }))
   }
 
   const handleBloomChange = (level: BloomLevel, value: number) => {
@@ -149,22 +277,29 @@ export default function GeneratePage() {
   const bloomSum = Object.values(config.bloomDistribution).reduce((a, b) => a + b, 0)
   const isBloomValid = bloomSum === 100
 
+  const hasAnySelection = config.selectedSections.size > 0
   const canProceedStep1 = config.documentId !== ''
-  const canProceedStep2 = 
-    config.scope.length > 0 &&
-    (config.mcqCount > 0 || config.essayCount > 0) &&
+  const totalQuestions = config.mcqCount + config.essayCount + config.dungSaiCount + config.shortAnswerCount
+  const canProceedStep2 =
+    hasAnySelection &&
+    totalQuestions > 0 &&
     isBloomValid
 
   const handleStartGeneration = async () => {
     if (!canProceedStep2) return
 
+    const displayScope = getDisplayScope()
+
     try {
       const request: ExamGenerationRequest = {
         document_id: config.documentId,
-        scope: config.scope,
+        scope: displayScope,
+        exam_mode: config.examMode,
         exam_type: config.examType,
         mcq_count: config.mcqCount,
         essay_count: config.essayCount,
+        dung_sai_count: config.dungSaiCount,
+        short_answer_count: config.shortAnswerCount,
         bloom_distribution: config.bloomDistribution,
         user_prompt: config.userPrompt || undefined,
         strict_scope_flag: config.strictScope,
@@ -178,8 +313,6 @@ export default function GeneratePage() {
         toast.warning(response.scope_warning)
       }
 
-      // Use websocket_url from API response — backend resolves the correct host/port
-      // so WebSocket connects properly even when backend is on a different port.
       setWsUrl(response.websocket_url || `/ws/exam/${response.exam_id}`)
       setStep(3)
     } catch (error) {
@@ -223,48 +356,104 @@ export default function GeneratePage() {
   }, [router])
 
   const selectedDoc = documents.find(d => d.id === config.documentId)
-  const chapters = curriculum.filter(n => n.level === 1)
+  const selectedChapterIds = getSelectedChapterIds()
+
+  // Count summary
+  const selectedChapterCount = selectedChapterIds.size
+  const selectedSectionCount = config.selectedSections.size
 
   return (
     <>
       <DashboardHeader breadcrumbs={[{ label: 'Tạo đề' }]} />
-      
+
       <main className="flex-1 overflow-auto">
         <div className="container mx-auto p-6 space-y-6">
           {/* Header */}
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">Tạo đề thi mới</h1>
-            <p className="text-muted-foreground">
-              Sinh đề thi tự động từ tài liệu giảng dạy
-            </p>
-          </div>
+          {step > 0 && (
+            <div>
+              <h1 className="text-3xl font-bold tracking-tight">Tạo đề thi mới</h1>
+              <p className="text-muted-foreground">
+                Sinh đề thi tự động từ tài liệu giảng dạy
+              </p>
+            </div>
+          )}
 
           {/* Step Indicator */}
-          <div className="flex items-center gap-2">
-            {[1, 2, 3].map((s) => (
-              <div key={s} className="flex items-center gap-2">
-                <div
-                  className={cn(
-                    "flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium transition-colors",
-                    step >= s
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted text-muted-foreground"
-                  )}
-                >
-                  {step > s ? <Check className="h-4 w-4" /> : s}
+          {step > 0 && (
+            <div className="flex items-center gap-2">
+              {[1, 2, 3].map((s) => (
+                <div key={s} className="flex items-center gap-2">
+                  <div
+                    className={cn(
+                      "flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium transition-colors",
+                      step >= s
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-muted-foreground"
+                    )}
+                  >
+                    {step > s ? <Check className="h-4 w-4" /> : s}
+                  </div>
+                  <span className={cn(
+                    "text-sm hidden sm:inline",
+                    step >= s ? "text-foreground" : "text-muted-foreground"
+                  )}>
+                    {s === 1 && "Chọn tài liệu"}
+                    {s === 2 && "Cấu hình đề"}
+                    {s === 3 && "Tạo đề"}
+                  </span>
+                  {s < 3 && <ChevronRight className="h-4 w-4 text-muted-foreground" />}
                 </div>
-                <span className={cn(
-                  "text-sm hidden sm:inline",
-                  step >= s ? "text-foreground" : "text-muted-foreground"
-                )}>
-                  {s === 1 && "Chọn tài liệu"}
-                  {s === 2 && "Cấu hình đề"}
-                  {s === 3 && "Tạo đề"}
-                </span>
-                {s < 3 && <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+              ))}
+            </div>
+          )}
+
+          {/* Step 0: Choose Source */}
+          {step === 0 && (
+            <div className="grid gap-6 mt-8 max-w-4xl mx-auto">
+              <div className="text-center mb-8">
+                <h1 className="text-3xl font-bold tracking-tight">Chọn nguồn kiến thức</h1>
+                <p className="text-muted-foreground mt-2">
+                  Bạn muốn sinh đề từ tài liệu của mình hay dùng kiến thức sẵn có?
+                </p>
               </div>
-            ))}
-          </div>
+              <div className="grid sm:grid-cols-2 gap-6">
+                <Card
+                  className="cursor-pointer border-2 transition-all hover:border-primary hover:bg-primary/5 h-full"
+                  onClick={() => setStep(1)}
+                >
+                  <CardContent className="pt-8 pb-8 flex flex-col h-full">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 text-primary mb-6">
+                      <Upload className="h-8 w-8" />
+                    </div>
+                    <h3 className="font-semibold text-xl mb-2">Tôi đã có tài liệu</h3>
+                    <p className="text-muted-foreground flex-1">
+                      Upload PDF / DOCX / PPTX và sinh đề từ nội dung do bạn cung cấp.
+                    </p>
+                  </CardContent>
+                </Card>
+
+                <Card
+                  className="cursor-pointer border-2 transition-all hover:border-amber-500 hover:bg-amber-500/5 h-full"
+                  onClick={() => router.push('/dashboard/generate/textbook')}
+                >
+                  <CardContent className="pt-8 pb-8 flex flex-col h-full">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-500 mb-6">
+                      <BookOpen className="h-8 w-8" />
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap mb-2">
+                      <h3 className="font-semibold text-xl">Dùng kiến thức có sẵn</h3>
+                      <Badge variant="outline" className="text-amber-500 border-amber-500/40 bg-amber-500/10 text-xs">
+                        Vật lí 12
+                      </Badge>
+                    </div>
+                    <p className="text-muted-foreground flex-1">
+                      Hệ thống đã có sẵn kiến thức SGK Vật lí 12 — không cần upload tài liệu.
+                    </p>
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
+          )}
 
           {/* Step 1: Select Document */}
           {step === 1 && (
@@ -348,11 +537,22 @@ export default function GeneratePage() {
             <div className="grid gap-6 lg:grid-cols-2">
               {/* Left: Scope Selection */}
               <Card>
-                <CardHeader>
-                  <CardTitle>Phạm vi đề thi</CardTitle>
-                  <CardDescription>
-                    Chọn các chương sẽ được sử dụng
-                  </CardDescription>
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                  <div>
+                    <CardTitle>Phạm vi đề thi</CardTitle>
+                    <CardDescription>
+                      Chọn các phần cần thiết. Mỗi phần thuộc một chương.
+                    </CardDescription>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleDeselectAll}
+                    disabled={!hasAnySelection}
+                    className="text-muted-foreground"
+                  >
+                    Bỏ chọn tất cả
+                  </Button>
                 </CardHeader>
                 <CardContent>
                   {selectedDoc && (
@@ -361,6 +561,13 @@ export default function GeneratePage() {
                       <span className="font-medium truncate">
                         {selectedDoc.original_filename}
                       </span>
+                      {hasAnySelection && (
+                        <Badge variant="secondary" className="ml-auto shrink-0">
+                          {selectedChapterCount > 0 && `${selectedChapterCount} chương`}
+                          {selectedChapterCount > 0 && selectedSectionCount > 0 && ' + '}
+                          {selectedSectionCount > 0 && `${selectedSectionCount} phần`}
+                        </Badge>
+                      )}
                     </div>
                   )}
 
@@ -376,28 +583,154 @@ export default function GeneratePage() {
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      {chapters.map((chapter) => (
-                        <label
-                          key={chapter.id}
-                          className={cn(
-                            "flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors",
-                            config.scope.includes(chapter.title)
-                              ? "border-primary bg-primary/5"
-                              : "hover:bg-muted/50"
-                          )}
-                        >
-                          <Checkbox
-                            checked={config.scope.includes(chapter.title)}
-                            onCheckedChange={() => toggleChapter(chapter.title)}
-                          />
-                          <span className="flex-1 truncate">{chapter.title}</span>
-                          {chapter.chunk_count !== undefined && (
-                            <Badge variant="secondary">
-                              {chapter.chunk_count} chunks
-                            </Badge>
-                          )}
-                        </label>
-                      ))}
+                      {chapters.map((chapter) => {
+                        const sections = getSectionsForChapter(chapter.id)
+                        const isChapterSelected = selectedChapterIds.has(chapter.id)
+                        const isOpen = openChapterIds.has(chapter.id) || isChapterSelected
+                        const selectedInChapter = sections.filter(s =>
+                          config.selectedSections.has(s.id)
+                        )
+                        const allSectionIds = sections.map(s => s.id)
+                        const allSectionsSelected =
+                          sections.length > 0 &&
+                          allSectionIds.every(id => config.selectedSections.has(id))
+                        const someSectionsSelected =
+                          sections.length > 0 &&
+                          allSectionIds.some(id => config.selectedSections.has(id)) &&
+                          !allSectionsSelected
+
+                        return (
+                          <div key={chapter.id} className="space-y-1">
+                            {/* Chapter header (always collapsible, no chapter checkbox) */}
+                            <div
+                              className={cn(
+                                "flex items-center gap-2 rounded-lg border p-3 cursor-pointer transition-colors",
+                                isChapterSelected
+                                  ? "border-primary bg-primary/5"
+                                  : "hover:bg-muted/50"
+                              )}
+                              onClick={() => toggleOpenChapter(chapter.id)}
+                            >
+                              {/* Chapter title */}
+                              <span className="flex-1 text-sm font-medium truncate">
+                                {chapter.title}
+                              </span>
+
+                              {sections.length > 0 && (
+                                <>
+                                  {/* Section count badge */}
+                                  <Badge
+                                    variant={someSectionsSelected ? "default" : "outline"}
+                                    className={cn(
+                                      "text-xs shrink-0",
+                                      allSectionsSelected && "bg-primary text-primary-foreground"
+                                    )}
+                                  >
+                                    {selectedInChapter.length > 0
+                                      ? `${selectedInChapter.length}/${sections.length} phần`
+                                      : `${sections.length} phần`}
+                                  </Badge>
+
+                                  {/* Expand / collapse */}
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-6 w-6 shrink-0"
+                                    onClick={e => {
+                                      e.stopPropagation()
+                                      toggleOpenChapter(chapter.id)
+                                    }}
+                                    title={isOpen ? 'Thu gọn' : 'Mở rộng'}
+                                  >
+                                    {isOpen ? (
+                                      <ChevronDown className="h-4 w-4" />
+                                    ) : (
+                                      <ChevronRight className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                </>
+                              )}
+
+                              {chapter.chunk_count !== undefined && (
+                                <Badge variant="secondary" className="text-xs shrink-0">
+                                  {chapter.chunk_count}
+                                </Badge>
+                              )}
+                            </div>
+
+                            {/* Sections dropdown */}
+                            {sections.length > 0 && (
+                              <Collapsible open={isOpen}>
+                                <CollapsibleContent>
+                                  <div className="pl-10 pr-2 pb-2 space-y-1">
+                                    {/* Select All sections */}
+                                    <div
+                                      className="flex items-center gap-2 py-1 cursor-pointer hover:text-foreground"
+                                      onClick={() => selectAllSections(chapter.id)}
+                                    >
+                                      <Checkbox
+                                        checked={allSectionsSelected}
+                                        onCheckedChange={() => selectAllSections(chapter.id)}
+                                        onClick={e => e.stopPropagation()}
+                                        className="shrink-0"
+                                      />
+                                      <span className="flex-1 text-xs text-muted-foreground hover:text-foreground">
+                                        {allSectionsSelected
+                                          ? 'Bỏ chọn tất cả phần'
+                                          : 'Chọn tất cả phần'}
+                                      </span>
+                                    </div>
+
+                                    {/* Individual sections */}
+                                    {sections.map((section) => {
+                                      const isSectionSelected =
+                                        config.selectedSections.has(section.id)
+
+                                      return (
+                                        <div
+                                          key={section.id}
+                                          className={cn(
+                                            "flex items-center gap-2 rounded-md px-2 py-2 cursor-pointer transition-colors",
+                                            isSectionSelected
+                                              ? "bg-primary/5"
+                                              : "hover:bg-muted/30"
+                                          )}
+                                          onClick={() => toggleSection(section.id)}
+                                        >
+                                          <Checkbox
+                                            checked={isSectionSelected}
+                                            onCheckedChange={() => toggleSection(section.id)}
+                                            onClick={e => e.stopPropagation()}
+                                            className="shrink-0"
+                                          />
+                                          <span
+                                            className={cn(
+                                              "flex-1 text-xs cursor-pointer truncate",
+                                              isSectionSelected
+                                                ? "font-medium"
+                                                : "text-muted-foreground"
+                                            )}
+                                          >
+                                            {section.title}
+                                          </span>
+                                          {section.chunk_count !== undefined && (
+                                            <Badge
+                                              variant="secondary"
+                                              className="text-xs shrink-0"
+                                            >
+                                              {section.chunk_count}
+                                            </Badge>
+                                          )}
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                </CollapsibleContent>
+                              </Collapsible>
+                            )}
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
                 </CardContent>
@@ -424,7 +757,38 @@ export default function GeneratePage() {
                     </Field>
                   </FieldGroup>
 
-                  {/* Exam Type */}
+                  {/* Exam Mode */}
+                  <FieldGroup>
+                    <Field>
+                      <FieldLabel>Chế độ đề thi</FieldLabel>
+                      <RadioGroup
+                        value={config.examMode}
+                        onValueChange={(val) => {
+                          const mode = val as ExamMode
+                          if (mode === 'thpt_2025') {
+                            setConfig(prev => ({ ...prev, examMode: mode, ...THPT_2025_CONFIG }))
+                          } else {
+                            setConfig(prev => ({ ...prev, examMode: mode }))
+                          }
+                        }}
+                        className="flex flex-wrap gap-4"
+                      >
+                        <div className="flex items-center gap-2">
+                          <RadioGroupItem value="standard" id="mode-standard" />
+                          <Label htmlFor="mode-standard">Tuỳ chỉnh</Label>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <RadioGroupItem value="thpt_2025" id="mode-thpt" />
+                          <Label htmlFor="mode-thpt" className="font-medium text-amber-400">
+                            Chuẩn THPT 2025 (18 TN + 4 Đúng-Sai + 6 Ngắn)
+                          </Label>
+                        </div>
+                      </RadioGroup>
+                    </Field>
+                  </FieldGroup>
+
+                  {/* Exam Type (standard mode only) */}
+                  {config.examMode === 'standard' && (
                   <FieldGroup>
                     <Field>
                       <FieldLabel>Loại đề thi</FieldLabel>
@@ -448,24 +812,38 @@ export default function GeneratePage() {
                       </RadioGroup>
                     </Field>
                   </FieldGroup>
+                  )}
 
                   {/* Question Counts */}
                   <div className="grid gap-4 sm:grid-cols-2">
-                    {(config.examType === 'mcq' || config.examType === 'mixed') && (
+                    {(config.examMode === 'thpt_2025' || config.examType === 'mcq' || config.examType === 'mixed') && (
                       <Field>
-                        <FieldLabel>Số câu trắc nghiệm</FieldLabel>
+                        <FieldLabel>Trắc nghiệm (MCQ)</FieldLabel>
                         <Input
                           type="number"
-                          min={1}
+                          min={0}
                           max={50}
                           value={config.mcqCount}
+                          disabled={config.examMode === 'thpt_2025'}
                           onChange={(e) => setConfig(prev => ({ ...prev, mcqCount: parseInt(e.target.value) || 0 }))}
                         />
                       </Field>
                     )}
-                    {(config.examType === 'essay' || config.examType === 'mixed') && (
+                    {config.examMode === 'thpt_2025' && (
                       <Field>
-                        <FieldLabel>Số câu tự luận</FieldLabel>
+                        <FieldLabel>Đúng-Sai (THPT)</FieldLabel>
+                        <Input type="number" value={config.dungSaiCount} disabled />
+                      </Field>
+                    )}
+                    {config.examMode === 'thpt_2025' && (
+                      <Field>
+                        <FieldLabel>Trả lời ngắn</FieldLabel>
+                        <Input type="number" value={config.shortAnswerCount} disabled />
+                      </Field>
+                    )}
+                    {(config.examMode === 'standard' && (config.examType === 'essay' || config.examType === 'mixed')) && (
+                      <Field>
+                        <FieldLabel>Tự luận</FieldLabel>
                         <Input
                           type="number"
                           min={0}
@@ -513,7 +891,7 @@ export default function GeneratePage() {
                     <Checkbox
                       id="strictScope"
                       checked={config.strictScope}
-                      onCheckedChange={(checked) => 
+                      onCheckedChange={(checked) =>
                         setConfig(prev => ({ ...prev, strictScope: !!checked }))
                       }
                     />

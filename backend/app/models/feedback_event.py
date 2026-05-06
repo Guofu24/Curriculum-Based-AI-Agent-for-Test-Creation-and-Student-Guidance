@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional, TYPE_CHECKING
 from enum import Enum
 
-from sqlalchemy import String, ForeignKey, DateTime, func, Text, Enum as SQLEnum
+from sqlalchemy import String, ForeignKey, DateTime, func, Text, Enum as SQLEnum, Boolean
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -91,7 +91,7 @@ class FeedbackEvent(Base):
         String(20), nullable=True, index=True
     )
     reviewed_by_human: Mapped[bool] = mapped_column(
-        String(5), default="false", nullable=False
+        Boolean, default=False, nullable=False
     )
 
     # Error categorization

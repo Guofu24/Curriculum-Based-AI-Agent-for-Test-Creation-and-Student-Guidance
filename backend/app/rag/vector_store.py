@@ -145,9 +145,11 @@ class VectorStore:
                         )
                         raise
 
+        import asyncio
+        loop = asyncio.get_running_loop()
         for i in range(0, len(records), 100):
             batch = records[i:i + 100]
-            _upsert_batch(batch, namespace)
+            await loop.run_in_executor(None, _upsert_batch, batch, namespace)
 
     async def count_chunks_in_scope(
         self,
@@ -268,6 +270,54 @@ class VectorStore:
                 "[query_namespace] FAILED doc=%s, chapter=%s, namespace='%s': %s",
                 doc_id, chapter_id, namespace, e,
             )
+            return []
+
+    async def query_textbook_namespace(
+        self,
+        namespace: str,
+        query_embedding: list[float],
+        top_k: int = 40,
+        filter_metadata: dict | None = None,
+    ) -> list[dict]:
+        """
+        Query a raw textbook namespace (admin-uploaded) directly.
+        No doc_id required — namespace is provided as-is (already ASCII-safe).
+        """
+        try:
+            index = await self._get_index()
+        except RuntimeError as e:
+            logger.warning("[query_textbook_namespace] Pinecone unavailable: %s", e)
+            return []
+
+        import numpy as np
+        query_embedding = np.nan_to_num(query_embedding, nan=0.0, posinf=1.0, neginf=-1.0).tolist()
+
+        try:
+            query_kwargs: dict = dict(
+                vector=query_embedding,
+                top_k=top_k,
+                namespace=namespace,
+                include_metadata=True,
+            )
+            if filter_metadata:
+                query_kwargs["filter"] = filter_metadata
+            result = index.query(**query_kwargs)
+
+            results = [
+                {
+                    "chunk_id": m["id"],
+                    "score": m["score"],
+                    "metadata": m.get("metadata", {}),
+                }
+                for m in result.get("matches", [])
+            ]
+            logger.info(
+                "[query_textbook_namespace] namespace='%s', top_k=%d, results=%d",
+                namespace, top_k, len(results),
+            )
+            return results
+        except Exception as e:
+            logger.warning("[query_textbook_namespace] FAILED namespace='%s': %s", namespace, e)
             return []
 
     async def delete_document_vectors(

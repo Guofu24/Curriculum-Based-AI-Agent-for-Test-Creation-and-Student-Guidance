@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from backend.app.rag.structure import infer_heading_levels, detect_heading_tree; print\\('OK'\\)\")",
+      "Bash(python -c \"from app.rag.structure import infer_heading_levels, detect_heading_tree; print\\('OK'\\)\")",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

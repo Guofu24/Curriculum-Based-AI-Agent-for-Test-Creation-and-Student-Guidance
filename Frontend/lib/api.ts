@@ -274,8 +274,14 @@ export const documentsApi = {
 
 // ============ EXAMS API ============
 export type BloomLevel = 'nhan_biet' | 'thong_hieu' | 'van_dung' | 'van_dung_cao'
-export type QuestionType = 'mcq' | 'essay'
+export type QuestionType = 'mcq' | 'essay' | 'dung_sai' | 'short_answer'
 export type ExamStatus = 'draft' | 'ready_for_review' | 'regenerating' | 'published'
+
+export interface DungSaiProposition {
+  label: string
+  text: string
+  is_correct: boolean
+}
 
 export interface Question {
   id: string
@@ -284,7 +290,10 @@ export interface Question {
   type?: string
   content: string
   options?: Array<{ label: string; text: string }>
+  propositions?: DungSaiProposition[]
   correct_answer?: string
+  unit?: string
+  solution?: string
   rubric?: Record<string, unknown>
   explanation?: string
   bloom_level?: BloomLevel | string
@@ -364,11 +373,16 @@ export interface ExamListResponse {
 }
 
 export interface ExamGenerationRequest {
-  document_id: string
+  document_id?: string | null
+  use_builtin_knowledge?: boolean
+  knowledge_namespace?: string | null  // Pinecone namespace for admin-uploaded textbook
   scope: string[]
   exam_type?: 'mcq' | 'essay' | 'mixed'
+  exam_mode?: 'standard' | 'thpt_2025'
   mcq_count?: number
   essay_count?: number
+  dung_sai_count?: number
+  short_answer_count?: number
   bloom_distribution?: Record<BloomLevel, number>
   user_prompt?: string
   extra_instructions?: string
@@ -509,11 +523,24 @@ export const examsApi = {
       body: JSON.stringify(data),
     })
   },
-  
+
+  partialRegenerate: async (
+    examId: string,
+    data: { question_id: string; prompt?: string }
+  ): Promise<{ question: Question; question_id: string }> => {
+    return apiFetch<{ question: Question; question_id: string }>(
+      `/exams/${examId}/partial-regenerate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }
+    )
+  },
+
   getReviewData: async (examId: string): Promise<{ blueprint: BlueprintSlot[]; questions: Question[] }> => {
     return apiFetch(`/exams/${examId}/review-data`)
   },
-  
+
   exportPdf: async (examId: string, includeAnswers = true): Promise<Blob> => {
     const token = getToken()
     const response = await fetch(
@@ -525,7 +552,7 @@ export const examsApi = {
     if (!response.ok) throw new Error('Export PDF thất bại')
     return response.blob()
   },
-  
+
   exportDocx: async (examId: string, includeAnswers = true): Promise<Blob> => {
     const token = getToken()
     const response = await fetch(
@@ -537,7 +564,7 @@ export const examsApi = {
     if (!response.ok) throw new Error('Export DOCX thất bại')
     return response.blob()
   },
-  
+
   getQualitySummary: async (): Promise<QualitySummary> => {
     return apiFetch<QualitySummary>('/exams/quality-summary')
   },
@@ -611,6 +638,48 @@ export const generateApi = {
       method: 'POST',
       body: JSON.stringify(request),
     })
+  },
+}
+
+// ============ ADMIN API ============
+export const adminApi = {
+  getUsers: async (page = 1, limit = 20): Promise<{ items: UserResponse[]; total: number }> => {
+    return apiFetch<{ items: UserResponse[]; total: number }>(`/admin/users?page=${page}&limit=${limit}`)
+  },
+
+  getNamespaces: async (): Promise<string[]> => {
+    const res = await apiFetch<{ namespaces: string[] }>('/admin/knowledge/namespaces')
+    return res.namespaces
+  },
+
+  getChapters: async (namespace: string): Promise<string[]> => {
+    const res = await apiFetch<{ namespace: string; chapters: string[] }>(`/admin/knowledge/chapters?namespace=${encodeURIComponent(namespace)}`)
+    return res.chapters
+  },
+
+  getOutline: async (namespace: string): Promise<{ chapter: string; sections: string[] }[]> => {
+    const res = await apiFetch<{ namespace: string; outline: { chapter: string; sections: string[] }[] }>(`/admin/knowledge/outline?namespace=${encodeURIComponent(namespace)}`)
+    return res.outline
+  },
+
+  uploadKnowledge: async (namespace: string, file: File): Promise<{ message: string; items_saved: number; chunks_embedded: number }> => {
+    const token = getToken()
+    const formData = new FormData()
+    formData.append('namespace', namespace)
+    formData.append('file', file)
+
+    const response = await fetch(`${API_BASE_URL}/admin/knowledge/textbook`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    })
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Upload thất bại' }))
+      throw new Error(error.detail || 'Upload thất bại')
+    }
+
+    return response.json()
   },
 }
 

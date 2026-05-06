@@ -392,7 +392,10 @@ def _parse_pdf_gemini(
 
     for chunk_idx, start in enumerate(range(0, total_pages, CHUNK_SIZE)):
         end = min(start + CHUNK_SIZE, total_pages)
-        chunk_path = f"/tmp/gemini_chunk_doc_{chunk_idx}_{start}_{end}.pdf"
+        import tempfile
+        chunk_path = tempfile.NamedTemporaryFile(
+            suffix=".pdf", prefix="gemini_chunk_doc_", delete=False
+        ).name
 
         sub = fitz.open()
         sub.insert_pdf(doc, from_page=start, to_page=end - 1)

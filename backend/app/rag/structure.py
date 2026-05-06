@@ -6,6 +6,38 @@ from typing import Any
 
 logger = __import__("logging").getLogger("rag.structure")
 
+# ── Heading style classification ──────────────────────────────────────────────
+# Unambiguous chapter keywords (Chương, Chapter, Module, Unit)
+_RE_KEYWORD_CH = re.compile(
+    r"^(chuong|chapter|module|unit)\s+\d+",
+    re.IGNORECASE,
+)
+# Ambiguous keywords that are chapters in some docs, sections in others
+_RE_WEAK_KW = re.compile(
+    r"^(bai|phan|part)\s+\d+",
+    re.IGNORECASE,
+)
+# Uppercase-only Roman numeral prefix: I., II., ... — IGNORECASE intentionally omitted
+# so that lowercase "ii. $formula$" is NOT matched.
+_RE_ROMAN_PREFIX = re.compile(r"^[IVXLCDM]{1,6}\.\s")
+_RE_LETTER_PREFIX = re.compile(r"^[A-Z]\.\s+\S")
+_RE_DECIMAL = re.compile(r"^\d+\.\d+")
+_RE_NUMBER_DOT = re.compile(r"^\d+\.\s+\S")
+_RE_GARBAGE_SECTION = re.compile(
+    r"^(bai\s*tap|huong\s*dan|dap\s*so|dap\s*an|phu\s*luc|muc\s*luc|"
+    r"loi\s*noi\s*dau|loi\s*mo\s*dau|tai\s*lieu\s*tham\s*khao)",
+    re.IGNORECASE,
+)
+
+_STYLE_KEYWORD_CH = "KEYWORD_CHAPTER"   # Chương N, Chapter N, Module N
+_STYLE_LETTER_CH  = "LETTER_CHAPTER"    # A., B., C., ... (uppercase only)
+_STYLE_ROMAN_CH   = "ROMAN_CHAPTER"     # I., II., III., ... (uppercase only)
+_STYLE_WEAK_CH    = "WEAK_CHAPTER"      # ALL CAPS, 1. TITLE, Bài N, Phần N
+_STYLE_SEC_D2     = "SECTION_D2"
+_STYLE_SEC_D3     = "SECTION_D3"
+_STYLE_GARBAGE    = "GARBAGE"
+_STYLE_UNKNOWN    = "UNKNOWN"
+
 
 @dataclass
 class SubsectionNode:
@@ -43,6 +75,55 @@ def _is_heading_chapter_level(title: str) -> bool:
         re.match(r"^[ivxldcm]+\.\s", ascii_title) or
         re.match(r"^[a-z]\.\s", ascii_title)
     )
+
+
+def extract_headings_with_context(
+    markdown: str,
+    context_chars: int = 150,
+) -> list[dict]:
+    """
+    Extract all # headings from markdown, each paired with the content
+    preview that immediately follows it (up to context_chars characters).
+
+    Returns a list of dicts:
+      {
+        "level": int,           # 1-4 (number of #)
+        "heading": str,         # full heading text
+        "context": str,         # content preview after heading
+        "line_number": int,     # 0-based line index in markdown
+      }
+    """
+    lines = markdown.split("\n")
+    result: list[dict] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        m = re.match(r"^(#{1,4})\s+(.+)$", line)
+        if m and len(m.group(2).strip()) > 1:
+            level = len(m.group(1))
+            heading_text = m.group(2).strip()
+            # Collect content lines until next heading or 3 non-empty lines
+            content_parts: list[str] = []
+            non_empty_count = 0
+            j = i + 1
+            while j < len(lines) and non_empty_count < 3:
+                next_line = lines[j].strip()
+                next_m = re.match(r"^#{1,4}\s+", next_line)
+                if next_m:
+                    break
+                if next_line:
+                    content_parts.append(next_line)
+                    non_empty_count += 1
+                j += 1
+            context = " ".join(content_parts)[:context_chars].strip()
+            result.append({
+                "level": level,
+                "heading": heading_text,
+                "context": context,
+                "line_number": i,
+            })
+        i += 1
+    return result
 
 
 def _is_likely_heading(line: str, line_index: int, total_lines: int) -> int:
@@ -189,6 +270,122 @@ def _build_tree_from_nodes(
     }
 
 
+def _heading_style(title: str) -> str:
+    """Classify a heading title into a style bucket for hierarchy inference."""
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", title.strip())
+    norm = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+    norm_lower = norm.lower()
+
+    # GARBAGE first — catches "BÀI TẬP" before "BÀI N" keyword check
+    if _RE_GARBAGE_SECTION.match(norm_lower):
+        return _STYLE_GARBAGE
+
+    if _RE_KEYWORD_CH.match(norm_lower):
+        return _STYLE_KEYWORD_CH
+
+    # Single-letter prefix (A., B., C., D. ...) checked BEFORE Roman so that
+    # C./D./L./M. are not misidentified as Roman numerals C=100/D=500.
+    if _RE_LETTER_PREFIX.match(norm):
+        return _STYLE_LETTER_CH
+
+    # Multi-char Romans (II., III., IV., ...) won't match LETTER_PREFIX above.
+    if _RE_ROMAN_PREFIX.match(norm):
+        return _STYLE_ROMAN_CH
+
+    # Ambiguous keywords: Bài N, Phần N, Part N
+    if _RE_WEAK_KW.match(norm_lower):
+        return _STYLE_WEAK_CH
+
+    # Decimal section: 1.1, 2.3.4
+    if _RE_DECIMAL.match(norm):
+        depth = len(norm.split()[0].split("."))
+        return _STYLE_SEC_D3 if depth >= 3 else _STYLE_SEC_D2
+
+    # ALL CAPS short title
+    if title.strip().isupper() and 3 <= len(title.strip()) <= 80:
+        return _STYLE_WEAK_CH
+
+    # Numbered chapter: "1. TITLE"
+    if _RE_NUMBER_DOT.match(norm):
+        return _STYLE_WEAK_CH
+
+    return _STYLE_UNKNOWN
+
+
+def infer_heading_levels(headings: list[dict]) -> list[dict]:
+    """
+    Normalize heading levels using whole-document context.
+
+    Input: list of dicts with at least {"level": int, "heading": str}
+           (same format as extract_headings_with_context output).
+
+    Returns a new list with corrected "level" values (1=chapter, 2=section,
+    3=subsection) based on global title-pattern distribution, not individual
+    heading markdown depth.
+
+    O(n) time. No LLM.
+
+    Algorithm:
+      1. Classify each heading into style bucket.
+      2. Find anchor markdown level (the depth at which chapter-style headings
+         appear in THIS document — Gemini sometimes dumps all at ##).
+      3. Map each heading to a true structural level based on style + anchor.
+    """
+    if not headings:
+        return headings
+
+    classified = [(h, _heading_style(h["heading"])) for h in headings]
+    styles = {s for _, s in classified}
+
+    _ch_styles = {_STYLE_KEYWORD_CH, _STYLE_LETTER_CH, _STYLE_ROMAN_CH}
+    has_any_ch = bool(styles & _ch_styles)
+    has_weak   = _STYLE_WEAK_CH in styles
+    has_letter = _STYLE_LETTER_CH in styles
+
+    if not has_any_ch and not has_weak:
+        return headings  # no chapter signals — trust original markdown levels
+
+    # Anchor: shallowest markdown level where a chapter-style heading lives.
+    # Fixes Gemini outputs where all headings land at the same ## depth.
+    if has_any_ch:
+        anchor = min(h["level"] for h, s in classified if s in _ch_styles)
+    else:
+        anchor = min(h["level"] for h, s in classified if s == _STYLE_WEAK_CH)
+
+    result: list[dict] = []
+    for h, style in classified:
+        new_h = dict(h)
+
+        if style in {_STYLE_KEYWORD_CH, _STYLE_LETTER_CH}:
+            new_h["level"] = 1
+
+        elif style == _STYLE_ROMAN_CH:
+            # When letter-prefix chapters (A., B., C.) exist, Romans are typically
+            # sections under them. When no letters exist, Romans are top-level chapters.
+            new_h["level"] = 2 if has_letter else 1
+
+        elif style == _STYLE_WEAK_CH:
+            new_h["level"] = 1 if not has_any_ch else 2
+
+        elif style in (_STYLE_SEC_D2, _STYLE_GARBAGE):
+            new_h["level"] = 2
+
+        elif style == _STYLE_SEC_D3:
+            new_h["level"] = 3
+
+        else:  # UNKNOWN — use relative markdown depth against chapter anchor
+            rel = h["level"] - anchor + 1
+            computed = max(1, rel)
+            if has_any_ch and computed == 1:
+                computed = 2
+            new_h["level"] = min(computed, 3)
+
+        result.append(new_h)
+
+    return result
+
+
 def detect_heading_tree(markdown: str) -> dict:
     """
     Parse markdown heading tags (#, ##, ###) into a nested heading tree.
@@ -215,7 +412,17 @@ def detect_heading_tree(markdown: str) -> dict:
     chapter_counter = 0
     found_any_heading = False
 
-    for line in lines:
+    # Pre-pass: globally normalize heading levels across the whole document
+    _raw: list[dict] = [
+        {"level": len(m.group(1)), "heading": m.group(2).strip(), "context": "", "line_number": i}
+        for i, ln in enumerate(lines)
+        if (m := re.match(r"^(#{1,3})\s+(.+)$", ln.strip()))
+    ]
+    _level_map: dict[int, int] = {
+        h["line_number"]: h["level"] for h in infer_heading_levels(_raw)
+    }
+
+    for line_idx, line in enumerate(lines):
         line = line.strip()
         if not line:
             continue
@@ -225,14 +432,8 @@ def detect_heading_tree(markdown: str) -> dict:
             continue
 
         found_any_heading = True
-        level = len(heading_match.group(1))
+        level = _level_map.get(line_idx, len(heading_match.group(1)))
         title = heading_match.group(2).strip()
-
-        # Roman numeral or letter-prefixed headings are ALWAYS chapter-level (level 1)
-        # regardless of their # depth, so they become top-level chapters in the tree.
-        # e.g. "## II. LƯỠNG CHẤT PHẲNG" → chapter "II. LƯỠNG..." with chapter_id=ch5
-        if level >= 2 and _is_heading_chapter_level(title):
-            level = 1
 
         if level == 1:
             chapter_counter += 1
@@ -326,48 +527,244 @@ def detect_heading_tree(markdown: str) -> dict:
     }
 
 
+def _sanitize_json_backslashes(s: str) -> str:
+    """Double bare backslashes inside JSON strings so json.loads doesn't fail on LaTeX."""
+    result: list[str] = []
+    in_string = False
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if in_string:
+            if c == "\\":
+                nc = s[i + 1] if i + 1 < len(s) else ""
+                if nc in '"\\/ bfnrtu':
+                    result.append(c)
+                    result.append(nc)
+                    i += 2
+                else:
+                    result.append("\\\\")
+                    i += 1
+            elif c == '"':
+                in_string = False
+                result.append(c)
+                i += 1
+            else:
+                result.append(c)
+                i += 1
+        else:
+            if c == '"':
+                in_string = True
+            result.append(c)
+            i += 1
+    return "".join(result)
+
+
+def _extract_partial_json(text: str) -> dict:
+    """
+    Recover partial JSON when the LLM response is truncated mid-string.
+    Walks backwards from the end to find the last position where we can
+    close the JSON structure cleanly, then appends the missing brackets.
+    Returns {"chapters": []} on total failure.
+    """
+    import json
+
+    # Try truncating at each '}' from the end
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] == "}":
+            candidate = text[: i + 1]
+            # Count unclosed brackets to determine what to append
+            opens = candidate.count("{") - candidate.count("}")
+            arr_opens = candidate.count("[") - candidate.count("]")
+            suffix = "]" * max(arr_opens, 0) + "}" * max(opens, 0)
+            try:
+                return json.loads(candidate + suffix)
+            except json.JSONDecodeError:
+                continue
+    return {"chapters": []}
+
+
+async def detect_heading_tree_gemini_pdf(
+    pdf_bytes: bytes,
+    markdown: str,
+) -> dict:
+    """
+    Primary heading detector: sends the full PDF to Gemini 2.5 Flash (vision).
+
+    Advantages over LLM-text approach:
+    - Reads visual structure (font size, bold, layout) of scanned PDFs
+    - Not limited to headings the OCR parser happened to extract
+    - One API call for the whole document
+
+    Prompt rules:
+    - Only chapters with real academic content (theory/concepts)
+    - Skip: bare exercise labels (Bài X.), answer sections, school names
+    - Max 20 chapters, 10 sections each
+
+    Falls back to detect_heading_tree_llm on any failure.
+    """
+    try:
+        from app.rag.embedder import _get_gemini_client, settings as _emb_settings
+        import json as _json
+
+        keys = _emb_settings.GEMINI_EMBED_KEYS
+        if not keys:
+            logger.warning("[gemini_pdf] No GEMINI_KEYS available, falling back")
+            return await detect_heading_tree_llm(markdown)
+
+        key = keys[0]
+        client = _get_gemini_client(key)
+
+        prompt = (
+            "Phân tích cấu trúc chương mục của tài liệu PDF này (có thể là scan).\n\n"
+            "CHỈ trả về CHƯƠNG và MỤC có nội dung LÝ THUYẾT / KHÁI NIỆM thực sự.\n\n"
+            "QUY TẮC BỎ QUA (không đưa vào JSON):\n"
+            "- 'Bài 1.', 'Bài 2.', ... và mọi đề bài bài tập dạng 'Bài X. Cho một vật...'\n"
+            "- Phần đáp số / hướng dẫn: 'ĐÁP SỐ', 'HƯỚNG DẪN', 'ĐÁP ÁN', 'Lời giải'\n"
+            "- Tên trường, tên giáo viên, mục lục, lời nói đầu\n"
+            "- Heading chỉ có số thứ tự, không có tiêu đề học thuật\n\n"
+            "CHƯƠNG = tiêu đề lớn phân chia nội dung chính "
+            "(ví dụ: 'I. TĨNH ĐIỆN', 'Chương 1: Cơ học', 'A. Quang hình học')\n"
+            "MỤC = sub-topic lý thuyết trong chương "
+            "(ví dụ: '1. Điện trường', '2.1 Định luật Coulomb')\n\n"
+            "Giới hạn: tối đa 20 chương, mỗi chương tối đa 10 mục.\n\n"
+            "Trả về JSON thuần (KHÔNG markdown, KHÔNG giải thích):\n"
+            '{"chapters": [{"title": "Tên chương", '
+            '"sections": [{"title": "Tên mục"}]}]}'
+        )
+
+        import asyncio
+        loop = asyncio.get_running_loop()
+        from concurrent.futures import ThreadPoolExecutor
+        _pdf_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gemini_pdf")
+
+        def _call_gemini():
+            from google.genai import types as _gtypes
+            return client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    _gtypes.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+                    prompt,
+                ],
+            )
+
+        logger.info("[gemini_pdf] Sending %.1f KB PDF to Gemini 2.5 Flash for heading detection",
+                    len(pdf_bytes) / 1024)
+        response = await asyncio.wait_for(
+            loop.run_in_executor(_pdf_executor, _call_gemini),
+            timeout=150,  # 2.5 min max
+        )
+
+        text = response.text.strip()
+        # Clean markdown code fences if present
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        text = _sanitize_json_backslashes(text.strip())
+
+        try:
+            result = _json.loads(text)
+        except _json.JSONDecodeError:
+            result = _extract_partial_json(text)
+
+        if isinstance(result, list):
+            result = {"chapters": result}
+
+        chapters = result.get("chapters", [])
+        if not chapters:
+            logger.warning("[gemini_pdf] Returned empty chapters, falling back to LLM")
+            return await detect_heading_tree_llm(markdown)
+
+        # Normalize IDs
+        for i, ch in enumerate(chapters, 1):
+            if not isinstance(ch, dict):
+                continue
+            ch["chapter_id"] = f"ch{i}"
+            ch.setdefault("title", f"Chapter {i}")
+            ch.setdefault("sections", [])
+            secs = []
+            for j, sec in enumerate(ch.get("sections", []), 1):
+                if isinstance(sec, str):
+                    sec = {"title": sec}
+                if isinstance(sec, dict):
+                    sec["section_id"] = f"ch{i}_sec{j}"
+                    sec.setdefault("title", f"Section {j}")
+                    sec.setdefault("subsections", [])
+                    secs.append(sec)
+            ch["sections"] = secs
+
+        logger.info(
+            "[gemini_pdf] Detected %d chapters via Gemini PDF vision",
+            len([c for c in chapters if isinstance(c, dict)]),
+        )
+        return {"chapters": [c for c in chapters if isinstance(c, dict) and c.get("chapter_id")]}
+
+    except asyncio.TimeoutError:
+        logger.warning("[gemini_pdf] Timeout (150s), falling back to LLM")
+        return await detect_heading_tree_llm(markdown)
+    except Exception as e:
+        logger.warning("[gemini_pdf] Failed: %s — falling back to LLM", e)
+        return await detect_heading_tree_llm(markdown)
+
+
 async def detect_heading_tree_llm(markdown: str) -> dict:
     """
     LLM-based heading tree detection.
 
-    1. Extract all # headings from markdown
-    2. Send heading list to LLM to identify REAL chapters/sections
+    1. Extract all # headings from markdown with content preview (1-3 lines after)
+    2. Send heading + context to LLM to identify REAL chapters/sections
     3. LLM filters garbage (school names, TOC, answer keys)
     4. Returns clean heading tree
+    5. Post-processing: rule-based clean + LLM consolidation if > 12 chapters
 
     Falls back to heuristic detect_heading_tree on failure.
     """
-    heading_lines: list[str] = []
-    for line in markdown.split("\n"):
-        line_s = line.strip()
-        m = re.match(r"^(#{1,4})\s+(.+)$", line_s)
-        if m and len(m.group(2).strip()) > 1:
-            heading_lines.append(line_s)
+    headings = extract_headings_with_context(markdown, context_chars=250)
 
-    if not heading_lines:
+    if not headings:
         logger.info("[detect_heading_tree_llm] No headings found, falling back to heuristic")
         return detect_heading_tree(markdown)
 
-    heading_text = "\n".join(heading_lines)
+    # Present headings as a numbered list WITHOUT markdown # levels.
+    # The # depth from Gemini is unreliable — the LLM must classify purely
+    # from title text and content preview, not from heading depth.
+    heading_blocks: list[str] = []
+    for i, h in enumerate(headings, 1):
+        if h["context"]:
+            heading_blocks.append(f"[{i}] {h['heading']}\n    Nội dung: {h['context']}")
+        else:
+            heading_blocks.append(f"[{i}] {h['heading']}\n    <không có nội dung>")
+
+    heading_text = "\n".join(heading_blocks)
 
     prompt = (
-        "Ban la chuyen gia phan tich cau truc sach giao khoa.\n\n"
-        "Danh sach TAT CA heading tu tai lieu:\n\n"
+        "Bạn là chuyên gia phân tích cấu trúc tài liệu giáo dục Việt Nam.\n\n"
+        "Dưới đây là danh sách heading theo thứ tự xuất hiện, kèm nội dung ngay sau:\n\n"
         "---\n"
         f"{heading_text}\n"
         "---\n\n"
-        "NHIEM VU: To chuc lai thanh CHUONG (chapter) va BAI/MUC (section) THAT SU.\n\n"
-        "QUY TAC:\n"
-        "1. CHI giu heading mang NOI DUNG HOC THUAT (chuong, bai, kien thuc)\n"
-        "2. LOAI BO: ten truong, muc luc, loi noi dau, dap an, huong dan giai, phu luc, tai lieu tham khao\n"
-        "3. BAI TAP cua chuong -> merge vao chuong do (thanh section), KHONG tach chapter rieng\n"
-        "4. Title chapter phai mo ta noi dung (vd: 'Dong hoc chat diem'), KHONG dung 'Phan I' hay 'Chuong 1'\n"
-        "5. Sections = bai hoc/chu de CON that su\n"
-        "6. Neu co 'Phan I', 'Phan II' la grouping lon -> dung muc con ben trong lam chapters\n"
-        "7. Toi da 15 chapters, moi chapter toi da 10 sections\n\n"
-        "TRA VE JSON THUAN (KHONG markdown code block):\n"
-        '{"chapters": [{"chapter_id": "ch1", "title": "Ten chuong", '
-        '"sections": [{"section_id": "ch1_sec1", "title": "Ten bai"}]}]}'
+        "NHIỆM VỤ: Tổ chức thành CHƯƠNG và MỤC thật sự của tài liệu.\n\n"
+        "⚠️ QUAN TRỌNG: Số [n] và vị trí KHÔNG phản ánh cấp độ. "
+        "Hãy phán đoán DỰA VÀO TIÊU ĐỀ và NỘI DUNG, KHÔNG dựa vào thứ tự.\n\n"
+        "QUY TẮC:\n"
+        "1. CHƯƠNG = có nội dung lý thuyết/công thức/khái niệm ngay sau heading.\n"
+        "2. CONTAINER (PHẦN I., PHẦN II., heading <không có nội dung> mà ngay sau là các heading khác)\n"
+        "   → KHÔNG tạo chapter riêng. Bỏ qua nó, các heading con mới là chapters thật sự.\n"
+        "3. MỤC = bài tập, ví dụ, hướng dẫn, đáp số, tiểu mục trong chương.\n"
+        "4. LOẠI BỎ hoàn toàn: tên trường, mục lục, lời nói đầu, phụ lục, tài liệu tham khảo.\n"
+        "5. BÀI TẬP ÁP DỤNG, HƯỚNG DẪN VÀ ĐÁP SỐ, ĐÁP ÁN → MỤC của chương trước, KHÔNG phải chương.\n"
+        "6. Bài N. (chỉ có số, không có tiêu đề lý thuyết) → BỎ QUA HOÀN TOÀN, không tạo MỤC.\n"
+        "7. Tối đa 15 chương, mỗi chương tối đa 12 mục.\n\n"
+        "VÍ DỤ:\n"
+        "  [1] PHẦN I.\n"
+        "      <không có nội dung>          ← CONTAINER → bỏ qua\n"
+        "  [2] A. BỔ TÚC VÉC TƠ.\n"
+        "      Nội dung: Véc tơ là đại lượng có hướng...  ← CHƯƠNG (có lý thuyết)\n"
+        "  [3] I. Lực xuyên tâm.\n"
+        "      Nội dung: Lực hướng vào tâm...             ← CHƯƠNG hoặc MỤC tùy ngữ cảnh\n"
+        "  [4] HƯỚNG DẪN VÀ ĐÁP SỐ\n"
+        "      Nội dung: Bài 1: 5m/s...                   ← MỤC của chương trước\n\n"
+        "Trả về JSON thuần (KHÔNG markdown code block):\n"
+        '{"chapters": [{"chapter_id": "ch1", "title": "Tên chương", '
+        '"sections": [{"section_id": "ch1_sec1", "title": "Tên mục"}]}]}'
     )
 
     try:
@@ -375,11 +772,11 @@ async def detect_heading_tree_llm(markdown: str) -> dict:
         import json
 
         llm = get_llm_client()
-        response = await llm.agenerate(
-            prompt=prompt,
+        response = await llm.chat(
+            messages=[{"role": "user", "content": prompt}],
             role="planner",
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=4000,
         )
 
         text = response.strip()
@@ -388,7 +785,15 @@ async def detect_heading_tree_llm(markdown: str) -> dict:
             text = re.sub(r"\n?```\s*$", "", text)
         text = text.strip()
 
-        result = json.loads(text)
+        # Sanitize LaTeX backslashes inside JSON strings so json.loads doesn't choke
+        # on \vec, \frac, \alpha, etc. (common in Vietnamese physics heading titles).
+        text = _sanitize_json_backslashes(text)
+
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError:
+            # Last resort: truncate at the last valid closing brace/bracket pair
+            result = _extract_partial_json(text)
         if isinstance(result, list):
             result = {"chapters": result}
 
@@ -419,11 +824,14 @@ async def detect_heading_tree_llm(markdown: str) -> dict:
 
         logger.info(
             "[detect_heading_tree_llm] LLM detected %d chapters from %d headings",
-            len(chapters), len(heading_lines),
+            len(chapters), len(headings),
         )
         for ch in chapters:
             logger.info("  ch=%s: %s (%d sections)",
                         ch["chapter_id"], ch["title"], len(ch.get("sections", [])))
+
+        # Post-process: rule-based clean + LLM consolidation if > 12 chapters
+        result = await post_process_heading_tree(result)
 
         return result
 
@@ -592,21 +1000,24 @@ def flatten_heading_tree(tree: dict) -> list[dict]:
 # Heading tree post-processing (cleaning)
 # ─────────────────────────────────────────────────────────────
 
-# Patterns for meta / garbage headings that should NOT be chapters
+# Patterns for meta / garbage headings that should NOT be chapters.
+# Applied against the ORIGINAL title (with diacritics) so Vietnamese patterns match.
 _META_PATTERNS = re.compile(
     r"^("
-    r"TÀI LIỆU|GIÁO TRÌNH|SÁCH|BÀI GIẢNG|"   # Book/course titles
-    r"TẬP\s*\d|PHẦN\s*[A-Z]\.|"                 # Volume / Part markers
-    r"TÓM TẮT|MỤC LỤC|LỜI NÓI ĐẦU|LỜI MỞ ĐẦU|GIỚI THIỆU|"  # Preamble
-    r"PHỤ LỤC|TÀI LIỆU THAM KHẢO"              # Appendix / References
+    r"TÀI LIỆU|GIÁO TRÌNH|SÁCH|BÀI GIẢNG|"
+    r"TẬP\s*\d|"
+    r"PHẦN\s+[A-Z]\.|PHẦN\s+[IVXLCDM]+\.?|PHẦN\s+\d+\.?|"  # PHẦN I., PHẦN 1., PHẦN A.
+    r"TÓM TẮT|MỤC LỤC|LỜI NÓI ĐẦU|LỜI MỞ ĐẦU|GIỚI THIỆU|"
+    r"PHỤ LỤC|TÀI LIỆU THAM KHẢO"
     r")",
     re.IGNORECASE,
 )
 
 _ANSWER_PATTERNS = re.compile(
     r"("
-    r"ĐÁP SỐ|ĐÁP ÁN|HƯỚNG DẪN|LỜI GIẢI|"
-    r"DAP SO|DAP AN|HUONG DAN|LOI GIAI"
+    r"\b[ĐD]AP SO\.?\b|\b[ĐD]AP AN\.?\b|\bHUONG DAN\b|\bLOI GIAI\b|"
+    r"\bBAI TAP AP DUNG\b|"
+    r"\bDAPSO\b|\bDAPAN\b|\bHUONGDAN\b|\bLOIGIAI\b"
     r")",
     re.IGNORECASE,
 )
@@ -672,8 +1083,8 @@ def clean_heading_tree(tree: dict) -> dict:
             logger.info("[clean_heading_tree] Removing garbage chapter: %r", title)
             continue
 
-        # Meta headings (book title, preamble, etc.)
-        if _META_PATTERNS.search(_strip_diacritics(title)):
+        # Meta headings — match against original title since the pattern has diacritics
+        if _META_PATTERNS.search(title):
             logger.info("[clean_heading_tree] Removing meta chapter: %r", title)
             continue
 

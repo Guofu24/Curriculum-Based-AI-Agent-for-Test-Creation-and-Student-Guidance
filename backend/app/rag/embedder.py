@@ -26,6 +26,95 @@ _cross_encoder_model: Any | None = None
 _ce_model_lock = asyncio.Lock()
 
 
+# ── Gemini embedding helpers ──────────────────────────────────────────────────
+
+_gemini_clients: dict[str, Any] = {}  # singleton genai.Client per API key
+
+
+def _get_gemini_client(api_key: str) -> Any:
+    if api_key not in _gemini_clients:
+        from google import genai
+        _gemini_clients[api_key] = genai.Client(api_key=api_key)
+    return _gemini_clients[api_key]
+
+
+# gemini-embedding-001: stable, supports output_dimensionality 1–3072.
+# Must match ST_EMBEDDING_DIM in config (1024 for bge-m3 / Pinecone index).
+_GEMINI_EMBED_MODEL = "models/gemini-embedding-001"
+
+
+def _gemini_embed_one_batch(api_key: str, texts: list[str]) -> list[list[float]]:
+    """Embed a SINGLE sub-batch (≤100 texts) — exactly 1 API call."""
+    from google.genai import types
+    client = _get_gemini_client(api_key)
+    config = types.EmbedContentConfig(output_dimensionality=settings.ST_EMBEDDING_DIM)
+    resp = client.models.embed_content(
+        model=_GEMINI_EMBED_MODEL,
+        contents=texts,
+        config=config,
+    )
+    return [list(emb.values) for emb in resp.embeddings]
+
+
+async def _gemini_embed_batch(texts: list[str]) -> list[list[float]] | None:
+    """Embed texts using Gemini with per-sub-batch key rotation.
+
+    Each 100-text sub-batch uses a DIFFERENT key → each key gets only 1 request
+    instead of 4, staying far under the 100 RPM limit per project.
+    On 429, retries with the next key for that sub-batch (up to 3 attempts).
+    Returns None if any sub-batch permanently fails → fallback to local ST.
+    """
+    import logging as _log
+    _logger = _log.getLogger("document.embed")
+
+    keys = settings.GEMINI_EMBED_KEYS
+    if not keys:
+        return None
+
+    loop = asyncio.get_running_loop()
+    # Gemini counts each text as 1 request → 100 texts/call = 100 requests = exactly hits 100 RPM.
+    # Use 10 texts/call: 329 chunks → 33 sub-batches; each key gets ≤2 calls = 20 texts → safe.
+    _SUB_BATCH = 10
+    sub_batches = [texts[i:i + _SUB_BATCH] for i in range(0, len(texts), _SUB_BATCH)]
+    all_embs: list[list[float]] = []
+    key_idx = 0  # advances independently per successful sub-batch
+
+    for batch_num, batch in enumerate(sub_batches):
+        success = False
+        for attempt in range(min(3, len(keys))):
+            key = keys[(key_idx + attempt) % len(keys)]
+            try:
+                embs = await loop.run_in_executor(
+                    _executor,
+                    lambda k=key, b=batch: _gemini_embed_one_batch(k, b),
+                )
+                all_embs.extend(embs)
+                key_idx = (key_idx + 1) % len(keys)
+                success = True
+                break
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    _logger.warning(
+                        "Gemini embed sub-batch %d: key %s… 429 (attempt %d/3)",
+                        batch_num + 1, key[:8], attempt + 1,
+                    )
+                else:
+                    _logger.warning(
+                        "Gemini embed sub-batch %d: key %s… error: %s",
+                        batch_num + 1, key[:8], e,
+                    )
+
+        if not success:
+            _logger.warning(
+                "Gemini embed sub-batch %d failed after 3 attempts — falling back to local ST",
+                batch_num + 1,
+            )
+            return None
+
+    return all_embs
+
+
 def _load_model_sync() -> Any:
     """Load SentenceTransformer model synchronously (called in thread pool)."""
     from sentence_transformers import SentenceTransformer
@@ -196,26 +285,27 @@ class EmbeddingService:
 
         if uncached_texts:
             new_embeddings = await self._call_embedding_batch(uncached_texts)
-            for idx, emb in zip(uncached_indices, new_embeddings):
+            for list_pos, (idx, emb) in enumerate(zip(uncached_indices, new_embeddings)):
                 embeddings[idx] = emb
-                text_idx = uncached_indices.index(idx)
-                cache_key = f"embed:text:{self._hash_text(uncached_texts[text_idx])}"
+                cache_key = f"embed:text:{self._hash_text(uncached_texts[list_pos])}"
                 await self._cache_set(cache_key, emb)
 
         return embeddings
 
     async def _call_embedding(self, text: str) -> list[float]:
-        """Run sentence-transformers encode in thread pool (single text)."""
+        """Gemini primary, ST fallback (single text)."""
+        result = await _gemini_embed_batch([text])
+        if result:
+            return result[0]
         model = await _get_model()
         loop = asyncio.get_running_loop()
-        vector = await loop.run_in_executor(
+        return await loop.run_in_executor(
             _executor,
             lambda: np.nan_to_num(
                 np.asarray(model.encode(text, normalize_embeddings=True)),
                 nan=0.0, posinf=1.0, neginf=-1.0,
             ).tolist(),
         )
-        return vector
 
     async def rerank(self, query: str, candidates: list[str], top_k: int = 8) -> list[tuple[int, float]]:
         """
@@ -251,17 +341,19 @@ class EmbeddingService:
         return indexed[:top_k]
 
     async def _call_embedding_batch(self, texts: list[str]) -> list[list[float]]:
-        """Run sentence-transformers encode in thread pool (batch)."""
+        """Gemini primary, ST fallback (batch)."""
+        result = await _gemini_embed_batch(texts)
+        if result is not None:
+            return result
         model = await _get_model()
         loop = asyncio.get_running_loop()
-        vectors = await loop.run_in_executor(
+        return await loop.run_in_executor(
             _executor,
             lambda: np.nan_to_num(
                 np.asarray(model.encode(texts, normalize_embeddings=True, batch_size=32)),
                 nan=0.0, posinf=1.0, neginf=-1.0,
             ).tolist(),
         )
-        return vectors
 
     def _fallback_embedding(self, text: str) -> list[float]:
         """
@@ -323,31 +415,50 @@ async def embed_chunks(
 
     if uncached_chunks:
         texts = [c["content"] for c in uncached_chunks]
-        batch_size = 32
         total_texts = len(texts)
-        all_embeddings: list[list[float]] = []
 
-        for batch_start in range(0, total_texts, batch_size):
-            batch_texts = texts[batch_start:batch_start + batch_size]
-            batch_embeddings = await service._call_embedding_batch(batch_texts)
-            all_embeddings.extend(batch_embeddings)
-
-            # Report progress after each sub-batch
+        # Primary: Gemini batch (100 texts/req, fast API)
+        all_embeddings = await _gemini_embed_batch(texts)
+        if all_embeddings is not None:
             if progress_callback:
-                completed = min(batch_start + batch_size, total_texts)
                 try:
-                    await progress_callback(completed, total_texts)
+                    await progress_callback(total_texts, total_texts)
                 except Exception:
                     pass
+        else:
+            # Fallback: sentence-transformers (bypass service to avoid re-attempting Gemini)
+            all_embeddings = []
+            st_model = await _get_model()
+            loop = asyncio.get_running_loop()
+            batch_size = 32
+            for batch_start in range(0, total_texts, batch_size):
+                batch_texts = texts[batch_start:batch_start + batch_size]
+                batch_embs = await loop.run_in_executor(
+                    _executor,
+                    lambda bt=batch_texts: np.nan_to_num(
+                        np.asarray(st_model.encode(bt, normalize_embeddings=True, batch_size=32)),
+                        nan=0.0, posinf=1.0, neginf=-1.0,
+                    ).tolist(),
+                )
+                all_embeddings.extend(batch_embs)
+                if progress_callback:
+                    completed = min(batch_start + batch_size, total_texts)
+                    try:
+                        await progress_callback(completed, total_texts)
+                    except Exception:
+                        pass
 
+        cache_tasks = []
         for idx, (chunk, embedding) in zip(uncached_indices, zip(uncached_chunks, all_embeddings)):
             chunk_id = chunk.get("chunk_id", f"chunk_{idx:04d}")
             cache_key = f"embed:{doc_id}:{chunk_id}"
-            await service._cache_set(cache_key, embedding)
+            cache_tasks.append(service._cache_set(cache_key, embedding))
 
             enriched = dict(chunk)
             enriched["embedding"] = embedding
             result_chunks[idx] = enriched
+
+        await asyncio.gather(*cache_tasks, return_exceptions=True)
 
     return [c for c in result_chunks if c is not None]
 

@@ -111,6 +111,23 @@ class Settings(BaseSettings):
         """Returns list of Gemini API keys, loaded from .gemini_keys file or env."""
         return self._load_gemini_keys()
 
+    @property
+    def GEMINI_EMBED_KEYS(self) -> list[str]:
+        """
+        Keys reserved for embedding — separate from parse keys to avoid quota collision.
+        Loads from .gemini_embed_keys if present; otherwise reverses GEMINI_KEYS so
+        embedding starts with the keys least likely to be quota-exhausted by parsing.
+        """
+        import os
+        base = os.path.dirname(os.path.abspath(__file__))
+        key_file = os.path.join(base, "..", "..", ".gemini_embed_keys")
+        if os.path.exists(key_file):
+            with open(key_file, "r") as f:
+                keys = [line.strip() for line in f if line.strip()]
+            if keys:
+                return keys
+        return list(reversed(self._load_gemini_keys()))
+
     # Global defaults (used when role field is empty)
     LLM_PROVIDER_DEFAULT: str = "groq"
     LLM_MODEL_STRONG_DEFAULT: str = "llama-3.3-70b-versatile"

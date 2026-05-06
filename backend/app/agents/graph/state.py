@@ -50,6 +50,7 @@ class ExamGraphState(TypedDict, total=False):
     exam_id: str
     user_id: str
     document_id: str | None
+    textbook_namespace: str | None  # admin-uploaded textbook namespace (no document_id needed)
 
     # ── Config snapshot ───────────────────────────────────────────────────
     exam_config: dict
@@ -87,6 +88,7 @@ class ExamGraphState(TypedDict, total=False):
     checkpoint_1_approved: bool | None
     checkpoint_1_rejection_history: list[dict]
     checkpoint_1_timeout_at: float | None
+    blueprint_history: list[dict]  # [{"blueprint": [...], "feedback": "...", "round": N}]
 
     checkpoint_2_status: HITLCheckpointStatus
     checkpoint_2_approved: bool | None

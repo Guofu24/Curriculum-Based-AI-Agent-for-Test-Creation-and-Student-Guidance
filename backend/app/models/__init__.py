@@ -6,6 +6,7 @@ from app.models.document import Document
 from app.models.exam import Exam, ExamHistory
 from app.models.teacher_preference import TeacherPreference
 from app.models.feedback_event import FeedbackEvent, SignalType, Severity, ReviewStatus
+from app.models.textbook import TextbookKnowledge
 
 __all__ = [
     "User",
@@ -18,4 +19,5 @@ __all__ = [
     "SignalType",
     "Severity",
     "ReviewStatus",
+    "TextbookKnowledge",
 ]

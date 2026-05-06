@@ -49,8 +49,10 @@ const questionTypeLabels: Record<string, string> = {
   mcq: "Trắc nghiệm",
   essay: "Tự luận",
   multiple_choice: "Trắc nghiệm",
-  true_false: "�úng/Sai",
+  true_false: "Đúng/Sai",
   fill_blank: "Điền khuyết",
+  dung_sai: "Đúng-Sai (THPT)",
+  short_answer: "Trả lời ngắn",
 }
 
 export function QuestionEditor({
@@ -223,6 +225,42 @@ export function QuestionEditor({
                 <Plus className="h-4 w-4 mr-2" />
                 Thêm đáp án
               </Button>
+            )}
+          </div>
+        )}
+
+        {/* Đúng-Sai propositions */}
+        {safeQuestionType === 'dung_sai' && question.propositions && (
+          <div className="space-y-2 mb-4">
+            {question.propositions.map((prop) => (
+              <div
+                key={prop.label}
+                className={`flex items-start gap-3 rounded-lg border p-3 ${
+                  prop.is_correct
+                    ? "border-emerald-500/50 bg-emerald-500/10"
+                    : "border-red-500/40 bg-red-500/10"
+                }`}
+              >
+                <span className="font-semibold text-sm w-4 shrink-0">{prop.label})</span>
+                <span className="flex-1 text-sm">{prop.text}</span>
+                <span className={`text-xs font-medium shrink-0 ${prop.is_correct ? "text-emerald-400" : "text-red-400"}`}>
+                  {prop.is_correct ? "Đúng" : "Sai"}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Short Answer */}
+        {safeQuestionType === 'short_answer' && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 mb-4">
+            <p className="text-sm">
+              <span className="font-medium text-amber-300">Đáp án: </span>
+              <span className="font-mono">{question.correct_answer ?? "—"}</span>
+              {question.unit && <span className="ml-1 text-muted-foreground">{question.unit}</span>}
+            </p>
+            {question.solution && (
+              <p className="text-sm text-muted-foreground mt-1 whitespace-pre-line">{question.solution}</p>
             )}
           </div>
         )}

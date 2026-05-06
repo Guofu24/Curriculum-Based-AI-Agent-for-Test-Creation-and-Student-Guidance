@@ -355,6 +355,15 @@ async def generate_exam(
     # G13: Check rate limit before creating exam
     await check_generate_rate_limit(redis, str(current_user.id))
 
+    # Extract section titles from scope strings ("Chương > Phần" → "Phần")
+    scope_sections: list[str] = []
+    if config.scope and isinstance(config.scope, list):
+        for s in config.scope:
+            if isinstance(s, str) and " > " in s:
+                section_part = s.split(" > ", 1)[1].strip()
+                if section_part:
+                    scope_sections.append(section_part)
+
     # Create exam record
     exam = await service.create_exam(
         user_id=current_user.id,
@@ -368,6 +377,7 @@ async def generate_exam(
             "bloom_distribution": config.bloom_distribution.model_dump(),
             "user_prompt": config.user_prompt,
             "extra_instructions": config.extra_instructions,
+            "scope_sections": scope_sections if scope_sections else None,
         },
     )
 
@@ -866,6 +876,125 @@ async def regenerate_exam(
     return {"message": "Regeneration started"}
 
 
+@router.post(
+    "/{exam_id}/partial-regenerate",
+    summary="Regenerate a single question with optional prompt (CP2 per-question edit)",
+    description="Regenerates one question by question_id using BuilderAgent. "
+                "An optional `prompt` lets the teacher specify exactly what to change. "
+                "Only that question is re-generated — the rest of the exam is unchanged. "
+                "Emits a `question_updated` WebSocket event when done.",
+    responses={
+        200: {"description": "Updated question object"},
+        400: {"description": "question_id not found or generation failed"},
+        401: {"description": "Authentication required"},
+        404: {"description": "Exam not found"},
+    },
+    tags=["HITL"],
+)
+async def partial_regenerate(
+    exam_id: UUID,
+    request: dict,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis_client),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    CP2 per-question edit: regenerate one question with an optional prompt.
+
+    Loads retrieved_context and existing questions from the Redis session
+    saved at emit_checkpoint_2. Calls BuilderAgent.build_single_question()
+    then emits a `question_updated` WebSocket event so the frontend can
+    swap only that question in the list without a full reload.
+    """
+    from pydantic import BaseModel
+
+    class PartialRegenerateRequest(BaseModel):
+        question_id: str
+        prompt: str = ""
+
+    try:
+        req = PartialRegenerateRequest(**request)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid request: {e}")
+
+    service = ExamService(db, redis)
+    exam = await service.get_exam(exam_id, current_user.id)
+    if not exam:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+
+    # Load session from Redis (saved at CP2 emit)
+    from app.agents.memory.short_term import ShortTermMemory
+    stm = ShortTermMemory(redis)
+    session = await stm.load_session(str(exam_id), str(current_user.id))
+
+    if not session:
+        raise HTTPException(
+            status_code=400,
+            detail="Session not found — cannot regenerate without context. "
+                   "Make sure the exam reached CP2.",
+        )
+
+    retrieved_context = session.get("retrieved_context", [])
+    existing_questions = session.get("questions", []) or exam.questions or []
+
+    if not any(q.get("question_id") == req.question_id for q in existing_questions):
+        raise HTTPException(
+            status_code=400,
+            detail=f"question_id {req.question_id!r} not found in current questions.",
+        )
+
+    # Regenerate the single question
+    from app.agents.builder import BuilderAgent
+    builder = BuilderAgent(redis_client=redis)
+    new_question = await builder.build_single_question(
+        question_id=req.question_id,
+        retrieved_context=retrieved_context,
+        extra_prompt=req.prompt,
+        existing_questions=existing_questions,
+        trace_id=f"{exam_id}_partial_{req.question_id}",
+    )
+
+    if not new_question:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to regenerate question {req.question_id}.",
+        )
+
+    # Update question in session
+    updated_questions = [
+        new_question if q.get("question_id") == req.question_id else q
+        for q in existing_questions
+    ]
+    session["questions"] = updated_questions
+    session_key = stm._session_key(str(exam_id), str(current_user.id))
+    await redis.set_json(session_key, session, ttl=7200)
+
+    # Persist updated question to DB
+    try:
+        await service.update_question(
+            exam_id, req.question_id, new_question, current_user.id
+        )
+    except Exception:
+        pass  # Non-critical — WS event still fired
+
+    # Emit question_updated WebSocket event
+    try:
+        from app.websocket.manager import get_connection_manager
+        from app.agents.graph.nodes._emit import _emit_async
+        manager = get_connection_manager()
+        await _emit_async(manager, str(exam_id), {
+            "type": "question_updated",
+            "question_id": req.question_id,
+            "question": new_question,
+        })
+    except Exception as ws_err:
+        logger.warning("Failed to emit question_updated for exam %s: %s", exam_id, ws_err)
+
+    return {"question": new_question, "question_id": req.question_id}
+
+
+
+
 # ── Export PDF / DOCX ───────────────────────────────────────────────────────────
 
 @router.get(
@@ -1178,7 +1307,7 @@ async def reject_blueprint(
         }
         logger.info(f"Resuming graph for exam {exam_id} with Command(resume={{approved: False}})")
         await graph.ainvoke(
-            Command(resume={"approved": False}),
+            Command(resume={"approved": False, "feedback": request.feedback}),
             config=config,
         )
     except Exception as e:
@@ -1206,6 +1335,97 @@ async def reject_blueprint(
     return {
         "status": "rejected_with_feedback",
         "message": f"Đã ghi nhận phản hồi. Blueprint sẽ được điều chỉnh: {request.feedback[:50]}...",
+    }
+
+
+@router.post(
+    "/{exam_id}/clarify",
+    summary="Submit clarification answers and resume pipeline",
+    description="Receives answers to clarification questions, merges them into user_prompt, "
+                "and resumes the paused LangGraph pipeline so generation can continue.",
+    tags=["HITL"],
+)
+async def submit_clarification(
+    exam_id: UUID,
+    request: dict,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis_client),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Resume pipeline after clarification answers are provided.
+
+    Merges answers_text into exam_config.user_prompt and resumes
+    the interrupted LangGraph graph via Command(resume=...).
+    Falls back to restarting the Celery task if no active interrupt.
+    """
+    import json as _json
+
+    service = ExamService(db, redis)
+    exam = await service.get_exam(exam_id, current_user.id)
+    if not exam:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+
+    answers_text: str = request.get("answers_text", "")
+    answers: dict = request.get("answers", {})
+
+    # Retrieve original session config from Redis to merge answers into user_prompt
+    session_key = f"session:{exam_id}:{current_user.id}"
+    try:
+        session = await redis.get_json(session_key)
+    except Exception:
+        session = {}
+
+    exam_config_orig: dict = (session or {}).get("exam_config_original", {}) if session else {}
+    original_prompt: str = exam_config_orig.get("user_prompt", "")
+    merged_prompt = f"{original_prompt}\n\n[Làm rõ yêu cầu]\n{answers_text}".strip()
+    exam_config_orig = {**exam_config_orig, "user_prompt": merged_prompt}
+
+    # Store updated answers in Redis for the graph to pick up
+    clarify_key = f"clarification:{exam_id}"
+    try:
+        await redis.set(clarify_key, _json.dumps({
+            "answers": answers,
+            "answers_text": answers_text,
+            "merged_prompt": merged_prompt,
+        }), ttl=3600)
+    except Exception:
+        pass
+
+    # Try to resume interrupted graph first
+    try:
+        from langgraph.types import Command
+        from app.agents.graph.builder import build_exam_graph
+        graph = build_exam_graph()
+        config = {
+            "configurable": {"thread_id": str(exam_id)},
+            "recursion_limit": 500,
+        }
+        logger.info(f"[clarify] Resuming graph for exam {exam_id} with clarification answers")
+        await graph.ainvoke(
+            Command(resume={"clarification_answers": answers, "merged_prompt": merged_prompt}),
+            config=config,
+        )
+    except Exception as e:
+        if "interrupt" in str(e).lower() or "nothing to resume" in str(e).lower():
+            # No active interrupt — restart the pipeline with the merged prompt
+            logger.info(f"[clarify] No interrupt for {exam_id}, restarting pipeline: {e}")
+            generate_exam_task.delay(
+                exam_id=str(exam_id),
+                user_id=str(current_user.id),
+                document_id=(session or {}).get("document_id") if session else None,
+                scope=(session or {}).get("scope", []) if session else [],
+                exam_config={**exam_config_orig},
+                user_prompt=merged_prompt,
+                extra_instructions=(session or {}).get("extra_instructions", "") if session else "",
+            )
+        else:
+            logger.warning(f"[clarify] Could not resume graph for {exam_id}: {e}")
+
+    return {
+        "status": "clarification_submitted",
+        "message": "Đã nhận câu trả lời, đang tiếp tục tạo đề...",
+        "merged_prompt_preview": merged_prompt[:120],
     }
 
 
