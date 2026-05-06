@@ -122,7 +122,8 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
   const [editingQuestion, setEditingQuestion] = useState<string | null>(null)
   const [editForm, setEditForm] = useState<McqEditForm>({ options: {} })
   const [isSaving, setIsSaving] = useState(false)
-  const [isExporting, setIsExporting] = useState(false)
+  const [isExportingPdf, setIsExportingPdf] = useState(false)
+  const [isExportingDocx, setIsExportingDocx] = useState(false)
   const [showPublishDialog, setShowPublishDialog] = useState(false)
   const [showEditPromptDialog, setShowEditPromptDialog] = useState(false)
   const [editPromptText, setEditPromptText] = useState('')
@@ -262,38 +263,78 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
   }, [id])
 
   const handleExportPdf = async () => {
-    setIsExporting(true)
+    setIsExportingPdf(true)
     try {
-      const blob = await examsApi.exportPdf(id)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${exam?.title || 'exam'}.pdf`
-      a.click()
-      URL.revokeObjectURL(url)
-      toast.success('Đã tải xuống PDF')
-    } catch (error) {
+      // Tải đồng thời 2 file: bản học sinh (không đáp án) + bản giáo viên (có đáp án)
+      const [blobStudent, blobTeacher] = await Promise.all([
+        examsApi.exportPdf(id, false),
+        examsApi.exportPdf(id, true),
+      ])
+
+      const baseName = exam?.title || 'exam'
+
+      // Bản học sinh
+      const urlStudent = URL.createObjectURL(blobStudent)
+      const aStudent = document.createElement('a')
+      aStudent.href = urlStudent
+      aStudent.download = `${baseName}_hoc_sinh.pdf`
+      aStudent.click()
+      URL.revokeObjectURL(urlStudent)
+
+      // Delay nhỏ tránh browser block popup
+      await new Promise(r => setTimeout(r, 300))
+
+      // Bản giáo viên
+      const urlTeacher = URL.createObjectURL(blobTeacher)
+      const aTeacher = document.createElement('a')
+      aTeacher.href = urlTeacher
+      aTeacher.download = `${baseName}_giao_vien.pdf`
+      aTeacher.click()
+      URL.revokeObjectURL(urlTeacher)
+
+      toast.success('Đã tải 2 file PDF: bản học sinh & giáo viên')
+    } catch {
       toast.error('Xuất PDF thất bại')
     } finally {
-      setIsExporting(false)
+      setIsExportingPdf(false)
     }
   }
 
   const handleExportDocx = async () => {
-    setIsExporting(true)
+    setIsExportingDocx(true)
     try {
-      const blob = await examsApi.exportDocx(id)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${exam?.title || 'exam'}.docx`
-      a.click()
-      URL.revokeObjectURL(url)
-      toast.success('Đã tải xuống DOCX')
-    } catch (error) {
+      // Tải đồng thời 2 file: bản học sinh (không đáp án) + bản giáo viên (có đáp án)
+      const [blobStudent, blobTeacher] = await Promise.all([
+        examsApi.exportDocx(id, false),
+        examsApi.exportDocx(id, true),
+      ])
+
+      const baseName = exam?.title || 'exam'
+
+      // Bản học sinh
+      const urlStudent = URL.createObjectURL(blobStudent)
+      const aStudent = document.createElement('a')
+      aStudent.href = urlStudent
+      aStudent.download = `${baseName}_hoc_sinh.docx`
+      aStudent.click()
+      URL.revokeObjectURL(urlStudent)
+
+      // Delay nhỏ tránh browser block popup
+      await new Promise(r => setTimeout(r, 300))
+
+      // Bản giáo viên
+      const urlTeacher = URL.createObjectURL(blobTeacher)
+      const aTeacher = document.createElement('a')
+      aTeacher.href = urlTeacher
+      aTeacher.download = `${baseName}_giao_vien.docx`
+      aTeacher.click()
+      URL.revokeObjectURL(urlTeacher)
+
+      toast.success('Đã tải 2 file DOCX: bản học sinh & giáo viên')
+    } catch {
       toast.error('Xuất DOCX thất bại')
     } finally {
-      setIsExporting(false)
+      setIsExportingDocx(false)
     }
   }
 
@@ -546,22 +587,24 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
                 </Link>
               </Button>
 
-              <Button 
-                variant="outline" 
+              <Button
+                variant="outline"
                 onClick={handleExportPdf}
-                disabled={isExporting}
+                disabled={isExportingPdf || isExportingDocx}
+                title="Tải PDF (2 file: bản học sinh + giáo viên)"
               >
-                {isExporting ? <Spinner className="mr-2" /> : <Download className="mr-2 h-4 w-4" />}
-                PDF
+                {isExportingPdf ? <Spinner className="mr-2" /> : <Download className="mr-2 h-4 w-4" />}
+                {isExportingPdf ? 'Đang tải...' : 'PDF'}
               </Button>
 
-              <Button 
-                variant="outline" 
+              <Button
+                variant="outline"
                 onClick={handleExportDocx}
-                disabled={isExporting}
+                disabled={isExportingPdf || isExportingDocx}
+                title="Tải DOCX (2 file: bản học sinh + giáo viên)"
               >
-                {isExporting ? <Spinner className="mr-2" /> : <Download className="mr-2 h-4 w-4" />}
-                DOCX
+                {isExportingDocx ? <Spinner className="mr-2" /> : <Download className="mr-2 h-4 w-4" />}
+                {isExportingDocx ? 'Đang tải...' : 'DOCX'}
               </Button>
 
               {exam.status !== 'published' && (
