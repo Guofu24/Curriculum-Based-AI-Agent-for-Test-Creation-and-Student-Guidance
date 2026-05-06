@@ -352,6 +352,114 @@ class RetrievalAgent:
                 coverage_map={},
             )
 
+    async def retrieve_textbook(
+        self,
+        textbook_namespace: str,
+        scope_chapters: list[str],
+        bloom_targets: list[str] | None = None,
+        query_hints: list[str] | None = None,
+        trace_id: str = "",
+        scope_sections: list[str] | None = None,
+    ) -> RetrievalOutput:
+        """
+        Retrieval for built-in textbook knowledge (admin-uploaded namespace).
+        Queries Pinecone namespace directly without a document_id.
+        Filters by chapter name (metadata.chapter) and optionally by title (section).
+        """
+        start_time = time.time()
+        metrics = AgentMetrics(trace_id=trace_id)
+        warnings: list[str] = []
+
+        try:
+            expanded_queries = await self._expand_queries(
+                scope_chapters, bloom_targets or [], query_hints or []
+            )
+
+            query_text = " ".join(expanded_queries[:3])
+            embedding = await self.embedder.embed_text(query_text)
+
+            # Build chapter filter: {"chapter": {"$in": [...]}} if chapters specified
+            filter_meta: dict | None = None
+            if scope_chapters:
+                filter_meta = {"chapter": {"$in": scope_chapters}}
+
+            top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(scope_chapters), 3)
+            all_chunks = await self.vector_store.query_textbook_namespace(
+                namespace=textbook_namespace,
+                query_embedding=embedding,
+                top_k=min(top_k, 100),
+                filter_metadata=filter_meta,
+            )
+
+            # Section filter
+            if scope_sections and all_chunks:
+                import unicodedata
+                def _strip_d(s: str) -> str:
+                    nfd = unicodedata.normalize("NFD", s.strip().lower())
+                    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+                sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
+                filtered = [
+                    c for c in all_chunks
+                    if _strip_d(c.get("metadata", {}).get("title") or "") in sec_set
+                    or _strip_d(c.get("metadata", {}).get("section") or "") in sec_set
+                ]
+                if filtered:
+                    all_chunks = filtered
+
+            all_chunks, token_warning = self._enforce_token_budget(
+                all_chunks, max_tokens=settings.MAX_CONTEXT_TOKENS
+            )
+            if token_warning:
+                warnings.append(token_warning)
+
+            coverage_map: dict[str, list[str]] = {}
+            for chunk in all_chunks:
+                ch = chunk.get("metadata", {}).get("chapter", "unknown")
+                coverage_map.setdefault(ch, []).append(chunk["chunk_id"])
+
+            retrieved_chunks = [
+                {
+                    "chunk_id": c["chunk_id"],
+                    "chapter": c["metadata"].get("chapter", ""),
+                    "chapter_id": c["metadata"].get("chapter", ""),  # use chapter name as id
+                    "section": c["metadata"].get("title") or c["metadata"].get("section", ""),
+                    "content": c["metadata"].get("content", ""),
+                    "content_type": c["metadata"].get("content_type", "text"),
+                    "relevance_score": c.get("score", 0.0),
+                    "latex_repr": c["metadata"].get("latex_repr"),
+                }
+                for c in all_chunks
+            ]
+
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            logger.info(
+                "[retrieve_textbook] namespace='%s', chapters=%r, got %d chunks",
+                textbook_namespace, scope_chapters, len(retrieved_chunks),
+            )
+            return RetrievalOutput(
+                status=AgentStatus.SUCCESS if retrieved_chunks else AgentStatus.PARTIAL,
+                agent_name="retrieval",
+                execution_time_ms=elapsed_ms,
+                token_usage=TokenUsage(),
+                warnings=warnings,
+                trace_id=trace_id,
+                retrieved_chunks=retrieved_chunks,
+                coverage_map=coverage_map,
+            )
+
+        except Exception as e:
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            return RetrievalOutput(
+                status=AgentStatus.PARTIAL,
+                agent_name="retrieval",
+                execution_time_ms=elapsed_ms,
+                token_usage=TokenUsage(),
+                warnings=[f"Textbook retrieval failed: {e}"],
+                trace_id=trace_id,
+                retrieved_chunks=[],
+                coverage_map={},
+            )
+
     # ── G11: Query expansion ─────────────────────────────────────────────────────
 
     async def _expand_queries(

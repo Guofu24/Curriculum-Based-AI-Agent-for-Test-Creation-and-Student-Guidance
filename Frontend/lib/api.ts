@@ -375,6 +375,7 @@ export interface ExamListResponse {
 export interface ExamGenerationRequest {
   document_id?: string | null
   use_builtin_knowledge?: boolean
+  knowledge_namespace?: string | null  // Pinecone namespace for admin-uploaded textbook
   scope: string[]
   exam_type?: 'mcq' | 'essay' | 'mixed'
   exam_mode?: 'standard' | 'thpt_2025'
@@ -624,6 +625,48 @@ export const generateApi = {
       method: 'POST',
       body: JSON.stringify(request),
     })
+  },
+}
+
+// ============ ADMIN API ============
+export const adminApi = {
+  getUsers: async (page = 1, limit = 20): Promise<{ items: UserResponse[]; total: number }> => {
+    return apiFetch<{ items: UserResponse[]; total: number }>(`/admin/users?page=${page}&limit=${limit}`)
+  },
+
+  getNamespaces: async (): Promise<string[]> => {
+    const res = await apiFetch<{ namespaces: string[] }>('/admin/knowledge/namespaces')
+    return res.namespaces
+  },
+
+  getChapters: async (namespace: string): Promise<string[]> => {
+    const res = await apiFetch<{ namespace: string; chapters: string[] }>(`/admin/knowledge/chapters?namespace=${encodeURIComponent(namespace)}`)
+    return res.chapters
+  },
+
+  getOutline: async (namespace: string): Promise<{ chapter: string; sections: string[] }[]> => {
+    const res = await apiFetch<{ namespace: string; outline: { chapter: string; sections: string[] }[] }>(`/admin/knowledge/outline?namespace=${encodeURIComponent(namespace)}`)
+    return res.outline
+  },
+
+  uploadKnowledge: async (namespace: string, file: File): Promise<{ message: string; items_saved: number; chunks_embedded: number }> => {
+    const token = getToken()
+    const formData = new FormData()
+    formData.append('namespace', namespace)
+    formData.append('file', file)
+
+    const response = await fetch(`${API_BASE_URL}/admin/knowledge/textbook`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    })
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Upload thất bại' }))
+      throw new Error(error.detail || 'Upload thất bại')
+    }
+
+    return response.json()
   },
 }
 

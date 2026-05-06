@@ -159,6 +159,14 @@ class ExamConfigRequest(BaseModel):
         le=20,
         description="Number of short-answer (trả lời ngắn) questions. Default: 0.",
     )
+    use_builtin_knowledge: bool = Field(
+        default=False,
+        description="If True, use admin-uploaded textbook namespace instead of document_id.",
+    )
+    knowledge_namespace: str | None = Field(
+        None,
+        description="Pinecone namespace for admin-uploaded textbook (required when use_builtin_knowledge=True).",
+    )
 
 
 class GenerationStep(BaseModel):

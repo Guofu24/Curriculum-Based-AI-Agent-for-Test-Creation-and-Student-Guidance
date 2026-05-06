@@ -74,7 +74,7 @@ Tạo sườn đề (blueprint) với các slot câu hỏi được phân bổ t
 
 ## Chain-of-thought (suy luận trước khi output)
 Với mỗi blueprint, trước tiên suy nghĩ:
-1. Tổng câu = MCQ + Essay = ?
+1. Tổng câu = MCQ + Essay + Đúng-Sai + Trả lời ngắn = ?
 2. Phân bổ câu cho từng chapter: mỗi chapter được phân bao nhiêu câu?
 3. Trong mỗi chapter, phân bổ Bloom level như thế nào?
 4. Kiểm tra: tổng slot = config? Bloom sum = config?
@@ -82,7 +82,7 @@ Với mỗi blueprint, trước tiên suy nghĩ:
 
 ## Self-verification checklist
 Trước khi trả JSON, kiểm tra:
-- [ ] Tổng số slot = mcq_count + essay_count (chính xác)
+- [ ] Tổng số slot = mcq_count + essay_count + dung_sai_count + short_answer_count (chính xác)
 - [ ] Tổng theo bloom = bloom_distribution (chính xác ±0)
 - [ ] Không chapter nào > 50% tổng
 - [ ] Mỗi slot có question_id, bloom_level, chapter (đầy đủ)
@@ -100,6 +100,39 @@ Trả về JSON với schema:
     "bloom_total_ok": true/false,
     "chapter_balance_ok": true/false,
     "total_slots_ok": true/false
+  }
+}
+"""
+
+    MODIFICATION_SYSTEM_PROMPT = """[PROMPT_VERSION: v2.1-mod]
+
+## Vai trò
+Mày là chuyên gia chỉnh sửa đề kiểm tra. Nhiệm vụ DUY NHẤT là CHỈNH SỬA blueprint
+đã có theo phản hồi của giáo viên — KHÔNG tạo mới từ đầu.
+
+## Nguyên tắc chỉnh sửa
+- Giữ nguyên tổng số slot và phân bổ Bloom chính xác
+- Điều chỉnh field "chapter", "section", "topic_hint" theo phản hồi giáo viên
+- Giữ nguyên "type", "bloom_level", "content_type", "estimated_difficulty" của từng slot
+- Mỗi chương phải có ít nhất 1 slot
+
+## ⚠️ QUAN TRỌNG — Output đầy đủ
+Output phải chứa TẤT CẢ các slot trong blueprint (không bỏ sót bất kỳ câu nào).
+NEVER output chỉ các slot đã thay đổi — output TOÀN BỘ danh sách blueprint với số lượng
+slot CHÍNH XÁC bằng số slot đã nhận được.
+
+## Taxonomy Bloom
+- **nhan_biet**: Định nghĩa, liệt kê, nhận biết
+- **thong_hieu**: Giải thích, so sánh, áp dụng đơn giản
+- **van_dung**: Tính toán 2-3 bước, có điều kiện
+- **van_dung_cao**: Phân tích, đánh giá, bài toán phức hợp
+
+## Output format (BẮT BUỘC - JSON thuần, không markdown)
+{
+  "blueprint": [TẤT CẢ slot đã chỉnh sửa — đủ số lượng như đầu vào],
+  "distribution_summary": {
+    "by_bloom": {"nhan_biet": N, "thong_hieu": N, "van_dung": N, "van_dung_cao": N},
+    "by_chapter": {"Tên chương": count}
   }
 }
 """
@@ -122,6 +155,11 @@ Trả về JSON với schema:
         metrics = AgentMetrics(trace_id=trace_id)
         warnings: list[str] = []
 
+        # Determine mode before try block so except handlers can reference it
+        is_modification = bool(
+            exam_config.get("outline_feedback") and exam_config.get("current_blueprint")
+        )
+
         try:
             # Build context summary for LLM
             context_summary = self._build_context_summary(retrieved_context)
@@ -129,26 +167,73 @@ Trả về JSON với schema:
             # Build user prompt
             user_prompt = self._build_outline_prompt(retrieved_context, exam_config)
 
+            # Choose system prompt based on mode
+            system_prompt = (
+                self.MODIFICATION_SYSTEM_PROMPT if is_modification
+                else self.OUTLINE_SYSTEM_PROMPT
+            )
+
+            # Modification mode needs higher token limit:
+            # 28 slots × ~200 chars/slot ≈ 5600 chars + distribution_summary overhead
+            _max_tokens = 8192 if is_modification else 4000
+
             # Call LLM
             response = await self.llm.chat(
                 messages=[
-                    {"role": "system", "content": self.OUTLINE_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 role="outline",
-                max_tokens=4000,
+                max_tokens=_max_tokens,
                 temperature=0.3,
             )
 
-            result = json.loads(response)
+            print(f"[OutlineAgent] RAW ({len(response)} chars): {response[:400]!r}", flush=True)
+            # Strip markdown code fences before parsing (model often wraps JSON in ```json...```)
+            _clean = response.strip()
+            if _clean.startswith("```"):
+                _clean = _clean.split("```", 2)[1] if _clean.count("```") >= 2 else _clean.split("\n", 1)[-1]
+                _clean = _clean.lstrip("json").strip()
+                if "```" in _clean:
+                    _clean = _clean[:_clean.rfind("```")].strip()
+            print(f"[OutlineAgent] CLEAN ({len(_clean)} chars): {_clean[:200]!r}", flush=True)
+            result = json.loads(_clean)
             blueprint = result.get("blueprint", [])
             distribution_summary = result.get("distribution_summary", {})
 
+            # Debug: raw LLM output before any post-processing
+            _raw_ch: dict = {}
+            for _s in blueprint:
+                _raw_ch[_s.get("chapter", "?")] = _raw_ch.get(_s.get("chapter", "?"), 0) + 1
+            print(f"[OutlineAgent] RAW LLM: {len(blueprint)} slots, chapter_dist={_raw_ch}", flush=True)
+
+            # ── Hard type-count enforcement BEFORE Bloom check ──────────────
+            mcq_target    = int(exam_config.get("mcq_count", 40) or 0)
+            essay_target  = int(exam_config.get("essay_count", 0) or 0)
+            ds_target     = int(exam_config.get("dung_sai_count", 0) or 0)
+            sa_target     = int(exam_config.get("short_answer_count", 0) or 0)
+            _scope_for_pad = [str(s) for s in (exam_config.get("scope", []) or [])]
+            blueprint = self._enforce_type_counts(
+                blueprint, mcq_target, essay_target, ds_target, sa_target,
+                scope_chapters=_scope_for_pad,
+            )
+            # Warn if LLM only returned a subset of slots (common in modification mode)
+            _actual_from_llm = len(result.get("blueprint", []))
+            if _actual_from_llm < (mcq_target + essay_target + ds_target + sa_target):
+                logger.warning(
+                    "[OutlineAgent] LLM returned only %d/%d slots — padded remainder. "
+                    "Check if modification prompt is truncating output.",
+                    _actual_from_llm, mcq_target + essay_target + ds_target + sa_target,
+                )
+
             # 3B: Strict Bloom distribution enforcement
-            # bloom_distribution values are PERCENTAGES (e.g., 25 = 25%)
-            # Convert to absolute counts based on total questions
             raw_bloom = exam_config.get("bloom_distribution", {})
-            total_questions = int(exam_config.get("mcq_count", 0) or 0) + int(exam_config.get("essay_count", 0) or 0)
+            total_questions = (
+                int(exam_config.get("mcq_count", 0) or 0)
+                + int(exam_config.get("essay_count", 0) or 0)
+                + int(exam_config.get("dung_sai_count", 0) or 0)
+                + int(exam_config.get("short_answer_count", 0) or 0)
+            )
             expected_bloom = self._bloom_pct_to_counts(raw_bloom, total_questions)
 
             actual_bloom: dict[str, int] = {}
@@ -165,16 +250,28 @@ Trả về JSON với schema:
                     )
 
             if bloom_mismatch:
-                warnings.append(f"Bloom distribution mismatch — retrying: {'; '.join(bloom_mismatch)}")
-                # Retry with specific error message injected into prompt
-                return await self._retry_with_bloom_feedback(
-                    retrieved_context=retrieved_context,
-                    exam_config=exam_config,
-                    bloom_mismatch=bloom_mismatch,
-                    expected_bloom=expected_bloom,
-                    trace_id=trace_id,
-                    start_time=start_time,
-                )
+                if is_modification:
+                    # In modification mode, triggering a Bloom retry would override the
+                    # teacher's chapter redistribution feedback. Log and continue instead.
+                    warnings.append(
+                        f"Bloom mismatch in modification mode (skipping retry to preserve "
+                        f"teacher chapter feedback): {'; '.join(bloom_mismatch)}"
+                    )
+                    logger.warning(
+                        "[OutlineAgent] Bloom mismatch in modification mode — "
+                        "skipping Bloom retry to honor teacher chapter redistribution feedback."
+                    )
+                else:
+                    warnings.append(f"Bloom distribution mismatch — retrying: {'; '.join(bloom_mismatch)}")
+                    # Retry with specific error message injected into prompt
+                    return await self._retry_with_bloom_feedback(
+                        retrieved_context=retrieved_context,
+                        exam_config=exam_config,
+                        bloom_mismatch=bloom_mismatch,
+                        expected_bloom=expected_bloom,
+                        trace_id=trace_id,
+                        start_time=start_time,
+                    )
 
             valid_llm, reason_llm = self.validate_blueprint(blueprint)
             if not valid_llm:
@@ -248,7 +345,9 @@ Trả về JSON với schema:
 
             # If blueprint doesn't match config, adjust
             actual_total = len(blueprint)
-            expected_total = mcq_count + essay_count
+            dung_sai_count_val = int(exam_config.get("dung_sai_count", 0) or 0)
+            short_answer_count_val = int(exam_config.get("short_answer_count", 0) or 0)
+            expected_total = mcq_count + essay_count + dung_sai_count_val + short_answer_count_val
 
             if abs(actual_total - expected_total) > 2:
                 warnings.append(
@@ -300,10 +399,24 @@ Trả về JSON với schema:
 
         except json.JSONDecodeError as e:
             warnings.append(f"Failed to parse blueprint JSON: {e}")
+            if is_modification and exam_config.get("current_blueprint"):
+                logger.warning(
+                    "[OutlineAgent] JSON parse failed in modification mode — "
+                    "applying deterministic chapter redistribution on current blueprint."
+                )
+                warnings.append("JSON parse failed — falling back to deterministic chapter redistribution")
+                return await self._deterministic_redistribute(exam_config, start_time, trace_id, warnings)
             return await self._fallback_outline(exam_config, start_time, trace_id, warnings)
 
         except Exception as e:
             warnings.append(f"Outline creation failed: {str(e)}")
+            if is_modification and exam_config.get("current_blueprint"):
+                logger.warning(
+                    "[OutlineAgent] LLM call failed in modification mode (%s) — "
+                    "applying deterministic chapter redistribution.", e
+                )
+                warnings.append(f"LLM call failed ({e}) — falling back to deterministic chapter redistribution")
+                return await self._deterministic_redistribute(exam_config, start_time, trace_id, warnings)
             return await self._fallback_outline(exam_config, start_time, trace_id, warnings)
 
     async def _retry_with_bloom_feedback(
@@ -332,21 +445,55 @@ Hãy tạo lại blueprint với phân bổ CHÍNH XÁC như trên.
 KIỂM TRA LẠI trước khi output.
 """
         exam_config = dict(exam_config)
-        exam_config["outline_feedback"] = correction_prompt
+        # Preserve original teacher chapter feedback alongside bloom correction
+        original_feedback = exam_config.get("outline_feedback", "")
+        if original_feedback and "LỖI PHÂN BỔ BLOOM" not in original_feedback:
+            exam_config["outline_feedback"] = original_feedback + "\n\n---\n" + correction_prompt
+        else:
+            exam_config["outline_feedback"] = correction_prompt
 
         try:
+            # Use MODIFICATION system prompt if we have a current blueprint to modify
+            _sys_prompt = (
+                self.MODIFICATION_SYSTEM_PROMPT
+                if exam_config.get("current_blueprint")
+                else self.OUTLINE_SYSTEM_PROMPT
+            )
             response = await self.llm.chat(
                 messages=[
-                    {"role": "system", "content": self.OUTLINE_SYSTEM_PROMPT},
+                    {"role": "system", "content": _sys_prompt},
                     {"role": "user", "content": self._build_outline_prompt(retrieved_context, exam_config)},
                 ],
                 role="outline",
                 max_tokens=4000,
                 temperature=0.2,
             )
-            result = json.loads(response)
+            print(f"[OutlineAgent] RAW ({len(response)} chars): {response[:400]!r}", flush=True)
+            # Strip markdown code fences before parsing (model often wraps JSON in ```json...```)
+            _clean = response.strip()
+            if _clean.startswith("```"):
+                _clean = _clean.split("```", 2)[1] if _clean.count("```") >= 2 else _clean.split("\n", 1)[-1]
+                _clean = _clean.lstrip("json").strip()
+                if "```" in _clean:
+                    _clean = _clean[:_clean.rfind("```")].strip()
+            print(f"[OutlineAgent] CLEAN ({len(_clean)} chars): {_clean[:200]!r}", flush=True)
+            result = json.loads(_clean)
             blueprint = result.get("blueprint", [])
             distribution_summary = result.get("distribution_summary", {})
+
+            # ── Hard type-count enforcement (retry path) ─────────────────────
+            _scope_retry = [str(s) for s in (exam_config.get("scope", []) or [])]
+            blueprint = self._enforce_type_counts(
+                blueprint,
+                int(exam_config.get("mcq_count", 0) or 0),
+                int(exam_config.get("essay_count", 0) or 0),
+                int(exam_config.get("dung_sai_count", 0) or 0),
+                int(exam_config.get("short_answer_count", 0) or 0),
+                scope_chapters=_scope_retry,
+            )
+
+            # Do NOT call _redistribute_chapters here — it does even round-robin
+            # which contradicts any teacher chapter-redistribution feedback.
 
             # Verify one more time
             actual_bloom: dict[str, int] = {}
@@ -373,7 +520,9 @@ KIỂM TRA LẠI trước khi output.
         # Apply same chapter enforcement as happy path
         mcq_count = exam_config.get("mcq_count", 0)
         essay_count = exam_config.get("essay_count", 0)
-        expected_total = mcq_count + essay_count
+        dung_sai_count = int(exam_config.get("dung_sai_count", 0) or 0)
+        short_answer_count = int(exam_config.get("short_answer_count", 0) or 0)
+        expected_total = mcq_count + essay_count + dung_sai_count + short_answer_count
         blueprint, warnings = self._enforce_chapter_coverage(
             blueprint=blueprint,
             exam_config=exam_config,
@@ -406,6 +555,61 @@ KIỂM TRA LẠI trước khi output.
             blueprint=blueprint,
             distribution_summary=distribution_summary,
         )
+    async def _deterministic_redistribute(
+        self,
+        exam_config: dict,
+        start_time: float,
+        trace_id: str,
+        warnings: list[str],
+    ) -> "OutlineOutput":
+        """
+        Fallback for modification mode when LLM fails to produce valid JSON.
+
+        Takes the current_blueprint from exam_config and redistributes its slots
+        evenly across all scope chapters using _redistribute_chapters().
+        This honours the teacher's intent (equal distribution) without needing
+        a successful LLM call.
+        """
+        current_blueprint = list(exam_config.get("current_blueprint", []))
+        scope = exam_config.get("scope", [])
+        scope_chapters = [str(s) for s in (scope if isinstance(scope, list) else [])]
+
+        if not current_blueprint or not scope_chapters:
+            warnings.append("_deterministic_redistribute: missing blueprint or scope — using full fallback")
+            return await self._fallback_outline(exam_config, start_time, trace_id, warnings)
+
+        blueprint = self._redistribute_chapters(current_blueprint, scope_chapters)
+        n = len(blueprint)
+        k = len(scope_chapters)
+        warnings.append(
+            f"Deterministic redistribution applied: {n} slots across {k} chapters "
+            f"(~{n // k} per chapter, remainder {n % k})"
+        )
+
+        bloom_dist = exam_config.get("bloom_distribution", {})
+        distribution_summary = {
+            "by_bloom": {
+                level: sum(1 for s in blueprint if s.get("bloom_level") == level)
+                for level in bloom_dist
+            },
+            "by_chapter": {
+                ch: sum(1 for s in blueprint if s.get("chapter") == ch)
+                for ch in scope_chapters
+            },
+        }
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        return OutlineOutput(
+            status=AgentStatus.PARTIAL,
+            agent_name="outline",
+            execution_time_ms=elapsed_ms,
+            token_usage=TokenUsage(),
+            warnings=warnings,
+            trace_id=trace_id,
+            blueprint=blueprint,
+            distribution_summary=distribution_summary,
+        )
+
     def _enforce_chapter_coverage(
         self,
         blueprint: list[dict],
@@ -508,6 +712,118 @@ KIỂM TRA LẠI trước khi output.
 
         return blueprint, warnings
 
+    def _enforce_type_counts(
+        self,
+        blueprint: list[dict],
+        mcq_target: int,
+        essay_target: int,
+        ds_target: int,
+        sa_target: int,
+        scope_chapters: list[str] | None = None,
+    ) -> list[dict]:
+        """
+        Enforce exact per-type slot counts.
+
+        Keeps exactly mcq_target MCQ slots, essay_target essay slots,
+        ds_target dung_sai slots, and sa_target short_answer slots.
+        Truncates excess; pads missing with correct type slots.
+
+        Args:
+            scope_chapters: If provided, padded slots will have their chapter
+                assigned round-robin from this list instead of left empty,
+                preventing validate_blueprint failures on missing chapter.
+        """
+        type_targets = {
+            "mcq": mcq_target,
+            "essay": essay_target,
+            "dung_sai": ds_target,
+            "short_answer": sa_target,
+        }
+
+        # Separate by type
+        by_type: dict[str, list[dict]] = {t: [] for t in type_targets}
+        for slot in blueprint:
+            t = slot.get("type", "mcq")
+            if t in by_type:
+                by_type[t].append(slot)
+            else:
+                by_type["mcq"].append({**slot, "type": "mcq"})  # reclassify unknown
+
+        result: list[dict] = []
+        id_counters = {"mcq": 1, "essay": 1, "dung_sai": 1, "short_answer": 1}
+        prefix_map = {"mcq": "MCQ", "essay": "ESSAY", "dung_sai": "DS", "short_answer": "SA"}
+        bloom_cycle = ["nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"]
+        _pad_chapter_pool = scope_chapters if scope_chapters else []
+
+        for q_type, target in type_targets.items():
+            if target <= 0:
+                continue
+            slots = by_type[q_type][:target]  # truncate excess
+            # Pad missing slots
+            while len(slots) < target:
+                idx = len(slots)
+                # Use scope_chapters round-robin so chapter is never empty
+                fallback_chapter = (
+                    _pad_chapter_pool[idx % len(_pad_chapter_pool)]
+                    if _pad_chapter_pool else ""
+                )
+                slots.append({
+                    "question_id": f"{prefix_map[q_type]}_{id_counters[q_type]:03d}",
+                    "type": q_type,
+                    "bloom_level": bloom_cycle[idx % len(bloom_cycle)],
+                    "chapter": fallback_chapter,
+                    "section": "",
+                    "topic_hint": f"Câu hỏi mức {bloom_cycle[idx % len(bloom_cycle)]}",
+                    "content_type": "calculation" if q_type in ("short_answer", "dung_sai") else "text",
+                    "estimated_difficulty": 0.5,
+                })
+                id_counters[q_type] += 1
+            # Renumber IDs for consistency
+            for i, slot in enumerate(slots):
+                slot["question_id"] = f"{prefix_map[q_type]}_{i+1:03d}"
+            result.extend(slots)
+
+        return result
+
+    def _redistribute_chapters(
+        self,
+        blueprint: list[dict],
+        scope_chapters: list[str],
+    ) -> list[dict]:
+        """
+        Evenly redistribute chapter labels across the blueprint using
+        interleaved (true round-robin) assignment.
+
+        Called when teacher rejects with feedback — LLM can't override
+        chapter bias from context density, so we do it deterministically.
+
+        Uses interleaved round-robin: [Ch1,Ch2,Ch3,Ch4,Ch1,Ch2,...] so that
+        bloom levels spread evenly across all chapters rather than being
+        grouped by chapter in blocks (old: [Ch1×7, Ch2×7, ...]).
+
+        Preserves all other slot fields (bloom_level, type, topic_hint, etc.).
+        """
+        if not scope_chapters or not blueprint:
+            return blueprint
+
+        n = len(blueprint)
+        k = len(scope_chapters)
+
+        # Build interleaved chapter assignment (true round-robin).
+        # Each position i gets scope_chapters[i % k], which interleaves chapters
+        # so consecutive slots always cycle through all chapters.
+        # This ensures bloom levels (which are grouped by type in the input)
+        # are spread across chapters rather than stacked in chapter blocks.
+        result = []
+        for i, slot in enumerate(blueprint):
+            slot = dict(slot)
+            slot["chapter"] = scope_chapters[i % k]
+            # Clear section since chapter changed
+            slot["section"] = ""
+            result.append(slot)
+
+        return result
+
     def _build_context_summary(self, context: list[dict]) -> str:
         """Build a summary of retrieved context."""
         summary_parts = []
@@ -544,6 +860,7 @@ KIỂM TRA LẠI trước khi output.
         user_prompt = exam_config.get("user_prompt", "")
         extra_instructions = exam_config.get("extra_instructions", "")
         outline_feedback = exam_config.get("outline_feedback", "")
+        current_blueprint = exam_config.get("current_blueprint", [])
 
         feedback_section = ""
         if outline_feedback:
@@ -565,7 +882,72 @@ Hãy điều chỉnh blueprint theo phản hồi trên.
         if short_answer_count:
             type_breakdown += f"\n- Trả lời ngắn (điền số, type='short_answer'): {short_answer_count} câu"
 
-        prompt = f"""Tạo sườn đề kiểm tra với cấu hình sau:
+        # If teacher rejected and provided feedback + current blueprint
+        # → switch to MODIFICATION mode so LLM understands what to change
+        if outline_feedback and current_blueprint:
+            print(f"[OutlineAgent] MODIFICATION MODE: feedback='{outline_feedback[:60]}', blueprint_len={len(current_blueprint)}", flush=True)
+            # Compact blueprint for readability (only key fields)
+            compact_bp = [
+                {
+                    "question_id": s.get("question_id"),
+                    "type": s.get("type", "mcq"),
+                    "bloom_level": s.get("bloom_level"),
+                    "chapter": s.get("chapter"),
+                    "topic_hint": s.get("topic_hint", ""),
+                }
+                for s in current_blueprint
+            ]
+            current_dist = {}
+            for s in current_blueprint:
+                ch = s.get("chapter", "?")
+                current_dist[ch] = current_dist.get(ch, 0) + 1
+
+            return f"""Bạn là chuyên gia thiết kế đề thi. Nhiệm vụ là CHỈNH SỬA blueprint dưới đây theo đúng phản hồi của giáo viên.
+
+## BLUEPRINT HIỆN TẠI (cần chỉnh sửa):
+Phân bổ theo chương hiện tại: {json.dumps(current_dist, ensure_ascii=False)}
+Tổng số slot: {len(compact_bp)}
+
+Chi tiết blueprint:
+{json.dumps(compact_bp, ensure_ascii=False, indent=2)}
+
+## PHẢN HỒI CỦA GIÁO VIÊN (BẮT BUỘC TUÂN THEO):
+{outline_feedback}
+
+## HƯỚNG DẪN THỰC HIỆN (suy luận trước khi output):
+Tổng số câu = {total_questions}.
+- Nếu phản hồi đề cập đến % cho nhóm chương, hãy tính số câu cụ thể:
+  VD "60% chương 3, 4" → {round(total_questions * 0.6)} câu cho chương 3 và 4 cộng lại
+- Chỉ thay đổi field "chapter" (và "section", "topic_hint") của mỗi slot
+- Giữ nguyên "bloom_level" và "type" của từng slot để tổng bloom không thay đổi
+- Ghi rõ số câu mục tiêu mỗi chương TRƯỚC khi viết JSON
+
+## ⚠️ RÀNG BUỘC TUYỆT ĐỐI:
+- OUTPUT PHẢI CÓ ĐỦ {total_questions} SLOT — không được thiếu bất kỳ câu nào
+- Mỗi slot trong input PHẢI xuất hiện trong output (chỉ thay đổi chapter/section/topic_hint)
+- TỔNG SỐ CÂU: {total_questions} ({type_breakdown.replace(chr(10), ', ')})
+- Phân bổ Bloom (số câu chính xác): {json.dumps(bloom_counts, ensure_ascii=False)}
+- Phạm vi (scope): {json.dumps(scope, ensure_ascii=False)}
+- Mỗi chương phải có ít nhất 1 câu
+
+Trả về JSON theo đúng format (KHÔNG thêm markdown, chỉ JSON thuần):
+{{"blueprint": [<TOÀN BỘ {total_questions} slot đã chỉnh sửa>], "distribution_summary": {{"by_bloom": {{}}, "by_chapter": {{}}}}}}"""
+
+        print(f"[OutlineAgent] CREATION MODE: outline_feedback={bool(outline_feedback)}, has_blueprint={bool(current_blueprint)}", flush=True)
+        # Build feedback block for creation mode
+        feedback_block = ""
+        if outline_feedback:
+            feedback_block = f"""
+⚠️ PHẢN HỒI BẮT BUỘC PHẢI TUÂN THEO (HITL Rejection Feedback):
+═══════════════════════════════════════════════════════════════
+{outline_feedback}
+═══════════════════════════════════════════════════════════════
+Blueprint trước đã bị từ chối. Mày PHẢI điều chỉnh phân bổ chapter/bloom
+theo phản hồi trên trước khi làm bất cứ điều gì khác.
+
+"""
+
+        prompt = f"""{feedback_block}Tạo sườn đề kiểm tra với cấu hình sau:
 
 ## Phạm vi (scope):
 {json.dumps(scope, ensure_ascii=False)}
@@ -585,7 +967,7 @@ Hãy điều chỉnh blueprint theo phản hồi trên.
 
 ## Hướng dẫn bổ sung:
 {extra_instructions or "Sinh câu hỏi chuẩn mực, phù hợp với chương trình phổ thông Việt Nam."}
-{feedback_section}
+
 Tạo blueprint chi tiết:"""
 
         return prompt

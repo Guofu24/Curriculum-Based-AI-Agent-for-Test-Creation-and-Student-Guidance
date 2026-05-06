@@ -1188,7 +1188,7 @@ async def reject_blueprint(
         }
         logger.info(f"Resuming graph for exam {exam_id} with Command(resume={{approved: False}})")
         await graph.ainvoke(
-            Command(resume={"approved": False}),
+            Command(resume={"approved": False, "feedback": request.feedback}),
             config=config,
         )
     except Exception as e:

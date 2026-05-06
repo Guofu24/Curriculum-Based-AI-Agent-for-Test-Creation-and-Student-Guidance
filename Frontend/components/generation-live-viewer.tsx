@@ -418,11 +418,18 @@ export function GenerationLiveViewer({
               else if (lvl) dist[lvl] = 1
             }
             setBloomDist(dist)
-            // Add blueprint to feed
+            // Add/update blueprint in feed (update on re-generation after reject)
             if (slots.length > 0) {
               setFeedItems((prev) => {
-                if (prev.some((f) => f.kind === 'blueprint')) return prev
-                return [...prev, { id: 'blueprint', kind: 'blueprint' as const, slots, bloomDist: dist }]
+                const existingIdx = prev.findIndex((f) => f.kind === 'blueprint')
+                const newItem = { id: 'blueprint', kind: 'blueprint' as const, slots, bloomDist: dist }
+                if (existingIdx >= 0) {
+                  // Update existing blueprint feed item with new slots (after reject+regenerate)
+                  const next = [...prev]
+                  next[existingIdx] = newItem
+                  return next
+                }
+                return [...prev, newItem]
               })
             }
           }
@@ -491,10 +498,16 @@ export function GenerationLiveViewer({
               }
               setBloomDist(dist)
               bloomDistRef.current = dist
-              // Add blueprint to feed
+              // Add/update blueprint in feed (update on re-generation after reject)
               setFeedItems((prev) => {
-                if (prev.some((f) => f.kind === 'blueprint')) return prev
-                return [...prev, { id: 'blueprint', kind: 'blueprint' as const, slots: e.blueprint!, bloomDist: dist }]
+                const existingIdx = prev.findIndex((f) => f.kind === 'blueprint')
+                const newItem = { id: 'blueprint', kind: 'blueprint' as const, slots: e.blueprint!, bloomDist: dist }
+                if (existingIdx >= 0) {
+                  const next = [...prev]
+                  next[existingIdx] = newItem
+                  return next
+                }
+                return [...prev, newItem]
               })
             }
           }

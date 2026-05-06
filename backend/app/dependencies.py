@@ -132,6 +132,19 @@ async def get_current_user(
     return user
 
 
+async def get_current_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Get current authenticated admin user."""
+    from app.models.user import UserRole
+    if current_user.role != UserRole.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin privileges required",
+        )
+    return current_user
+
+
 async def get_optional_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),

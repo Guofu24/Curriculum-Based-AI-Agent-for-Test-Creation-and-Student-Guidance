@@ -50,6 +50,7 @@ class ExamGraphState(TypedDict, total=False):
     exam_id: str
     user_id: str
     document_id: str | None
+    textbook_namespace: str | None  # admin-uploaded textbook namespace (no document_id needed)
 
     # ── Config snapshot ───────────────────────────────────────────────────
     exam_config: dict

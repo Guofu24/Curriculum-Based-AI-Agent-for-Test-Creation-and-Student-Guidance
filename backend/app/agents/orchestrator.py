@@ -151,25 +151,10 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
         user_prompt: str | None = None,
         extra_instructions: str | None = None,
         document_id: str | None = None,
+        textbook_namespace: str | None = None,
     ) -> dict:
         """
         Main entry point: orchestrate the full exam generation pipeline via LangGraph.
-
-        Uses the LangGraph StateGraph instead of the manual if/elif flow.
-        Handles HITL interrupts by running a loop:
-          1. Run graph.ainvoke() until interrupt or completion
-          2. If interrupt: save state and return pause status
-          3. Frontend calls approve_blueprint/reject_blueprint to resume
-
-        Returns:
-            {
-                "exam_id": str,
-                "questions": [...],
-                "blueprint": {...},
-                "cost_report": {...},
-                "status": AgentStatus,
-                "warnings": [...],
-            }
         """
         if self.graph is None:
             from app.agents.graph.builder import build_exam_graph
@@ -185,15 +170,12 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             "exam_id": exam_id,
             "user_id": user_id,
             "document_id": document_id,
+            "textbook_namespace": textbook_namespace,
             "exam_config": exam_config,
             "user_prompt": user_prompt,
             "extra_instructions": extra_instructions,
-            # NOTE: redis and db_session are NOT stored in graph state — nodes
-            # retrieve them directly via get_redis_client() / async_session_maker()
-            # to avoid msgpack serialization errors with non-serializable objects.
         }
 
-        # Run the graph
         return await self._run_graph(initial_state, config)
 
     async def _run_graph(self, initial_state: dict, config: dict) -> dict:

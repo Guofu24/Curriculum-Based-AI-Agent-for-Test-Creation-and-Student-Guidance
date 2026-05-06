@@ -33,6 +33,8 @@ import {
   LogOut,
   ChevronUp,
   MessageSquare,
+  Users,
+  Database,
 } from 'lucide-react'
 import { useAuth } from '@/components/auth-provider'
 import { useRouter } from 'next/navigation'
@@ -120,6 +122,38 @@ export function AppSidebar() {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+
+        {user?.role === 'admin' && (
+          <SidebarGroup>
+            <SidebarGroupLabel>Quản trị viên</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                <SidebarMenuItem>
+                  <SidebarMenuButton 
+                    asChild 
+                    isActive={pathname === '/dashboard/admin/users' || pathname.startsWith('/dashboard/admin/users/')}
+                  >
+                    <Link href="/dashboard/admin/users">
+                      <Users className="size-4" />
+                      <span>Quản lý người dùng</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+                <SidebarMenuItem>
+                  <SidebarMenuButton 
+                    asChild 
+                    isActive={pathname === '/dashboard/admin/knowledge' || pathname.startsWith('/dashboard/admin/knowledge/')}
+                  >
+                    <Link href="/dashboard/admin/knowledge">
+                      <Database className="size-4" />
+                      <span>Quản lý kiến thức</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        )}
 
         <SidebarGroup>
           <SidebarGroupLabel>Hệ thống</SidebarGroupLabel>

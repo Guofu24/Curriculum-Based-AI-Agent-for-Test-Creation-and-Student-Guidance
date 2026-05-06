@@ -242,7 +242,9 @@ async def _run_generation_inline(
             SSEvent.plan_step("Bat dau sinh de...", 0, 5),
         )
 
-        use_demo_mode = settings.DEMO_MODE or not document_id
+        use_builtin_knowledge = (exam_config or {}).get("use_builtin_knowledge", False)
+        textbook_namespace = (exam_config or {}).get("textbook_namespace") or None
+        use_demo_mode = settings.DEMO_MODE or (not document_id and not use_builtin_knowledge)
         if use_demo_mode:
             await manager.emit(
                 exam_id or "",
@@ -313,6 +315,7 @@ async def _run_generation_inline(
                 user_prompt=user_prompt or "",
                 extra_instructions=extra_instructions or "",
                 document_id=document_id,
+                textbook_namespace=textbook_namespace,
             )
 
         generated_questions = result.get("questions", [])
@@ -450,6 +453,8 @@ def _map_fe_to_be_request(data: dict) -> ExamConfigRequest:
         bloom_distribution=BloomDistribution(**bloom),
         user_prompt=data.get("user_prompt") or data.get("prompt") or None,
         extra_instructions=data.get("extra_instructions") or data.get("instructions") or None,
+        use_builtin_knowledge=bool(data.get("use_builtin_knowledge", False)),
+        knowledge_namespace=data.get("knowledge_namespace") or None,
     )
 
 
@@ -510,12 +515,17 @@ async def generate_exam_fe(
             scope=config.scope,
             exam_config={
                 "exam_type": config.exam_type,
+                "exam_mode": config.exam_mode,
                 "mcq_count": config.mcq_count,
                 "essay_count": config.essay_count,
+                "dung_sai_count": config.dung_sai_count,
+                "short_answer_count": config.short_answer_count,
                 "bloom_distribution": config.bloom_distribution.model_dump(),
                 "user_prompt": config.user_prompt,
                 "extra_instructions": config.extra_instructions,
                 "scope_sections": scope_sections if scope_sections else None,
+                "use_builtin_knowledge": config.use_builtin_knowledge,
+                "textbook_namespace": config.knowledge_namespace,
             },
         )
     except Exception as e:

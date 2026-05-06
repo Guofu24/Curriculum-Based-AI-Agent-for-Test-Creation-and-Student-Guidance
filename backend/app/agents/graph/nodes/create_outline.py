@@ -35,11 +35,37 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
 
     # G8: Inject rejection feedback into exam_config for re-generation
     rejection_history = state.get("checkpoint_1_rejection_history", [])
+    print(f"[create_outline] exam_id={exam_id}, rejection_history_len={len(rejection_history)}, entries={[r.get('feedback','')[:60] for r in rejection_history]}", flush=True)
     if rejection_history:
         last_feedback = rejection_history[-1].get("feedback", "")
         if last_feedback:
             exam_config["outline_feedback"] = last_feedback
+            # Pass the current blueprint so LLM can modify it (not generate from scratch)
+            current_blueprint = state.get("blueprint", [])
+            if current_blueprint:
+                exam_config["current_blueprint"] = current_blueprint
             warnings.append("Injecting blueprint rejection feedback for regeneration")
+            print(f"[create_outline] FEEDBACK INJECTED (from state): {last_feedback[:100]}", flush=True)
+    else:
+        # Fallback: read from Redis in case LangGraph state didn't persist rejection_history
+        try:
+            from app.core.redis_client import get_redis_client
+            import json as _json
+            _redis = get_redis_client()
+            _key = f"hitl:rejected:{exam_id}:1"
+            _raw = await _redis.get(_key)
+            if _raw:
+                _data = _json.loads(_raw) if isinstance(_raw, str) else _raw
+                _feedback = _data.get("feedback", "")
+                if _feedback:
+                    exam_config["outline_feedback"] = _feedback
+                    current_blueprint = state.get("blueprint", [])
+                    if current_blueprint:
+                        exam_config["current_blueprint"] = current_blueprint
+                    warnings.append("Injecting blueprint rejection feedback from Redis fallback")
+                    print(f"[create_outline] FEEDBACK INJECTED (from Redis): {_feedback[:100]}", flush=True)
+        except Exception as _e:
+            print(f"[create_outline] Redis fallback failed: {_e}", flush=True)
 
     print(f"[create_outline] exam_id={exam_id}, retrieved_context_chunks={len(retrieved_context)}, calling OutlineAgent...", flush=True)
 
