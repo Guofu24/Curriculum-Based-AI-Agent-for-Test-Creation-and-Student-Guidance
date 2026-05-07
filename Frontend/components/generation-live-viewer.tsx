@@ -18,14 +18,10 @@ import {
   Database,
   ShieldCheck,
   FileCheck,
-  Loader,
   Wifi,
   WifiOff,
   PartyPopper,
-  Eye,
-  FileText,
   ListChecks,
-  Info,
   Pencil,
   RefreshCw,
   MessageCircle,
@@ -33,7 +29,6 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
-import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { examsApi } from "@/lib/api"
@@ -283,8 +278,7 @@ export function GenerationLiveViewer({
   // Completion
   const [completed, setCompleted] = useState(false)
   const [showCelebration, setShowCelebration] = useState(false)
-  const [completionBlueprint, setCompletionBlueprint] = useState<BlueprintSlot[]>([])
-  const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
+const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
   const [costReport, setCostReport] = useState<CostReport | null>(null)
 
   // Per-question edit state (CP2)
@@ -312,9 +306,6 @@ export function GenerationLiveViewer({
 
   // ─── Derived ────────────────────────────────────────────────────────────────
 
-  const completedCount = steps.filter((s) => s.completed).length
-  const progressPct = Math.round((completedCount / PIPELINE_STEPS.length) * 100)
-  const currentStep = steps.find((s) => s.active)
 
   // ─── WebSocket URL resolver ──────────────────────────────────────────────────
 
@@ -479,9 +470,6 @@ export function GenerationLiveViewer({
             const d = e.data as HitlCheckpointEvent["data"]
             setCostReport(d.cost_report || null)
             setBloomDist(d.distribution_summary || bloomDistRef.current)
-            if ((d as { blueprint?: BlueprintSlot[] }).blueprint) {
-              setCompletionBlueprint((d as { blueprint: BlueprintSlot[] }).blueprint)
-            }
           }
           break
         }
@@ -653,17 +641,11 @@ export function GenerationLiveViewer({
 
   // ─── HITL approval ──────────────────────────────────────────────────────────
 
-
   const handleApprove = async () => {
     const cp = lastSeenCheckpointRef.current ?? activeCheckpointRef.current ?? 1
     setHitlApproving(true)
     try {
       await onApprove(examId, true, undefined, cp)
-      // Only mark as approved if we're still on the same checkpoint.
-      // approveBlueprint is a blocking call that returns AFTER the graph has run
-      // to the next interrupt — by then the WebSocket may have already delivered
-      // hitl_checkpoint N+1 and reset hitlApproved=false. Setting it back to true
-      // here would override that reset and hide the approval button for the next CP.
       if (activeCheckpointRef.current === cp) {
         setHitlApproved(true)
         hitlApprovedRef.current = true
@@ -747,49 +729,42 @@ export function GenerationLiveViewer({
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col min-h-screen bg-background">
+    <div className="flex flex-col bg-background">
 
       {/* ── Header ── */}
-      <header className="flex items-center justify-between px-6 py-4 border-b bg-card/80 backdrop-blur-sm">
+      <header className="sticky top-0 z-10 flex items-center justify-between px-6 py-3 border-b bg-background/95 backdrop-blur-sm">
         <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
-            <Brain className="h-5 w-5" />
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <Brain className="h-4 w-4" />
           </div>
           <div>
-            <h1 className="text-base font-semibold text-foreground">
+            <h1 className="text-sm font-semibold text-foreground">
               {completed ? "Đề thi đã sẵn sàng" : isGenerating ? "Đang sinh đề thi" : "Sẵn sàng tạo đề"}
             </h1>
-            <p className="text-xs text-muted-foreground font-mono">
-              exam · {examId.slice(0, 8)}
+            <p className="text-[11px] text-muted-foreground font-mono">
+              {examId.slice(0, 8)}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           {questions.length > 0 && (
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary/60 text-sm">
-              <span className="text-muted-foreground">Câu:</span>
-              <span className="font-semibold tabular-nums">{questions.length}</span>
-            </div>
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {questions.length} câu hỏi
+            </span>
           )}
-          <div
-            className={cn(
-              "flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border",
-              connState === "connected" && "border-emerald-200 bg-emerald-50 text-emerald-700",
-              connState === "connecting" && "border-amber-200 bg-amber-50 text-amber-700",
-              connState === "error" && "border-red-200 bg-red-50 text-red-700",
-              connState === "idle" && "border-muted bg-muted text-muted-foreground"
-            )}
-          >
-            {connState === "connected" ? (
-              <Wifi className="h-3 w-3" />
-            ) : (
-              <WifiOff className="h-3 w-3" />
-            )}
+          <div className={cn(
+            "flex items-center gap-1.5 text-[11px] px-2.5 py-1 rounded-full border",
+            connState === "connected" && "border-emerald-200 bg-emerald-50 text-emerald-700",
+            connState === "connecting" && "border-amber-200 bg-amber-50 text-amber-700",
+            connState === "error" && "border-red-200 bg-red-50 text-red-700",
+            connState === "idle" && "border-muted bg-muted text-muted-foreground",
+          )}>
+            {connState === "connected" ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
             {connState === "connected" && (
-              <span className="relative flex h-2 w-2">
+              <span className="relative flex h-1.5 w-1.5">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
               </span>
             )}
             <span>
@@ -801,876 +776,408 @@ export function GenerationLiveViewer({
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* ── Left sidebar ── */}
-        <div className="w-[340px] shrink-0 border-r overflow-y-auto p-5 space-y-4">
+      {/* ── Pipeline progress strip ── */}
+      <div className="border-b bg-muted/30 px-6 py-3">
+        <div className="max-w-2xl mx-auto flex items-center">
+          {PIPELINE_STEPS.map((step, i) => {
+            const s = steps.find(x => x.step === step.id)
+            const isCompleted = s?.completed
+            const isActive = s?.active
+            const StepIcon = step.icon
+            return (
+              <div key={step.id} className="flex items-center flex-1 last:flex-none">
+                <div className="flex flex-col items-center gap-0.5">
+                  <div className={cn(
+                    "h-6 w-6 rounded-full flex items-center justify-center border transition-all",
+                    isCompleted && "bg-primary border-primary text-primary-foreground",
+                    isActive && !isCompleted && "border-primary text-primary bg-primary/10",
+                    !isCompleted && !isActive && "border-border text-muted-foreground bg-background"
+                  )}>
+                    {isCompleted ? <Check className="h-3 w-3" /> : isActive ? <Loader2 className="h-3 w-3 animate-spin" /> : <StepIcon className="h-3 w-3" />}
+                  </div>
+                  <span className={cn(
+                    "text-[9px] font-medium text-center leading-tight max-w-[56px]",
+                    isActive && "text-primary",
+                    isCompleted && "text-muted-foreground",
+                    !isActive && !isCompleted && "text-muted-foreground/40",
+                  )}>{step.label}</span>
+                </div>
+                {i < PIPELINE_STEPS.length - 1 && (
+                  <div className={cn("flex-1 h-px mx-1 mb-4 transition-colors", isCompleted ? "bg-primary" : "bg-border")} />
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
 
-          {/* Progress summary */}
-          <div className="rounded-xl border bg-card p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium text-foreground">Tiến độ</span>
-              <span className="text-xs text-muted-foreground tabular-nums">
-                {completedCount}/{PIPELINE_STEPS.length} bước
-              </span>
+      {/* ── Main feed (single centered column) ── */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-2xl mx-auto px-4 py-6">
+
+          {/* Empty state */}
+          {feedItems.length === 0 && !completed && activeCheckpoint === null && (
+            <div className="flex flex-col items-center justify-center py-24 gap-3 text-muted-foreground">
+              <div className="relative flex h-10 w-10 items-center justify-center">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/20" />
+                <Brain className="h-5 w-5 text-primary relative z-10" />
+              </div>
+              <p className="text-sm">Đang kết nối pipeline AI...</p>
             </div>
-            <Progress value={progressPct} className="h-1.5" />
-            <p className="text-xs text-muted-foreground text-right tabular-nums">{progressPct}%</p>
-          </div>
+          )}
 
-          {/* ── Pipeline steps ── */}
-          <div className="rounded-xl border bg-card p-4 space-y-0">
-            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-3">
-              Pipeline
-            </p>
-            {PIPELINE_STEPS.map((step, index) => {
-              const s = steps.find((x) => x.step === step.id)
-              const isCompleted = s?.completed
-              const isActive = s?.active
-              const StepIcon = step.icon
-
-              return (
-                <div key={step.id} className="flex items-start gap-3">
-                  <div className="flex flex-col items-center">
-                    <div
-                      className={cn(
-                        "flex h-7 w-7 items-center justify-center rounded-lg border-2 transition-all duration-300",
-                        isCompleted && "border-primary bg-primary text-primary-foreground",
-                        isActive && !isCompleted && "border-primary bg-primary/10 text-primary animate-pulse",
-                        !isCompleted && !isActive && "border-border bg-muted text-muted-foreground"
-                      )}
-                    >
-                      {isCompleted ? (
-                        <Check className="h-3.5 w-3.5" />
-                      ) : isActive ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <StepIcon className="h-3.5 w-3.5" />
-                      )}
-                    </div>
-                    {index < PIPELINE_STEPS.length - 1 && (
-                      <div
-                        className={cn(
-                          "w-0.5 flex-1 my-1 transition-colors duration-300",
-                          isCompleted ? "bg-primary" : "bg-border"
-                        )}
-                        style={{ minHeight: 12 }}
-                      />
-                    )}
-                  </div>
-
-                  <div className="flex flex-col pb-4 pt-0.5 min-w-0">
-                    <span
-                      className={cn(
-                        "text-sm font-medium transition-colors",
-                        isCompleted && "text-foreground",
-                        isActive && !isCompleted && "text-primary",
-                        !isCompleted && !isActive && "text-muted-foreground"
-                      )}
-                    >
-                      {step.label}
-                    </span>
-                    {s?.message && (
-                      <span
-                        className={cn(
-                          "text-xs mt-0.5 italic",
-                          isActive ? "text-muted-foreground" : "text-muted-foreground/70"
-                        )}
-                      >
-                        {s.message}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-
-          {/* ── HITL Checkpoint 0: Requirements Confirmation ── */}
+          {/* CP0 Requirements — shown before any feed items */}
           {activeCheckpoint === 0 && requirementsData && (
-            <HITLCard
-              title="Xác nhận yêu cầu"
-              subtitle="Checkpoint 0 — Kiểm tra yêu cầu trước khi bắt đầu"
-              icon={<ListChecks className="h-4 w-4" />}
-              colorClass="border-blue-200 bg-gradient-to-br from-blue-50 to-indigo-50"
-              iconBg="bg-blue-200 text-blue-800"
-              infoTooltip={
-                <div className="space-y-1.5">
-                  <p className="font-semibold text-foreground">Checkpoint 0 là gì?</p>
-                  <p className="text-muted-foreground">
-                    Đây là bước <strong>xác nhận yêu cầu</strong> trước khi AI bắt đầu tạo đề. Hệ thống sẽ kiểm tra:
-                  </p>
-                  <ul className="text-muted-foreground list-disc list-inside space-y-0.5">
-                    <li>Phạm vi đề thi (các chương đã chọn)</li>
-                    <li>Số lượng câu hỏi (MCQ / Essay)</li>
-                    <li>Phân bố Bloom Taxonomy</li>
-                    <li>Yêu cầu bổ sung của bạn</li>
-                  </ul>
-                  <p className="text-muted-foreground pt-1">
-                    Nếu thông tin chính xác, nhấn <strong>Xác nhận</strong> để tiếp tục.
-                    Nếu có sai sót, nhấn <strong>Từ chối</strong> và mô tả vấn đề.
-                  </p>
-                </div>
-              }
-            >
-              <div className="space-y-2 text-xs">
+            <div className="mb-5 rounded-xl border border-blue-200 bg-blue-50/50 p-4 space-y-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
+              <div className="flex items-center gap-2">
+                <ListChecks className="h-4 w-4 text-blue-600 shrink-0" />
+                <span className="text-sm font-semibold text-blue-900">Xác nhận yêu cầu tạo đề</span>
+              </div>
+              <div className="space-y-1.5 text-xs">
                 {requirementsData.scope && (
-                  <div>
-                    <span className="font-medium text-foreground">Phạm vi: </span>
-                    <span className="text-muted-foreground">{requirementsData.scope.join(", ")}</span>
-                  </div>
+                  <p><span className="font-medium text-foreground">Phạm vi: </span><span className="text-muted-foreground">{requirementsData.scope.join(", ")}</span></p>
                 )}
                 {(requirementsData.mcq_count || requirementsData.total_questions) && (
-                  <div>
+                  <p>
                     <span className="font-medium text-foreground">Số câu: </span>
                     <span className="text-muted-foreground">
                       {requirementsData.mcq_count ? `${requirementsData.mcq_count} MCQ` : ""}
                       {requirementsData.essay_count ? ` + ${requirementsData.essay_count} Essay` : ""}
-                      {!requirementsData.mcq_count && requirementsData.total_questions
-                        ? `${requirementsData.total_questions} câu`
-                        : null}
+                      {!requirementsData.mcq_count && requirementsData.total_questions ? `${requirementsData.total_questions} câu` : ""}
                     </span>
-                  </div>
+                  </p>
                 )}
                 {requirementsData.bloom_distribution_summary && (
-                  <div className="mt-2 p-2 rounded bg-white/60 border border-blue-100">
-                    <span className="font-medium text-foreground">Phân bố Bloom:</span>
-                    <pre className="mt-1 text-muted-foreground whitespace-pre-wrap font-sans">
-                      {requirementsData.bloom_distribution_summary}
-                    </pre>
-                  </div>
-                )}
-                {requirementsData.user_prompt && (
-                  <div>
-                    <span className="font-medium text-foreground">Yêu cầu thêm: </span>
-                    <span className="text-muted-foreground italic">{requirementsData.user_prompt}</span>
-                  </div>
+                  <pre className="mt-2 p-2 rounded bg-white/60 border border-blue-100 text-muted-foreground whitespace-pre-wrap font-sans text-[11px]">
+                    {requirementsData.bloom_distribution_summary}
+                  </pre>
                 )}
               </div>
-
-              {hitlApproved ? (
-                <div className="flex items-center gap-2 rounded-lg bg-emerald-100 border border-emerald-200 px-3 py-2 mt-3">
-                  <Check className="h-4 w-4 text-emerald-600" />
-                  <span className="text-sm font-medium text-emerald-800">Đã xác nhận</span>
-                </div>
-              ) : (
-                <div className="flex gap-2 mt-3">
-                  <Button size="sm" className="flex-1 h-9 bg-emerald-600 hover:bg-emerald-700"
+              {!hitlApproved ? (
+                <div className="flex gap-2 pt-1">
+                  <Button size="sm" className="flex-1 bg-emerald-600 hover:bg-emerald-700 h-8"
                     onClick={handleApprove} disabled={hitlApproving || hitlRejecting}>
-                    {hitlApproving ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      : <ThumbsUp className="h-3.5 w-3.5" />}
+                    {hitlApproving ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" /> : <ThumbsUp className="h-3.5 w-3.5 mr-1.5" />}
                     Xác nhận
                   </Button>
-                  <Button size="sm" variant="outline"
-                    className="flex-1 h-9 border-blue-300 text-blue-800 hover:bg-blue-100"
+                  <Button size="sm" variant="outline" className="flex-1 h-8 text-destructive border-destructive/30 hover:bg-destructive/5"
                     onClick={openRejectDialog} disabled={hitlApproving || hitlRejecting}>
-                    {hitlRejecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      : <X className="h-3.5 w-3.5" />}
-                    Từ chối
+                    <X className="h-3.5 w-3.5 mr-1.5" />Từ chối
                   </Button>
                 </div>
-              )}
-            </HITLCard>
-          )}
-
-          {/* ── HITL Checkpoint 1: Blueprint Review ── */}
-          {activeCheckpoint === 1 && (
-            <HITLCard
-              title="Xem xét sườn đề"
-              subtitle="Checkpoint 1 — Xem ma trận trước khi sinh câu hỏi"
-              icon={<Eye className="h-4 w-4" />}
-              colorClass="border-amber-200 bg-gradient-to-br from-amber-50 to-orange-50"
-              iconBg="bg-amber-200 text-amber-800"
-              infoTooltip={
-                <div className="space-y-1.5">
-                  <p className="font-semibold text-foreground">Checkpoint 1 là gì?</p>
-                  <p className="text-muted-foreground">
-                    Đây là bước <strong>xem xét sườn đề (blueprint)</strong>. AI đã lên kế hoạch tổng thể:
-                  </p>
-                  <ul className="text-muted-foreground list-disc list-inside space-y-0.5">
-                    <li>Bao nhiêu câu hỏi cho mỗi loại (MCQ / Essay)</li>
-                    <li>Phân bố Bloom cho mỗi câu hỏi</li>
-                    <li>Câu hỏi thuộc chương nào</li>
-                    <li>Độ khó ước tính của từng câu</li>
-                  </ul>
-                  <p className="text-muted-foreground pt-1">
-                    Nếu blueprint phù hợp, nhấn <strong>Xác nhận sườn đề</strong>.
-                    Nếu cần thay đổi (thiếu chương, sai phân bố Bloom...), nhấn <strong>Từ chối</strong> và mô tả.
-                  </p>
-                </div>
-              }
-            >
-              {blueprintSlots.length === 0 ? (
-                <div className="text-center py-4">
-                  <p className="text-xs text-muted-foreground">
-                    Đang tải sườn đề...
-                  </p>
-                </div>
               ) : (
-                <>
-                  {/* Blueprint summary */}
-                  <div className="flex items-center gap-2 mb-2">
-                    <FileText className="h-3.5 w-3.5 text-muted-foreground" />
-                    <span className="text-xs text-muted-foreground">
-                      {blueprintSlots.length} câu hỏi trong sườn đề
-                    </span>
-                  </div>
-
-                  {/* Blueprint table */}
-                  <div className="rounded-lg border border-amber-200/60 bg-white/70 overflow-hidden">
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-xs">
-                        <thead>
-                          <tr className="border-b border-amber-200/40 bg-amber-50/50">
-                            <th className="px-2 py-1.5 text-left font-semibold text-amber-900">#</th>
-                            <th className="px-2 py-1.5 text-left font-semibold text-amber-900">Loại</th>
-                            <th className="px-2 py-1.5 text-left font-semibold text-amber-900">Bloom</th>
-                            <th className="px-2 py-1.5 text-left font-semibold text-amber-900">Chương</th>
-                            <th className="px-2 py-1.5 text-left font-semibold text-amber-900">Độ khó</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {blueprintSlots.map((slot, i) => {
-                            const bloomLvl = slot.bloom_level as BloomLevel | undefined
-                            const bloomInfo = bloomLvl && BLOOM_CONFIG[bloomLvl] ? BLOOM_CONFIG[bloomLvl] : null
-                            return (
-                              <tr key={slot.question_id || i} className="border-b border-amber-100/40 last:border-0">
-                                <td className="px-2 py-1.5 font-mono text-muted-foreground">{i + 1}</td>
-                                <td className="px-2 py-1.5">
-                                  <Badge
-                                    variant={(slot.type || "mcq") === "mcq" ? "secondary" : "outline"}
-                                    className="text-[10px] px-1.5"
-                                  >
-                                    {(slot.type || "mcq").toUpperCase()}
-                                  </Badge>
-                                </td>
-                                <td className="px-2 py-1.5">
-                                  {bloomInfo ? (
-                                    <span className={cn("font-medium", bloomInfo.color)}>
-                                      {bloomInfo.short}
-                                    </span>
-                                  ) : (
-                                    <span className="text-muted-foreground">—</span>
-                                  )}
-                                </td>
-                                <td className="px-2 py-1.5 text-muted-foreground truncate max-w-[80px]">
-                                  {slot.chapter || "—"}
-                                </td>
-                                <td className="px-2 py-1.5 text-muted-foreground">
-                                  {slot.estimated_difficulty != null
-                                    ? `${Math.round(slot.estimated_difficulty * 100)}%`
-                                    : "—"}
-                                </td>
-                              </tr>
-                            )
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {/* Bloom distribution */}
-                    {bloomDist && Object.keys(bloomDist).length > 0 && (
-                      <div className="border-t border-amber-200/40 px-2 py-2 space-y-1">
-                        <p className="text-[10px] font-semibold text-amber-800 uppercase tracking-wide">
-                          Phân bố Bloom
-                        </p>
-                        <div className="flex flex-wrap gap-1">
-                          {BLOOM_ORDER.filter((b) => bloomDist[b]).map((b) => (
-                            <span
-                              key={b}
-                              className={cn(
-                                "text-[10px] px-1.5 py-0.5 rounded border font-medium",
-                                BLOOM_CONFIG[b].bg,
-                                BLOOM_CONFIG[b].color
-                              )}
-                            >
-                              {BLOOM_CONFIG[b].short}: {bloomDist[b]}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </>
-              )}
-
-              {hitlApproved ? (
-                <div className="flex items-center gap-2 rounded-lg bg-emerald-100 border border-emerald-200 px-3 py-2 mt-3">
+                <div className="flex items-center gap-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2">
                   <Check className="h-4 w-4 text-emerald-600" />
-                  <span className="text-sm font-medium text-emerald-800">Đã xác nhận sườn đề</span>
-                </div>
-              ) : (
-                <div className="flex gap-2 mt-3">
-                  <Button size="sm" className="flex-1 h-9 bg-emerald-600 hover:bg-emerald-700"
-                    onClick={handleApprove} disabled={hitlApproving || hitlRejecting}>
-                    {hitlApproving ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      : <ThumbsUp className="h-3.5 w-3.5" />}
-                    Xác nhận sườn đề
-                  </Button>
-                  <Button size="sm" variant="outline"
-                    className="flex-1 h-9 border-amber-300 text-amber-800 hover:bg-amber-100"
-                    onClick={openRejectDialog} disabled={hitlApproving || hitlRejecting}>
-                    {hitlRejecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      : <X className="h-3.5 w-3.5" />}
-                    Từ chối
-                  </Button>
+                  <span className="text-sm font-medium text-emerald-800">Đã xác nhận — đang bắt đầu...</span>
                 </div>
               )}
-            </HITLCard>
+            </div>
           )}
 
-          {/* ── HITL Checkpoint 2: Full Review ── */}
-          {activeCheckpoint === 2 && (
-            <HITLCard
-              title="Xem xét đề hoàn chỉnh"
-              subtitle="Checkpoint 2 — Kiểm tra đề trước khi hoàn tất"
-              icon={<ShieldCheck className="h-4 w-4" />}
-              colorClass="border-violet-200 bg-gradient-to-br from-violet-50 to-purple-50"
-              iconBg="bg-violet-200 text-violet-800"
-            >
-              <div className="space-y-2">
-                {validationIssues.length > 0 ? (
-                  <div className="space-y-1">
-                    <p className="text-xs font-medium text-destructive">
-                      {validationIssues.length} vấn đề được phát hiện:
-                    </p>
-                    {validationIssues.slice(0, 5).map((issue, i) => (
-                      <div key={i} className="flex items-start gap-1.5 p-1.5 rounded bg-red-50 border border-red-100">
-                        <AlertCircle className="h-3 w-3 text-red-500 shrink-0 mt-0.5" />
-                        <div>
-                          <p className="text-[10px] font-semibold text-red-700">
-                            {issue.question_id}
-                            {issue.issue_type && <span className="ml-1">— {issue.issue_type}</span>}
-                          </p>
-                          {issue.detail && <p className="text-[10px] text-red-600">{issue.detail}</p>}
-                          {issue.suggestion && <p className="text-[10px] text-emerald-600">→ {issue.suggestion}</p>}
-                        </div>
+          {/* Feed items */}
+          {feedItems.map((item, idx) => {
+
+            // ─── Reasoning / thinking block ───────────────────────────────
+            if (item.kind === 'reasoning') {
+              const isLast = idx === feedItems.length - 1
+              const isStreaming = isLast && isGenerating
+              const chunksText = item.chunks.join('')
+              const hasChunks = chunksText.length > 0
+              return (
+                <ThinkingBlock
+                  key={item.id}
+                  label={item.stepLabel}
+                  message={item.message}
+                  chunksText={chunksText}
+                  hasChunks={hasChunks}
+                  isStreaming={isStreaming}
+                />
+              )
+            }
+
+            // ─── Blueprint ─────────────────────────────────────────────────
+            if (item.kind === 'blueprint') {
+              return (
+                <div key={item.id} className="mb-5 animate-in fade-in slide-in-from-bottom-2 duration-400">
+                  <div className="rounded-xl border bg-card shadow-sm overflow-hidden">
+                    <div className="px-4 py-3 border-b bg-muted/20 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Database className="h-4 w-4 text-primary" />
+                        <span className="text-sm font-semibold">Sườn đề · {item.slots.length} câu hỏi</span>
                       </div>
-                    ))}
-                    {validationIssues.length > 5 && (
-                      <p className="text-[10px] text-muted-foreground text-center">
-                        +{validationIssues.length - 5} vấn đề khác
-                      </p>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 p-2 rounded bg-emerald-50 border border-emerald-100">
-                    <Check className="h-3.5 w-3.5 text-emerald-600" />
-                    <span className="text-xs text-emerald-700 font-medium">Đề đạt yêu cầu kiểm tra</span>
-                  </div>
-                )}
-                <p className="text-xs text-muted-foreground mt-2">
-                  {questions.length} câu hỏi đã được tạo
-                </p>
-
-                {/* Per-question list for CP2 editing */}
-                {questions.length > 0 && (
-                  <div className="mt-3 space-y-1.5">
-                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
-                      Chỉnh sửa từng câu
-                    </p>
-                    <div className="max-h-64 overflow-y-auto space-y-1 pr-0.5">
-                      {questions.map((q, i) => {
-                        const qId = q.question_id || `q-${i}`
-                        const isSelected = selectedQuestionId === qId
-                        const isRegenerating = questionRegenerating === qId
-                        const bloomLvl = q.bloom_level as BloomLevel | undefined
-                        const bloomInfo = bloomLvl && BLOOM_CONFIG[bloomLvl] ? BLOOM_CONFIG[bloomLvl] : null
-                        const stem = q.stem || q.content || ""
+                      <div className="flex gap-1.5 flex-wrap">
+                        {BLOOM_ORDER.filter(b => item.bloomDist[b]).map(b => (
+                          <span key={b} className={cn("text-[10px] px-1.5 py-0.5 rounded border font-medium", BLOOM_CONFIG[b]?.bg, BLOOM_CONFIG[b]?.color)}>
+                            {BLOOM_CONFIG[b]?.short} {item.bloomDist[b]}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="divide-y">
+                      {item.slots.map((slot, i) => {
+                        const bl = slot.bloom_level as BloomLevel | undefined
+                        const bc = bl && BLOOM_CONFIG[bl] ? BLOOM_CONFIG[bl] : null
                         return (
-                          <div key={qId} className="rounded-lg border border-violet-100 bg-white/60 overflow-hidden">
-                            {/* Question summary row */}
-                            <div
-                              className="flex items-center gap-2 px-2.5 py-2 cursor-pointer hover:bg-violet-50/50 transition-colors"
-                              onClick={() => {
-                                setSelectedQuestionId(isSelected ? null : qId)
-                                setQuestionEditPrompt("")
-                              }}
-                            >
-                              <span className="text-[10px] text-muted-foreground font-mono w-6 shrink-0">{i + 1}.</span>
-                              {bloomInfo && (
-                                <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-medium shrink-0", bloomInfo.bg, bloomInfo.color)}>
-                                  {bloomInfo.short}
-                                </span>
-                              )}
-                              <span className="text-xs text-foreground truncate flex-1">
-                                {stem.slice(0, 60)}{stem.length > 60 ? "..." : ""}
-                              </span>
-                              <Pencil className="h-3 w-3 text-muted-foreground shrink-0" />
+                          <div key={slot.question_id || i} className="flex items-start gap-3 px-4 py-2.5 hover:bg-muted/10 transition-colors">
+                            <span className="w-5 text-xs text-muted-foreground/50 text-right shrink-0 pt-0.5">{i + 1}</span>
+                            <div className="flex items-center gap-1.5 shrink-0 pt-0.5">
+                              <Badge variant={(slot.type || 'mcq') === 'mcq' ? 'secondary' : 'outline'} className="text-[10px] px-1.5">
+                                {(slot.type || 'mcq').toUpperCase()}
+                              </Badge>
+                              {bc && <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-medium", bc.bg, bc.color)}>{bc.short}</span>}
                             </div>
-
-                            {/* Inline edit panel */}
-                            {isSelected && (
-                              <div className="border-t border-violet-100 bg-violet-50/30 p-2.5 space-y-2">
-                                <textarea
-                                  className="w-full text-xs rounded border border-violet-200 bg-white/80 px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-violet-300"
-                                  rows={2}
-                                  placeholder="Nhập yêu cầu chỉnh sửa câu này... (để trống để tạo lại ngẫu nhiên)"
-                                  value={questionEditPrompt}
-                                  onChange={(e) => setQuestionEditPrompt(e.target.value)}
-                                  disabled={isRegenerating}
-                                />
-                                <div className="flex gap-1.5">
-                                  <button
-                                    className="flex items-center gap-1 text-[10px] px-2.5 py-1.5 rounded bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
-                                    disabled={isRegenerating}
-                                    onClick={async () => {
-                                      setQuestionRegenerating(qId)
-                                      try {
-                                        await examsApi.partialRegenerate(examId, {
-                                          question_id: qId,
-                                          prompt: questionEditPrompt,
-                                        })
-                                        setSelectedQuestionId(null)
-                                        setQuestionEditPrompt("")
-                                      } catch (e) {
-                                        console.error("Partial regenerate failed:", e)
-                                        setQuestionRegenerating(null)
-                                      }
-                                    }}
-                                  >
-                                    {isRegenerating ? (
-                                      <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                                    ) : (
-                                      <RefreshCw className="h-2.5 w-2.5" />
-                                    )}
-                                    {isRegenerating ? "Đang tạo..." : "Tạo lại câu này"}
-                                  </button>
-                                  <button
-                                    className="flex items-center gap-1 text-[10px] px-2 py-1.5 rounded border border-violet-200 text-violet-700 hover:bg-violet-100 transition-colors"
-                                    onClick={() => { setSelectedQuestionId(null); setQuestionEditPrompt("") }}
-                                  >
-                                    Hủy
-                                  </button>
-                                </div>
-                              </div>
-                            )}
+                            <div className="flex-1 min-w-0">
+                              {slot.chapter && <p className="text-xs text-muted-foreground/70 mb-0.5">{slot.chapter as string}</p>}
+                              {slot.topic_hint && <p className="text-sm text-foreground">{slot.topic_hint as string}</p>}
+                            </div>
                           </div>
                         )
                       })}
                     </div>
                   </div>
-                )}
-              </div>
 
-              {hitlApproved ? (
-                <div className="flex items-center gap-2 rounded-lg bg-emerald-100 border border-emerald-200 px-3 py-2 mt-3">
-                  <Check className="h-4 w-4 text-emerald-600" />
-                  <span className="text-sm font-medium text-emerald-800">Đã xác nhận</span>
+                  {/* Inline HITL CP1 actions */}
+                  {activeCheckpoint === 1 && !hitlApproved && (
+                    <div className="mt-3 flex gap-2">
+                      <Button className="flex-1 bg-emerald-600 hover:bg-emerald-700 h-9 text-sm"
+                        onClick={handleApprove} disabled={hitlApproving || hitlRejecting}>
+                        {hitlApproving ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <ThumbsUp className="h-3.5 w-3.5 mr-2" />}
+                        Xác nhận sườn đề
+                      </Button>
+                      <Button variant="outline" className="flex-1 h-9 text-sm border-destructive/30 text-destructive hover:bg-destructive/5"
+                        onClick={openRejectDialog} disabled={hitlApproving || hitlRejecting}>
+                        {hitlRejecting ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <X className="h-3.5 w-3.5 mr-2" />}
+                        Yêu cầu chỉnh sửa
+                      </Button>
+                    </div>
+                  )}
+                  {activeCheckpoint === 1 && hitlApproved && (
+                    <div className="mt-3 flex items-center gap-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2">
+                      <Check className="h-4 w-4 text-emerald-600" />
+                      <span className="text-sm font-medium text-emerald-800">Đã xác nhận sườn đề — đang sinh câu hỏi...</span>
+                    </div>
+                  )}
+                </div>
+              )
+            }
+
+            // ─── Question ─────────────────────────────────────────────────
+            if (item.kind === 'question') {
+              const qId = item.question.question_id
+              const isSelected = selectedQuestionId === qId
+              const isRegenerating = questionRegenerating === qId
+              return (
+                <div key={item.id} className="mb-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                  <QuestionCard question={item.question} index={item.index} />
+                  {activeCheckpoint === 2 && (
+                    <div className="mt-1.5 pl-1">
+                      {!isSelected ? (
+                        <button
+                          className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-violet-700 transition-colors"
+                          onClick={() => { setSelectedQuestionId(qId ?? null); setQuestionEditPrompt("") }}
+                        >
+                          <Pencil className="h-3 w-3" />
+                          Chỉnh sửa câu này
+                        </button>
+                      ) : (
+                        <div className="rounded-lg border border-violet-200 bg-violet-50/50 p-2.5 space-y-2">
+                          <textarea
+                            className="w-full text-xs rounded border border-violet-200 bg-white/80 px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-violet-300"
+                            rows={2}
+                            placeholder="Nhập yêu cầu chỉnh sửa... (để trống để tạo lại ngẫu nhiên)"
+                            value={questionEditPrompt}
+                            onChange={(e) => setQuestionEditPrompt(e.target.value)}
+                            disabled={isRegenerating}
+                            autoFocus
+                          />
+                          <div className="flex gap-1.5">
+                            <button
+                              className="flex items-center gap-1 text-[11px] px-3 py-1.5 rounded bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
+                              disabled={!!isRegenerating}
+                              onClick={async () => {
+                                setQuestionRegenerating(qId ?? null)
+                                try {
+                                  await examsApi.partialRegenerate(examId, { question_id: qId!, prompt: questionEditPrompt || undefined })
+                                  setSelectedQuestionId(null)
+                                  setQuestionEditPrompt("")
+                                } catch (err) {
+                                  console.error(err)
+                                  setQuestionRegenerating(null)
+                                }
+                              }}
+                            >
+                              {isRegenerating
+                                ? <><Loader2 className="h-3 w-3 animate-spin" /> Đang tạo...</>
+                                : <><RefreshCw className="h-3 w-3" /> Tạo lại</>}
+                            </button>
+                            <button
+                              className="text-[11px] px-2.5 py-1.5 rounded border border-violet-200 text-violet-700 hover:bg-violet-100 transition-colors"
+                              onClick={() => { setSelectedQuestionId(null); setQuestionEditPrompt("") }}
+                            >
+                              Hủy
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            }
+
+            // ─── Validation ───────────────────────────────────────────────
+            if (item.kind === 'validation') {
+              return (
+                <div key={item.id} className="mb-4 animate-in fade-in duration-300">
+                  <div className="rounded-xl border border-orange-200 bg-orange-50/50 p-3 space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      <AlertCircle className="h-3.5 w-3.5 text-orange-600 shrink-0" />
+                      <p className="text-xs font-semibold text-orange-800">{item.issues.length} vấn đề phát hiện — đang tự động sửa...</p>
+                    </div>
+                    {item.issues.slice(0, 3).map((issue, i) => (
+                      <p key={i} className="text-[10px] text-orange-700 pl-5">• {issue.question_id}: {issue.issue_type || issue.detail}</p>
+                    ))}
+                  </div>
+                </div>
+              )
+            }
+
+            return null
+          })}
+
+          {/* Typing indicator while generating */}
+          {isGenerating && feedItems.length > 0 && feedItems[feedItems.length - 1]?.kind === 'reasoning' && (
+            <div className="flex items-center gap-1.5 pl-7 pb-3">
+              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
+              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
+              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
+            </div>
+          )}
+
+          {/* CP2 full exam review actions */}
+          {activeCheckpoint === 2 && questions.length > 0 && (
+            <div className="mt-2 mb-5 rounded-xl border border-violet-200 bg-violet-50/50 p-4 space-y-3 animate-in fade-in duration-300">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-violet-600 shrink-0" />
+                <span className="text-sm font-semibold text-violet-900">Duyệt đề hoàn chỉnh</span>
+                <span className="ml-auto text-xs text-muted-foreground">{questions.length} câu hỏi</span>
+              </div>
+              {validationIssues.length > 0 ? (
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-destructive">{validationIssues.length} vấn đề phát hiện:</p>
+                  {validationIssues.slice(0, 3).map((issue, i) => (
+                    <div key={i} className="flex items-start gap-1.5 p-1.5 rounded bg-red-50 border border-red-100 text-[10px]">
+                      <AlertCircle className="h-3 w-3 text-red-500 shrink-0 mt-0.5" />
+                      <span className="text-red-700">{issue.question_id}: {issue.issue_type || issue.detail}</span>
+                    </div>
+                  ))}
                 </div>
               ) : (
-                <div className="flex gap-2 mt-3">
-                  <Button size="sm" className="flex-1 h-9 bg-emerald-600 hover:bg-emerald-700"
+                <div className="flex items-center gap-2 p-2 rounded bg-emerald-50 border border-emerald-100">
+                  <Check className="h-3.5 w-3.5 text-emerald-600" />
+                  <span className="text-xs text-emerald-700 font-medium">Đề đạt yêu cầu kiểm tra</span>
+                </div>
+              )}
+              {!hitlApproved ? (
+                <div className="flex gap-2">
+                  <Button className="flex-1 bg-emerald-600 hover:bg-emerald-700 h-9 text-sm"
                     onClick={handleApprove} disabled={hitlApproving || hitlRejecting}>
-                    {hitlApproving ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      : <ThumbsUp className="h-3.5 w-3.5" />}
-                    Xác nhận
+                    {hitlApproving ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <ThumbsUp className="h-3.5 w-3.5 mr-2" />}
+                    Xác nhận đề thi
                   </Button>
-                  <Button size="sm" variant="outline"
-                    className="flex-1 h-9 border-violet-300 text-violet-800 hover:bg-violet-100"
+                  <Button variant="outline" className="flex-1 h-9 text-sm border-destructive/30 text-destructive hover:bg-destructive/5"
                     onClick={openRejectDialog} disabled={hitlApproving || hitlRejecting}>
-                    {hitlRejecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      : <X className="h-3.5 w-3.5" />}
+                    {hitlRejecting ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-2" /> : <X className="h-3.5 w-3.5 mr-2" />}
                     Yêu cầu sửa tất cả
                   </Button>
                 </div>
+              ) : (
+                <div className="flex items-center gap-2 rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2">
+                  <Check className="h-4 w-4 text-emerald-600" />
+                  <span className="text-sm font-medium text-emerald-800">Đã xác nhận — đang hoàn tất...</span>
+                </div>
               )}
-            </HITLCard>
+            </div>
           )}
 
-          {/* ── Completion card ── */}
-          {completed && (
-            <div className="rounded-xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-teal-50 p-4 space-y-4">
-              <div className="flex items-center gap-2">
-                <Check className="h-5 w-5 text-emerald-600" />
-                <p className="text-sm font-semibold text-emerald-900">Hoàn tất!</p>
-              </div>
-
-              {/* Question counts */}
-              <div className="space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Tổng câu hỏi</span>
-                  <span className="font-semibold tabular-nums">{questions.length}</span>
+          {/* Clarification chat */}
+          {clarificationQuestions.length > 0 && (
+            <div className="mb-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
+              <div className="flex gap-3">
+                <div className="flex h-7 w-7 items-center justify-center rounded-full border bg-amber-100 border-amber-300 text-amber-700 shrink-0">
+                  <MessageCircle className="h-3.5 w-3.5" />
                 </div>
-                {(examType === "mixed" || !examType) && (mcqCount > 0 || essayCount > 0) && (
-                  <div className="flex gap-2 text-xs text-muted-foreground">
-                    {mcqCount > 0 && <span>MCQ: {mcqCount}</span>}
-                    {essayCount > 0 && <span>Essay: {essayCount}</span>}
-                  </div>
-                )}
-
-                {/* Blueprint summary */}
-                {completionBlueprint.length > 0 && (
-                  <div className="mt-2">
-                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">
-                      Sườn đề (Blueprint)
-                    </p>
-                    <div className="space-y-0.5 max-h-36 overflow-y-auto">
-                      {completionBlueprint.map((slot, i) => {
-                        const bloomLvl = slot.bloom_level as BloomLevel | undefined
-                        const bloomInfo = bloomLvl && BLOOM_CONFIG[bloomLvl] ? BLOOM_CONFIG[bloomLvl] : null
-                        return (
-                          <div key={slot.question_id || i} className="flex items-center gap-1.5 text-[10px]">
-                            <span className="w-4 text-right text-muted-foreground/60">{i + 1}.</span>
-                            <Badge
-                              variant={(slot.type || "mcq") === "mcq" ? "secondary" : "outline"}
-                              className="text-[9px] px-1 py-0"
-                            >
-                              {(slot.type || "mcq").toUpperCase()}
-                            </Badge>
-                            {bloomInfo && (
-                              <span className={cn("font-medium", bloomInfo.color)}>{bloomInfo.short}</span>
-                            )}
-                            <span className="text-muted-foreground truncate">{slot.chapter || slot.topic_hint || ""}</span>
-                          </div>
-                        )
-                      })}
+                <div className="flex-1 rounded-xl rounded-tl-none bg-amber-50 border border-amber-200 px-4 py-3 space-y-3">
+                  <p className="text-xs font-semibold text-amber-700">AI cần thêm thông tin</p>
+                  {clarificationQuestions.map((q, cidx) => (
+                    <div key={q.question_id} className="space-y-1.5">
+                      <p className="text-sm text-foreground leading-snug">
+                        <span className="text-muted-foreground mr-1.5">{cidx + 1}.</span>{q.question}
+                      </p>
+                      <textarea
+                        rows={2}
+                        className="w-full rounded-lg border border-amber-200 bg-white/80 px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-amber-300 resize-none"
+                        placeholder="Nhập câu trả lời..."
+                        value={clarificationAnswers[q.question_id] ?? ""}
+                        onChange={(e) => setClarificationAnswers(prev => ({ ...prev, [q.question_id]: e.target.value }))}
+                      />
                     </div>
-                  </div>
-                )}
-
-                {/* Bloom distribution */}
-                {bloomDist && Object.keys(bloomDist).length > 0 && (
-                  <>
-                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide pt-1">
-                      Phân phối Bloom
-                    </p>
-                    {BLOOM_ORDER.filter((b) => bloomDist[b]).map((b) => (
-                      <div key={b} className="flex items-center gap-2">
-                        <span
-                          className={cn(
-                            "text-[10px] px-1.5 py-0.5 rounded border w-12 text-center shrink-0",
-                            BLOOM_CONFIG[b].bg,
-                            BLOOM_CONFIG[b].color
-                          )}
-                        >
-                          {BLOOM_CONFIG[b].short}
-                        </span>
-                        <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden">
-                          <div
-                            className="h-full rounded-full bg-primary transition-all duration-500"
-                            style={{ width: `${Math.round(((bloomDist[b] || 0) / questions.length) * 100)}%` }}
-                          />
-                        </div>
-                        <span className="text-[10px] tabular-nums text-muted-foreground w-4 text-right">
-                          {bloomDist[b]}
-                        </span>
-                      </div>
-                    ))}
-                  </>
-                )}
-
-                {/* Cost */}
-                {costReport && costReport.total_cost_usd != null && (
-                  <div className="flex justify-between text-xs pt-1">
-                    <span className="text-muted-foreground">Chi phí</span>
-                    <span className="font-medium">${costReport.total_cost_usd.toFixed(4)}</span>
-                  </div>
-                )}
+                  ))}
+                  <button
+                    onClick={handleClarificationSubmit}
+                    disabled={clarificationSubmitting || clarificationQuestions.some(q => !(clarificationAnswers[q.question_id] ?? "").trim())}
+                    className="flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {clarificationSubmitting
+                      ? <><Loader2 className="h-4 w-4 animate-spin" />Đang gửi...</>
+                      : <><Send className="h-4 w-4" />Gửi</>}
+                  </button>
+                </div>
               </div>
+            </div>
+          )}
 
-              <Button className="w-full h-10 bg-primary hover:bg-primary/90" onClick={handleViewExam}>
-                Xem đề đầy đủ <ChevronRight className="h-4 w-4 ml-1" />
-              </Button>
+          {/* Completion banner */}
+          {completed && (
+            <div className="mb-4 animate-in fade-in zoom-in-95 duration-500">
+              <div className="rounded-xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-teal-50 p-6 text-center space-y-4">
+                <div className="flex justify-center">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+                    <PartyPopper className="h-7 w-7" />
+                  </div>
+                </div>
+                <div>
+                  <p className="font-semibold text-emerald-900 text-base">Đề thi đã hoàn tất!</p>
+                  <p className="text-sm text-emerald-700 mt-1">
+                    {questions.length} câu hỏi · {mcqCount} MCQ · {essayCount} Essay
+                  </p>
+                  {costReport?.total_cost_usd != null && (
+                    <p className="text-xs text-muted-foreground mt-1">Chi phí: ${costReport.total_cost_usd.toFixed(4)}</p>
+                  )}
+                </div>
+                <Button className="bg-emerald-600 hover:bg-emerald-700 w-full sm:w-auto" onClick={handleViewExam}>
+                  Xem đề đầy đủ <ChevronRight className="h-4 w-4 ml-1" />
+                </Button>
+              </div>
             </div>
           )}
 
           {/* Connection error */}
           {connState === "error" && (
-            <div className="rounded-xl border border-red-200 bg-red-50 p-3">
+            <div className="rounded-xl border border-red-200 bg-red-50 p-3 mb-4">
               <div className="flex items-start gap-2">
                 <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-sm font-medium text-red-900">Lỗi kết nối</p>
-                  <p className="text-xs text-red-700 mt-0.5">
-                    Không thể kết nối WebSocket. Kiểm tra backend đang chạy.
-                  </p>
+                  <p className="text-sm font-medium text-red-900">Lỗi kết nối WebSocket</p>
                   <p className="text-xs text-muted-foreground mt-1 font-mono break-all">{resolvedWsUrl}</p>
                 </div>
               </div>
             </div>
           )}
+
+          <div ref={feedEndRef} />
         </div>
-
-        {/* ── Main content: unified stream feed ── */}
-        <div className="flex-1 overflow-y-auto">
-          <div className="max-w-3xl mx-auto p-6 space-y-0">
-
-            {/* Empty state while waiting for first event */}
-            {feedItems.length === 0 && !completed && (
-              <div className="flex flex-col items-center justify-center h-64 gap-3 text-muted-foreground">
-                <div className="relative flex h-12 w-12 items-center justify-center">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/20" />
-                  <Brain className="h-6 w-6 text-primary relative z-10" />
-                </div>
-                <p className="text-sm">Đang kết nối đến pipeline AI...</p>
-              </div>
-            )}
-
-            {/* Feed items */}
-            {feedItems.map((item, idx) => {
-              if (item.kind === 'reasoning') {
-                const isLast = idx === feedItems.length - 1
-                const hasChunks = item.chunks && item.chunks.length > 0
-                const chunksText = hasChunks ? item.chunks.join('') : ''
-                const isStreaming = isLast && isGenerating
-                return (
-                  <div key={item.id} className="flex gap-3 py-3 group animate-in fade-in slide-in-from-bottom-2 duration-300">
-                    <div className="flex flex-col items-center">
-                      <div className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs font-bold shrink-0 transition-colors ${isStreaming ? 'bg-primary/10 border-primary/40 text-primary' : 'bg-muted border-border text-muted-foreground'}`}>
-                        {isStreaming
-                          ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          : <Brain className="h-3.5 w-3.5" />}
-                      </div>
-                      {idx < feedItems.length - 1 && (
-                        <div className="w-px flex-1 bg-border mt-1" style={{ minHeight: 16 }} />
-                      )}
-                    </div>
-                    <div className="flex-1 pb-1 pt-0.5 min-w-0">
-                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">{item.stepLabel}</p>
-                      {/* Step message */}
-                      <p className={`text-sm leading-relaxed mb-1 ${isStreaming ? 'text-foreground' : 'text-muted-foreground'}`}>
-                        {isStreaming ? <TypingText text={item.message} /> : item.message}
-                      </p>
-                      {/* Streaming chunks (detailed LLM reasoning) */}
-                      {(hasChunks || isStreaming) && (
-                        <div className="mt-2 rounded-lg bg-muted/40 border border-border/60 px-3 py-2 font-mono text-xs text-foreground/80 leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto">
-                          {chunksText}
-                          {isStreaming && (
-                            <span className="inline-block w-0.5 h-3.5 bg-primary ml-0.5 animate-pulse align-text-bottom" />
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )
-              }
-
-              if (item.kind === 'blueprint') {
-                return (
-                  <div key={item.id} className="py-3 animate-in fade-in slide-in-from-bottom-3 duration-500">
-                    <div className="flex items-center gap-2 mb-2 pl-1">
-                      <div className="h-px flex-1 bg-border" />
-                      <span className="text-xs text-muted-foreground font-medium px-2">Sườn đề (Blueprint)</span>
-                      <div className="h-px flex-1 bg-border" />
-                    </div>
-                    <div className="rounded-xl border bg-card shadow-sm overflow-hidden">
-                      <div className="px-4 py-3 border-b bg-muted/30 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <Database className="h-4 w-4 text-primary" />
-                          <span className="text-sm font-semibold">{item.slots.length} câu hỏi đã lên kế hoạch</span>
-                        </div>
-                        <div className="flex gap-1.5 flex-wrap">
-                          {(BLOOM_ORDER.filter(b => item.bloomDist[b])).map((b) => (
-                            <span key={b} className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${BLOOM_CONFIG[b]?.bg} ${BLOOM_CONFIG[b]?.color}`}>
-                              {BLOOM_CONFIG[b]?.short} {item.bloomDist[b]}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="divide-y max-h-80 overflow-y-auto">
-                        {item.slots.map((slot, i) => {
-                          const bl = slot.bloom_level as BloomLevel | undefined
-                          const bc = bl && BLOOM_CONFIG[bl] ? BLOOM_CONFIG[bl] : null
-                          const topicHint = (slot.topic_hint as string) || ''
-                          const chapter = (slot.chapter as string) || ''
-                          return (
-                            <div key={slot.question_id || i} className="flex items-start gap-3 px-4 py-2.5 hover:bg-muted/20 transition-colors">
-                              <span className="w-5 text-xs text-muted-foreground/50 text-right shrink-0 pt-0.5">{i + 1}</span>
-                              <div className="flex items-center gap-1.5 shrink-0 pt-0.5">
-                                <Badge variant={(slot.type || 'mcq') === 'mcq' ? 'secondary' : 'outline'} className="text-[10px] px-1.5">
-                                  {(slot.type || 'mcq').toUpperCase()}
-                                </Badge>
-                                {bc && <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${bc.bg} ${bc.color}`}>{bc.short}</span>}
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                {chapter && (
-                                  <p className="text-xs text-muted-foreground/70 mb-0.5">
-                                    <LatexRenderer className="text-xs">{chapter}</LatexRenderer>
-                                  </p>
-                                )}
-                                {topicHint && (
-                                  <LatexRenderer className="text-sm text-foreground">{topicHint}</LatexRenderer>
-                                )}
-                              </div>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  </div>
-                )
-              }
-
-              if (item.kind === 'question') {
-                const qId = item.question.question_id
-                const isSelected = selectedQuestionId === qId
-                const isRegenerating = questionRegenerating === qId
-                return (
-                  <div key={item.id} className="py-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                    <QuestionCard question={item.question} index={item.index} />
-                    {/* Per-question edit button — only show at CP2 */}
-                    {activeCheckpoint === 2 && (
-                      <div className="mt-1.5 px-1">
-                        {!isSelected ? (
-                          <button
-                            className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-violet-700 transition-colors"
-                            onClick={() => { setSelectedQuestionId(qId ?? null); setQuestionEditPrompt("") }}
-                          >
-                            <Pencil className="h-3 w-3" />
-                            Chỉnh sửa câu này
-                          </button>
-                        ) : (
-                          <div className="rounded-lg border border-violet-200 bg-violet-50/50 p-2.5 space-y-2">
-                            <textarea
-                              className="w-full text-xs rounded border border-violet-200 bg-white/80 px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-violet-300"
-                              rows={2}
-                              placeholder="Nhập yêu cầu chỉnh sửa câu này... (để trống để tạo lại ngẫu nhiên)"
-                              value={questionEditPrompt}
-                              onChange={(e) => setQuestionEditPrompt(e.target.value)}
-                              disabled={isRegenerating}
-                              autoFocus
-                            />
-                            <div className="flex gap-1.5">
-                              <button
-                                className="flex items-center gap-1 text-[11px] px-3 py-1.5 rounded bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 transition-colors"
-                                disabled={!!isRegenerating}
-                                onClick={async () => {
-                                  setQuestionRegenerating(qId ?? null)
-                                  try {
-                                    await examsApi.partialRegenerate(examId, {
-                                      question_id: qId!,
-                                      prompt: questionEditPrompt || undefined,
-                                    })
-                                    setSelectedQuestionId(null)
-                                    setQuestionEditPrompt("")
-                                  } catch (err) {
-                                    console.error("Partial regenerate failed:", err)
-                                    setQuestionRegenerating(null)
-                                  }
-                                }}
-                              >
-                                {isRegenerating
-                                  ? <><Loader2 className="h-3 w-3 animate-spin" /> Đang tạo...</>
-                                  : <><RefreshCw className="h-3 w-3" /> Tạo lại câu này</>}
-                              </button>
-                              <button
-                                className="text-[11px] px-2.5 py-1.5 rounded border border-violet-200 text-violet-700 hover:bg-violet-100 transition-colors"
-                                onClick={() => { setSelectedQuestionId(null); setQuestionEditPrompt("") }}
-                              >
-                                Hủy
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )
-              }
-
-              if (item.kind === 'validation') {
-                return (
-                  <div key={item.id} className="py-3 animate-in fade-in duration-300">
-                    <div className="rounded-xl border border-orange-200 bg-orange-50/50 p-3 space-y-1.5">
-                      <div className="flex items-center gap-2">
-                        <AlertCircle className="h-3.5 w-3.5 text-orange-600 shrink-0" />
-                        <p className="text-xs font-semibold text-orange-800">{item.issues.length} vấn đề phát hiện — đang tự động sửa...</p>
-                      </div>
-                      {item.issues.slice(0, 3).map((issue, i) => (
-                        <p key={i} className="text-[10px] text-orange-700 pl-5">• {issue.question_id}: {issue.issue_type || issue.detail}</p>
-                      ))}
-                    </div>
-                  </div>
-                )
-              }
-
-              return null
-            })}
-
-
-            {/* Blinking cursor at the end while generating */}
-            {isGenerating && feedItems.length > 0 && feedItems[feedItems.length - 1]?.kind !== 'question' && (
-              <div className="flex gap-3 py-2">
-                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 border border-primary/30 shrink-0">
-                  <Loader2 className="h-3.5 w-3.5 text-primary animate-spin" />
-                </div>
-                <div className="flex items-center gap-1.5 pt-1.5">
-                  <span className="h-2 w-2 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '0ms' }} />
-                  <span className="h-2 w-2 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '150ms' }} />
-                  <span className="h-2 w-2 rounded-full bg-muted-foreground/40 animate-bounce" style={{ animationDelay: '300ms' }} />
-                </div>
-              </div>
-            )}
-
-            {/* Completion banner */}
-            {completed && (
-              <div className="py-4 animate-in fade-in zoom-in-95 duration-500">
-                <div className="rounded-xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-teal-50 p-5 text-center space-y-3">
-                  <div className="flex justify-center">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
-                      <PartyPopper className="h-6 w-6" />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="font-semibold text-emerald-900">Đề thi đã hoàn tất!</p>
-                    <p className="text-sm text-emerald-700 mt-0.5">{questions.length} câu hỏi · {questions.filter(q => (q.type || 'mcq') === 'mcq').length} MCQ · {questions.filter(q => q.type === 'essay').length} Essay</p>
-                  </div>
-                  <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={handleViewExam}>
-                    Xem đề đầy đủ <ChevronRight className="h-4 w-4 ml-1" />
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            {/* ── Inline clarification chat ── */}
-            {clarificationQuestions.length > 0 && (
-              <div className="py-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                {/* AI bubble */}
-                <div className="flex gap-3 mb-3">
-                  <div className="flex h-7 w-7 items-center justify-center rounded-full border bg-amber-100 border-amber-300 text-amber-700 shrink-0">
-                    <MessageCircle className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="flex-1 rounded-xl rounded-tl-none bg-amber-50 border border-amber-200 px-4 py-3 space-y-3">
-                    <p className="text-xs font-semibold text-amber-700">AI cần thêm thông tin</p>
-                    {clarificationQuestions.map((q, idx) => (
-                      <div key={q.question_id} className="space-y-1.5">
-                        <p className="text-sm text-foreground leading-snug">
-                          <span className="text-muted-foreground mr-1.5">{idx + 1}.</span>
-                          {q.question}
-                        </p>
-                        <textarea
-                          rows={2}
-                          className="w-full rounded-lg border border-amber-200 bg-white/80 px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-amber-300 resize-none"
-                          placeholder="Nhập câu trả lời..."
-                          value={clarificationAnswers[q.question_id] ?? ""}
-                          onChange={(e) =>
-                            setClarificationAnswers((prev) => ({ ...prev, [q.question_id]: e.target.value }))
-                          }
-                        />
-                      </div>
-                    ))}
-                    <button
-                      onClick={handleClarificationSubmit}
-                      disabled={
-                        clarificationSubmitting ||
-                        clarificationQuestions.some((q) => !(clarificationAnswers[q.question_id] ?? "").trim())
-                      }
-                      className="flex items-center gap-2 rounded-lg bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    >
-                      {clarificationSubmitting
-                        ? <><Loader2 className="h-4 w-4 animate-spin" />Đang gửi...</>
-                        : <><Send className="h-4 w-4" />Gửi</>}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <div ref={feedEndRef} />
-          </div>
-        </div>
-
-      </div>{/* ── end flex flex-1 overflow-hidden ── */}
+      </div>
 
       {/* ── Reject Feedback Dialog ── */}
       <Dialog open={rejectDialogOpen} onOpenChange={setRejectDialogOpen}>
@@ -1695,28 +1202,14 @@ export function GenerationLiveViewer({
             </p>
           </div>
           <DialogFooter className="gap-2">
-            <Button
-              variant="outline"
-              onClick={() => setRejectDialogOpen(false)}
-              disabled={hitlRejecting}
-            >
+            <Button variant="outline" onClick={() => setRejectDialogOpen(false)} disabled={hitlRejecting}>
               Hủy
             </Button>
-            <Button
-              variant="destructive"
-              onClick={submitReject}
-              disabled={hitlRejecting}
-            >
+            <Button variant="destructive" onClick={submitReject} disabled={hitlRejecting}>
               {hitlRejecting ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Đang gửi...
-                </>
+                <><Loader2 className="h-3.5 w-3.5 animate-spin" />Đang gửi...</>
               ) : (
-                <>
-                  <X className="h-3.5 w-3.5" />
-                  Gửi phản hồi
-                </>
+                <><X className="h-3.5 w-3.5" />Gửi phản hồi</>
               )}
             </Button>
           </DialogFooter>
@@ -1742,173 +1235,84 @@ export function GenerationLiveViewer({
   )
 }
 
-// ─── HITLCard sub-component ───────────────────────────────────────────────────
+// ─── ThinkingBlock sub-component ─────────────────────────────────────────────
 
-function HITLCard({
-  title,
-  subtitle,
-  icon,
-  colorClass,
-  iconBg,
-  children,
-  infoTooltip,
+function ThinkingBlock({
+  label,
+  message,
+  chunksText,
+  hasChunks,
+  isStreaming,
 }: {
-  title: string
-  subtitle: string
-  icon: React.ReactNode
-  colorClass: string
-  iconBg: string
-  children: React.ReactNode
-  infoTooltip?: React.ReactNode
+  label: string
+  message: string
+  chunksText: string
+  hasChunks: boolean
+  isStreaming: boolean
 }) {
   const [expanded, setExpanded] = useState(true)
 
+  useEffect(() => {
+    if (isStreaming) setExpanded(true)
+  }, [isStreaming])
+
+  const hasContent = hasChunks || !!message
+
   return (
-    <div className={cn("rounded-xl border p-4 space-y-3", colorClass)}>
-      <div className="flex items-start gap-2">
-        <div className="flex items-center gap-2 flex-1 min-w-0">
-          <div className={cn("flex h-7 w-7 items-center justify-center rounded-lg shrink-0", iconBg)}>
-            {icon}
-          </div>
-          <div className="text-left min-w-0">
-            <div className="flex items-center gap-1.5">
-              <p className="text-sm font-semibold text-foreground">{title}</p>
-              {infoTooltip && (
-                <div className="relative group shrink-0">
-                  <button
-                    className="flex items-center justify-center h-4 w-4 rounded-full bg-blue-200 text-blue-700 hover:bg-blue-300 transition-colors cursor-help"
-                    title="Xem giải thích"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <Info className="h-2.5 w-2.5" />
-                  </button>
-                  <div className="absolute left-full top-0 ml-2 z-50 hidden group-hover:block">
-                    <div className="bg-background border rounded-lg shadow-lg p-3 w-64 text-xs space-y-1.5">
-                      {infoTooltip}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-            <p className="text-[10px] text-muted-foreground">{subtitle}</p>
-          </div>
+    <div className="mb-4 animate-in fade-in slide-in-from-bottom-1 duration-300">
+      {/* Step label row */}
+      <div className="flex items-center gap-2 mb-1">
+        <div className={cn(
+          "h-5 w-5 rounded-full flex items-center justify-center border shrink-0 transition-colors",
+          isStreaming ? "border-primary/40 bg-primary/5 text-primary" : "border-border bg-muted text-muted-foreground"
+        )}>
+          {isStreaming
+            ? <Loader2 className="h-3 w-3 animate-spin" />
+            : <Check className="h-3 w-3" />}
         </div>
-        <button
-          className="shrink-0 p-0.5 hover:bg-black/5 rounded transition-colors"
-          onClick={() => setExpanded((v) => !v)}
-        >
-          {expanded ? (
-            <ChevronUp className="h-4 w-4 text-muted-foreground" />
-          ) : (
-            <ChevronDown className="h-4 w-4 text-muted-foreground" />
+        <span className={cn(
+          "text-sm font-medium transition-colors",
+          isStreaming ? "text-foreground" : "text-muted-foreground"
+        )}>
+          {label}
+        </span>
+        {!isStreaming && hasContent && (
+          <button
+            className="ml-auto flex items-center gap-0.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+            onClick={() => setExpanded(v => !v)}
+          >
+            {expanded
+              ? <><ChevronUp className="h-3 w-3" />Thu gọn</>
+              : <><ChevronDown className="h-3 w-3" />Chi tiết</>}
+          </button>
+        )}
+      </div>
+
+      {/* Thinking content — Claude-style streaming text with left border */}
+      {(isStreaming || expanded) && hasContent && (
+        <div className="ml-7">
+          {message && !hasChunks && (
+            <p className="text-sm text-muted-foreground mb-1.5 leading-relaxed">{message}</p>
           )}
-        </button>
-      </div>
-      {expanded && children}
-    </div>
-  )
-}
-
-// ─── BlueprintPreviewCard sub-component ───────────────────────────────────────
-
-function BlueprintPreviewCard({
-  slots,
-  bloomDist,
-}: {
-  slots: BlueprintSlot[]
-  bloomDist: BloomDistribution | null
-}) {
-  return (
-    <div className="rounded-2xl border border-dashed border-amber-200 bg-amber-50/30 p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <Database className="h-4 w-4 text-amber-600" />
-        <h3 className="text-sm font-semibold text-amber-900">Ma trận sườn đề</h3>
-        <Badge variant="secondary" className="text-xs ml-auto">{slots.length} câu</Badge>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b border-amber-200/40">
-              <th className="px-2 py-1.5 text-left font-semibold text-amber-800">#</th>
-              <th className="px-2 py-1.5 text-left font-semibold text-amber-800">Loại</th>
-              <th className="px-2 py-1.5 text-left font-semibold text-amber-800">Bloom</th>
-              <th className="px-2 py-1.5 text-left font-semibold text-amber-800">Chương</th>
-              <th className="px-2 py-1.5 text-left font-semibold text-amber-800">Chủ đề</th>
-            </tr>
-          </thead>
-          <tbody>
-            {slots.map((slot, i) => {
-              const bloomLvl = slot.bloom_level as BloomLevel | undefined
-              const bloomInfo = bloomLvl && BLOOM_CONFIG[bloomLvl] ? BLOOM_CONFIG[bloomLvl] : null
-              return (
-                <tr key={slot.question_id || i} className="border-b border-amber-100/30 last:border-0">
-                  <td className="px-2 py-1.5 text-muted-foreground">{i + 1}</td>
-                  <td className="px-2 py-1.5">
-                    <Badge variant={(slot.type || "mcq") === "mcq" ? "secondary" : "outline"} className="text-[10px] px-1.5">
-                      {(slot.type || "mcq").toUpperCase()}
-                    </Badge>
-                  </td>
-                  <td className="px-2 py-1.5">
-                    {bloomInfo ? (
-                      <span className={cn("font-medium text-[10px]", bloomInfo.color)}>{bloomInfo.label}</span>
-                    ) : "—"}
-                  </td>
-                  <td className="px-2 py-1.5 text-muted-foreground truncate max-w-[80px]">{slot.chapter || "—"}</td>
-                  <td className="px-2 py-1.5 text-muted-foreground truncate max-w-[100px]">
-                    {slot.topic_hint || slot.content_type || "—"}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-      {bloomDist && Object.keys(bloomDist).length > 0 && (
-        <div className="flex flex-wrap gap-1">
-          {BLOOM_ORDER.filter((b) => bloomDist[b]).map((b) => (
-            <span
-              key={b}
-              className={cn(
-                "text-[10px] px-1.5 py-0.5 rounded border font-medium",
-                BLOOM_CONFIG[b].bg,
-                BLOOM_CONFIG[b].color
-              )}
-            >
-              {BLOOM_CONFIG[b].short}: {bloomDist[b]}
-            </span>
-          ))}
+          {(hasChunks || isStreaming) && (
+            <div className={cn(
+              "border-l-2 pl-3 py-0.5 transition-colors",
+              isStreaming ? "border-primary/50" : "border-border"
+            )}>
+              <p className={cn(
+                "text-sm leading-relaxed whitespace-pre-wrap",
+                isStreaming ? "text-foreground/90" : "text-muted-foreground/80"
+              )}>
+                {chunksText}
+                {isStreaming && (
+                  <span className="inline-block w-[2px] h-[1.1em] bg-primary ml-0.5 animate-pulse align-text-bottom rounded-sm" />
+                )}
+              </p>
+            </div>
+          )}
         </div>
       )}
     </div>
-  )
-}
-
-// ─── TypingText sub-component ──────────────────────────────────────────────────
-
-function TypingText({ text }: { text: string }) {
-  const [displayed, setDisplayed] = useState("")
-  const ref = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    setDisplayed("")
-    if (!text) return
-    let i = 0
-    const type = () => {
-      if (i < text.length) {
-        setDisplayed((prev) => prev + text[i])
-        i++
-        ref.current = setTimeout(type, 20 + Math.random() * 15)
-      }
-    }
-    ref.current = setTimeout(type, 200)
-    return () => { if (ref.current) clearTimeout(ref.current) }
-  }, [text])
-
-  return (
-    <>
-      {displayed}
-      <span className="inline-block h-3 w-0.5 bg-primary animate-pulse ml-0.5 align-middle" />
-    </>
   )
 }
 
@@ -1959,7 +1363,6 @@ function QuestionCard({
           <span className="flex h-6 w-6 items-center justify-center rounded-full bg-secondary text-xs font-semibold text-muted-foreground">
             {index + 1}
           </span>
-          {/* Type badge */}
           <Badge
             variant={qType === "mcq" ? "secondary" : "outline"}
             className={cn(
@@ -1972,15 +1375,8 @@ function QuestionCard({
           >
             {qType === "mcq" ? "MCQ" : qType === "essay" ? "Essay" : qType === "dung_sai" ? "Đúng-Sai" : qType === "short_answer" ? "Trả lời ngắn" : qType.toUpperCase()}
           </Badge>
-          {/* Bloom badge */}
           {bloomInfo && (
-            <span
-              className={cn(
-                "text-xs px-2 py-0.5 rounded-full border font-medium",
-                bloomInfo.bg,
-                bloomInfo.color
-              )}
-            >
+            <span className={cn("text-xs px-2 py-0.5 rounded-full border font-medium", bloomInfo.bg, bloomInfo.color)}>
               {bloomInfo.label}
             </span>
           )}
@@ -1999,21 +1395,16 @@ function QuestionCard({
         </div>
       </div>
 
-      {/* Stem */}
       {stem && (
         <div className="text-sm text-foreground leading-relaxed mb-3">
           <MathText>{stem}</MathText>
         </div>
       )}
 
-      {/* Options for MCQ */}
       {qType === "mcq" && options.length > 0 && (
         <div className="space-y-1.5">
           {options.map((opt, oi) => (
-            <div
-              key={opt.label || oi}
-              className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2"
-            >
+            <div key={opt.label || oi} className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2">
               <span className="text-xs font-semibold text-muted-foreground w-5 shrink-0 mt-0.5">
                 {String.fromCharCode(65 + oi)}.
               </span>
@@ -2025,7 +1416,6 @@ function QuestionCard({
         </div>
       )}
 
-      {/* Đúng-Sai propositions */}
       {qType === "dung_sai" && question.propositions && question.propositions.length > 0 && (
         <div className="space-y-1.5">
           {question.propositions.map((prop) => (
@@ -2047,7 +1437,6 @@ function QuestionCard({
         </div>
       )}
 
-      {/* Short Answer */}
       {qType === "short_answer" && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 space-y-1">
           <p className="text-sm">
@@ -2061,7 +1450,6 @@ function QuestionCard({
         </div>
       )}
 
-      {/* Rubric for Essay */}
       {qType === "essay" && question.rubric && (
         <div className="rounded-lg border bg-muted/30 p-3 space-y-1">
           <p className="text-xs font-semibold text-muted-foreground mb-1">Đáp án & thang điểm</p>
@@ -2077,36 +1465,6 @@ function QuestionCard({
       {!stem && options.length === 0 && (
         <Skeleton className="h-4 w-3/4" />
       )}
-    </div>
-  )
-}
-
-// ─── QuestionCardSkeleton sub-component ──────────────────────────────────────
-
-function QuestionCardSkeleton({ isLoading }: { isLoading: boolean }) {
-  return (
-    <div className="rounded-xl border border-dashed border-primary/30 bg-primary/[0.02] p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <Skeleton className="h-6 w-6 rounded-full" />
-        <Skeleton className="h-4 w-20 rounded-full" />
-      </div>
-      {isLoading ? (
-        <>
-          <Skeleton className="h-4 w-full rounded" />
-          <Skeleton className="h-4 w-5/6 rounded" />
-          <Skeleton className="h-4 w-4/6 rounded" />
-        </>
-      ) : (
-        <div className="space-y-1.5">
-          {[0, 1, 2, 3].map((i) => (
-            <Skeleton key={i} className="h-8 w-full rounded-lg" />
-          ))}
-        </div>
-      )}
-      <div className="flex items-center gap-1.5 pt-1">
-        <Loader2 className="h-3 w-3 animate-spin text-primary" />
-        <span className="text-xs text-muted-foreground">Đang sinh câu tiếp theo...</span>
-      </div>
     </div>
   )
 }
