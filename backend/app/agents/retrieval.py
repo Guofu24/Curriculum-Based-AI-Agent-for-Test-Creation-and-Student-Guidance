@@ -107,6 +107,7 @@ class RetrievalAgent:
         query_hints: list[str] | None = None,
         trace_id: str = "",
         scope_sections: list[str] | None = None,
+        prereq_chapters: list[str] | None = None,
     ) -> RetrievalOutput:
         """Main retrieval method."""
         start_time = time.time()
@@ -141,10 +142,18 @@ class RetrievalAgent:
             # NOTE: Models (bge-m3 + CrossEncoder) are pre-loaded at server startup
             # via lifespan in main.py — no per-request warmup needed.
 
+            # Merge primary scope + prerequisite chapters for retrieval/reranking.
+            # prereq_chapters are treated as scope for coverage guarantees but excluded
+            # from scope_sections filtering (they provide background context only).
+            effective_scope = list(scope_chapters) + [
+                ch for ch in (prereq_chapters or []) if ch not in scope_chapters
+            ]
+            prereq_ch_set: set[str] = set(prereq_chapters or [])
+
             # Step 2: Single document query (no per-chapter namespace split).
             # With single namespace per document, one query retrieves all relevant
             # vectors. We boost top_k to cover all chapters in scope.
-            boosted_top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(scope_chapters), 3)
+            boosted_top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(effective_scope), 3)
             all_chunks, retrieval_warnings = await self._parallel_query_chapters(
                 document_id=document_id,
                 chapters=["_all"],  # Single query to whole document namespace
@@ -160,7 +169,7 @@ class RetrievalAgent:
             MIN_CHUNKS_PER_CHAPTER = 5
             supplement_chunks, supplement_warnings = await self._supplement_missing_chapters(
                 document_id=document_id,
-                scope_chapters=scope_chapters,
+                scope_chapters=effective_scope,
                 existing_chunks=all_chunks,
                 expanded_queries=expanded_queries,
                 min_per_chapter=MIN_CHUNKS_PER_CHAPTER,
@@ -192,8 +201,9 @@ class RetrievalAgent:
             MIN_SCOPE_CHUNKS = 5  # minimum chunks per scope chapter
 
             # Normalize scope chapter IDs once (handles ch18 → ch18, roman numerals, etc.)
+            # Use effective_scope (primary + prereq) so all scope chunks get guaranteed coverage.
             scope_ch_ids: set[str] = set()
-            for ch in scope_chapters:
+            for ch in effective_scope:
                 nid = normalize_chapter_id(ch)
                 scope_ch_ids.add(nid)
                 scope_ch_ids.add(ch)  # also keep original string
@@ -270,16 +280,31 @@ class RetrievalAgent:
                 warnings.append(token_warning)
 
             # ── Section filter: keep only chunks whose section matches scope_sections ──
+            # Prerequisite chunks (prereq_ch_set) are always kept — they provide
+            # background context and must not be filtered by the primary section scope.
             if scope_sections:
                 import unicodedata
                 def _strip_d(s: str) -> str:
                     nfd = unicodedata.normalize("NFD", s.strip().lower())
                     return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+                # Normalize prereq chapter IDs for exclusion check
+                prereq_norm_ids: set[str] = set()
+                for pch in prereq_ch_set:
+                    prereq_norm_ids.add(normalize_chapter_id(pch))
+                    prereq_norm_ids.add(pch)
+
                 scope_sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
                 if scope_sec_set:
                     filtered_chunks: list[dict] = []
                     all_section_titles: set[str] = set()
                     for chunk in all_chunks:
+                        ch_raw = chunk.get("metadata", {}).get("chapter", "")
+                        ch_norm = normalize_chapter_id(ch_raw)
+                        # Prereq chunks bypass section filter — they are background context
+                        if ch_norm in prereq_norm_ids or ch_raw in prereq_norm_ids:
+                            filtered_chunks.append(chunk)
+                            continue
                         chunk_sec = (chunk.get("metadata", {}).get("section") or "").strip()
                         chunk_sec_norm = _strip_d(chunk_sec)
                         if chunk_sec_norm:

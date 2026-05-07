@@ -606,6 +606,14 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                     logger.info(
                         f"Persisted {len(questions_to_save)} questions to DB for exam {exam_id} after CP2 approval"
                     )
+                    # Emit "completed" so the frontend WebSocket handler (switch-case
+                    # on type="completed") knows the pipeline is done and can show
+                    # the completion banner. This is critical on the CP2-timeout
+                    # fallback path where the graph never emits its own completion event.
+                    await self._emit({
+                        "type": "completed",
+                        "exam_id": exam_id,
+                    })
                 elif not questions_to_save:
                     logger.warning(
                         f"No questions to persist for exam {exam_id} after CP2 approval — "

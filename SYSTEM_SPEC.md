@@ -206,10 +206,12 @@ Tables and main fields:
 - `total_chapters`, `total_pages_or_slides`, `total_chunks`.
 - `uploaded_at`.
 
-Document status caveat:
+Document status bug / contract drift:
 
-- Model enum lists `pending`, `processing`, `completed`, `failed`.
-- Actual code also writes `indexed` after successful embedding and `processed` when parsing/chunking succeeded but embedding/Pinecone failed.
+- `DocumentProcessingStatus` is a Python enum/comment-level contract listing `pending`, `processing`, `completed`, and `failed`.
+- `Document.processing_status` is stored as `String(50)`, so SQLAlchemy/database storage does not enforce the Python enum values.
+- `DocumentService.process_document()` writes raw string statuses `indexed` after successful embedding and `processed` when parsing/chunking succeeds but embedding/Pinecone fails.
+- This is a confirmed model/API contract bug, not just a display caveat: service behavior, model enum, comments, and frontend consumers disagree about the allowed lifecycle statuses.
 - Frontend treats `completed`, `indexed`, and sometimes `processed` as usable in different places. Generation page currently filters `completed` or `indexed`.
 
 ### `exams`
@@ -439,15 +441,17 @@ START
   -> load_long_term_memory
   -> decide_plan
      -> simple: retrieve_knowledge
-     -> complex: fanout_complex -> plan_complex and retrieve_knowledge in parallel
-  -> merge_plan_retrieval
-  -> dispatch_tasks
+     -> complex: fanout_complex
+        -> plan_complex and retrieve_knowledge run in parallel
+     -> merge_plan_retrieval: joins simple retrieval or complex plan+retrieval results
+  -> dispatch_tasks: sends merged plan/context into outline flow
   -> create_outline
   -> emit_checkpoint_1
   -> wait_for_blueprint_approval
      -> approved: build_questions
      -> rejected: create_outline
      -> waiting: END until HTTP resume
+  -> build_questions
   -> validate_questions
   -> check_validation_result
      -> passed: emit_checkpoint_2
@@ -458,6 +462,8 @@ START
      -> rejected: finalize_with_feedback -> END
      -> timeout: handle_timeout -> END
 ```
+
+Mermaid architecture file: `MULTI_AGENT_ARCHITECTURE.mmd`.
 
 Checkpointer:
 
@@ -713,14 +719,14 @@ PDF:
   - `include_answers=false`: student version.
   - `include_answers=true`: teacher version with answer key/explanations/rubrics.
   - `include_blueprint=true`: include Bloom distribution table.
-- Backend has a 10 MB guard.
+- Backend has a verified 10 MB guard via `MAX_PDF_SIZE_MB`.
 
 DOCX:
 
 - Endpoint: `GET /api/v1/exams/{exam_id}/export/docx`.
 - Query param:
   - `include_answers`.
-- Backend has a 10 MB guard.
+- Backend has a verified 10 MB guard via `MAX_DOCX_SIZE_MB`.
 
 Preview:
 
@@ -772,9 +778,9 @@ Notes:
 These are important for any future AI working in the repo:
 
 - Frontend `GenerationLiveViewer.handleClarificationSubmit()` posts to `/api/exams/{examId}/clarify` with cookie credentials. Backend route is `/api/v1/exams/{exam_id}/clarify` and auth uses bearer token. This likely breaks clarification submit.
-- Frontend `examsApi.updateQuestion()` sends a partial question object directly to `PATCH /exams/{examId}/questions/{questionId}`. Backend expects `EditQuestionRequest` shape `{ question_id, updates }`. This likely causes 422 unless backend is changed.
+- Frontend `examsApi.updateQuestion()` sends a flat partial question object directly to `PATCH /exams/{examId}/questions/{questionId}`. Backend requires `EditQuestionRequest` shape `{ question_id, updates }`. This is a confirmed 422 request-shape bug for the current frontend/backend contract unless the frontend wraps the payload or the backend schema changes.
 - Frontend `examsApi.regenerate()` sends JSON body `{ question_ids }`, but backend route signature declares `question_ids` as a function parameter, not a Pydantic body model. Verify behavior before relying on it.
-- `DocumentProcessingStatus` enum omits `indexed` and `processed`, but code uses both. Future changes should normalize statuses or update schemas/enums consistently.
+- `DocumentProcessingStatus` enum omits `indexed` and `processed`, while `DocumentService` writes both raw strings. Future changes should normalize statuses or update schemas/enums/frontend filters consistently.
 - `POST /api/v1/generate/exam` docs say "runs synchronously", but implementation returns immediately and uses `asyncio.create_task()`.
 - Rate limit comments mention 10 generations/day, but code uses `MAX_GENERATES_PER_DAY` from settings, default `9999`.
 - Courses are placeholders. There is no course model.
@@ -805,7 +811,7 @@ These are important for any future AI working in the repo:
 
 ## 19. Suggested Next Cleanup Priorities
 
-1. Fix frontend/backend API mismatches for question edit, regenerate, and clarification submit.
+1. Fix confirmed 422 bug in `examsApi.updateQuestion()`: frontend sends flat `Partial<Question>`, backend requires `{ question_id, updates }`. Then fix regenerate and clarification-submit contract mismatches.
 2. Normalize document statuses across model enum, schemas, frontend filters, and services.
 3. Remove or gate debug logs in generation routes and live viewer.
 4. Decide whether `/api/v1/generate/exam` or `/api/v1/exams/generate` is the official generation endpoint and mark the other as legacy.
@@ -825,4 +831,3 @@ If asked to implement a feature:
 5. For WebSocket issues, inspect both the event emitter in backend nodes/tasks and the handler switch in `GenerationLiveViewer`.
 6. For persistence issues, inspect `ExamService.update_questions()`, `update_blueprint()`, history snapshots, and Redis session writes.
 7. For export issues, inspect `ExamExporter`, not only the route.
-

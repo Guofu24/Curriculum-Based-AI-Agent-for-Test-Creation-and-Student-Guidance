@@ -3,7 +3,10 @@
     "allow": [
       "Bash(Get-ChildItem -Path \"e:\\\\Đồ án\\\\Project\\\\backend\\\\app\" -Recurse -Directory)",
       "Bash(Test-Path \"e:\\\\Đồ án\\\\Project\\\\backend\\\\app\\\\agents\\\\graph\\\\nodes\\\\dispatch_tasks.py\")",
-      "Read(//e//**)"
+      "Read(//e//**)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); console.log\\('next:', p.dependencies.next, 'react:', p.dependencies.react, 'ts:', p.devDependencies.typescript\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('next:', d['dependencies'].get\\('next','?'\\), 'react:', d['dependencies'].get\\('react','?'\\), 'ts:', d.get\\('devDependencies',{}\\).get\\('typescript','?'\\)\\)\")",
+      "Bash(python -m py_compile backend/app/agents/retrieval.py backend/app/agents/graph/nodes/retrieve_knowledge.py backend/app/rag/structure.py)"
     ]
   }
 }

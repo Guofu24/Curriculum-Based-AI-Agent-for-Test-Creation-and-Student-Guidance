@@ -40,6 +40,41 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
     bloom_targets = list(exam_config.get("bloom_distribution", {}).keys())
     textbook_namespace = state.get("textbook_namespace") or None
 
+    # Expand scope with prerequisite chapters (BFS for transitive deps)
+    # prereq_chapters are passed separately to retrieval — they provide background context
+    # but are NOT used for question generation scope (section filter still applies to primary scope).
+    scope_sections = list(exam_config.get("scope_sections") or [])
+    prereq_chapters: list[str] = []
+    if document_id and scope and not textbook_namespace:
+        try:
+            import uuid as _uuid
+            from app.core.database import async_session_maker
+            from sqlalchemy import select
+            from app.models.document import Document
+            async with async_session_maker() as _session:
+                _doc_uuid = _uuid.UUID(document_id) if isinstance(document_id, str) else document_id
+                _result = await _session.execute(select(Document).where(Document.id == _doc_uuid))
+                _doc = _result.scalar_one_or_none()
+                if _doc and _doc.heading_tree:
+                    prereq_graph = _doc.heading_tree.get("prerequisites", {})
+                    # BFS to collect all transitive prerequisites
+                    visited: set[str] = set(scope)
+                    queue = list(scope)
+                    while queue:
+                        ch = queue.pop(0)
+                        for prereq in prereq_graph.get(ch, []):
+                            if prereq not in visited:
+                                visited.add(prereq)
+                                queue.append(prereq)
+                                prereq_chapters.append(prereq)
+                    if prereq_chapters:
+                        logger.info(
+                            "[retrieve_knowledge] exam=%s: prereq chapters (transitive) %s",
+                            exam_id, prereq_chapters,
+                        )
+        except Exception as _e:
+            logger.debug("[retrieve_knowledge] prerequisite expansion skipped: %s", _e)
+
     # Apply PlannerAgent overrides (only when plan_type == "complex")
     _plan = state.get("execution_plan") or []
     for _step in _plan:
@@ -65,7 +100,7 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
             scope_chapters=scope,
             bloom_targets=bloom_targets,
             trace_id=exam_id,
-            scope_sections=list(exam_config.get("scope_sections") or []),
+            scope_sections=scope_sections,
         )
     else:
         retrieval_result = await retrieval_agent.retrieve(
@@ -73,7 +108,8 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
             scope_chapters=scope,
             bloom_targets=bloom_targets,
             trace_id=exam_id,
-            scope_sections=list(exam_config.get("scope_sections") or []),
+            scope_sections=scope_sections,
+            prereq_chapters=prereq_chapters or None,
         )
 
     retrieved_chunks = getattr(retrieval_result, "retrieved_chunks", [])

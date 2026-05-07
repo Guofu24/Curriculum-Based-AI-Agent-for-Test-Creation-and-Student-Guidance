@@ -240,14 +240,10 @@ def build_exam_graph(checkpointer=None):
     workflow.add_edge(START, "initialize")
     workflow.add_edge("initialize", "clarification_check")
     workflow.add_edge("load_long_term_memory", "decide_plan")
-    # Fix 1: fanout_complex is a passthrough with two outgoing edges — LangGraph runs both in parallel
     workflow.add_edge("fanout_complex", "plan_complex")
     workflow.add_edge("fanout_complex", "retrieve_knowledge")
-    # Both parallel branches converge at merge_plan_retrieval
     workflow.add_edge("plan_complex", "merge_plan_retrieval")
-    # simple path: retrieve_knowledge → merge_plan_retrieval (via conditional edge above)
     workflow.add_edge("merge_plan_retrieval", "dispatch_tasks")
-    # Fix 3: dispatch_tasks runs focused_retrieval if enqueued, then continues to create_outline
     workflow.add_edge("dispatch_tasks", "create_outline")
     workflow.add_edge("handle_retrieval_failure", "create_outline")
     workflow.add_edge("emit_checkpoint_1", "wait_for_blueprint_approval")

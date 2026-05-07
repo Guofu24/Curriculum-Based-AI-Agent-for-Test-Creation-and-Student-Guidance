@@ -627,9 +627,12 @@ async def detect_heading_tree_gemini_pdf(
             "MỤC = sub-topic lý thuyết trong chương "
             "(ví dụ: '1. Điện trường', '2.1 Định luật Coulomb')\n\n"
             "Giới hạn: tối đa 20 chương, mỗi chương tối đa 10 mục.\n\n"
+            "NGOÀI RA: Với mỗi chương (đánh số từ 1), xác định các chương KHÁC mà nó PHỤ THUỘC "
+            "kiến thức (cần học trước mới hiểu được chương này). Dùng số thứ tự chương (1-based). "
+            "Chỉ liệt kê phụ thuộc thực sự. Nếu không có phụ thuộc nào thì trả {} cho 'prerequisites'.\n\n"
             "Trả về JSON thuần (KHÔNG markdown, KHÔNG giải thích):\n"
-            '{"chapters": [{"title": "Tên chương", '
-            '"sections": [{"title": "Tên mục"}]}]}'
+            '{"chapters": [{"title": "Tên chương", "sections": [{"title": "Tên mục"}]}], '
+            '"prerequisites": {"4": [1, 2], "3": [1]}}'
         )
 
         import asyncio
@@ -691,11 +694,32 @@ async def detect_heading_tree_gemini_pdf(
                     secs.append(sec)
             ch["sections"] = secs
 
+        # Normalize prerequisites: {"4": [1, 2]} → {"ch4": ["ch1", "ch2"]}
+        raw_prereqs = result.get("prerequisites", {})
+        prerequisites: dict = {}
+        for ch_idx_str, dep_list in (raw_prereqs.items() if isinstance(raw_prereqs, dict) else []):
+            try:
+                ch_id = f"ch{int(ch_idx_str)}"
+                dep_ids = []
+                for d in (dep_list if isinstance(dep_list, list) else []):
+                    try:
+                        dep_ids.append(f"ch{int(d)}")
+                    except (ValueError, TypeError):
+                        pass
+                if dep_ids:
+                    prerequisites[ch_id] = dep_ids
+            except (ValueError, TypeError):
+                pass
+
         logger.info(
-            "[gemini_pdf] Detected %d chapters via Gemini PDF vision",
+            "[gemini_pdf] Detected %d chapters, %d prerequisite relations via Gemini PDF vision",
             len([c for c in chapters if isinstance(c, dict)]),
+            sum(len(v) for v in prerequisites.values()),
         )
-        return {"chapters": [c for c in chapters if isinstance(c, dict) and c.get("chapter_id")]}
+        return {
+            "chapters": [c for c in chapters if isinstance(c, dict) and c.get("chapter_id")],
+            "prerequisites": prerequisites,
+        }
 
     except asyncio.TimeoutError:
         logger.warning("[gemini_pdf] Timeout (150s), falling back to LLM")
