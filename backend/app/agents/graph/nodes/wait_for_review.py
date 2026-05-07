@@ -40,8 +40,8 @@ def _process_review_result(
             "type": event_type,
             "exam_id": exam_id,
         }))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to emit %s: %s", event_type, exc)
 
     if approved:
         return {

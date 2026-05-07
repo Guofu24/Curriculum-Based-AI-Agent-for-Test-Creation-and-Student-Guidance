@@ -390,6 +390,7 @@ async def generate_exam(
         exam_config=exam.exam_config,
         user_prompt=config.user_prompt,
         extra_instructions=config.extra_instructions,
+        request_trace_id=job_id,
     )
 
     return ExamGenerateResponse(
@@ -1217,8 +1218,8 @@ async def approve_blueprint(
     key = f"hitl:approved:{exam_id}:1"
     try:
         await redis.set(key, "true", ttl=3600)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to save HITL approval to Redis (key=%s): %s", key, exc)
 
     # Resume the interrupted graph via Command(resume=...)
     # If no interrupt is found (graph already completed), this logs a warning but doesn't fail.
@@ -1318,7 +1319,8 @@ async def reject_blueprint(
             session_key = f"session:{exam_id}:{current_user.id}"
             try:
                 session = await redis.get_json(session_key)
-            except Exception:
+            except Exception as exc:
+                logger.warning("Failed to load session from Redis for exam %s: %s", exam_id, exc)
                 session = None
             generate_exam_task.delay(
                 exam_id=str(exam_id),

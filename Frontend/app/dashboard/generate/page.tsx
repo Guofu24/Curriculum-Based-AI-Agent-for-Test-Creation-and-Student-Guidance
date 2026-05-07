@@ -768,7 +768,8 @@ export default function GeneratePage() {
                           if (mode === 'thpt_2025') {
                             setConfig(prev => ({ ...prev, examMode: mode, ...THPT_2025_CONFIG }))
                           } else {
-                            setConfig(prev => ({ ...prev, examMode: mode }))
+                            // Reset THPT-specific counts so they don't silently carry over
+                            setConfig(prev => ({ ...prev, examMode: mode, dungSaiCount: 0, shortAnswerCount: 0 }))
                           }
                         }}
                         className="flex flex-wrap gap-4"
@@ -829,16 +830,30 @@ export default function GeneratePage() {
                         />
                       </Field>
                     )}
-                    {config.examMode === 'thpt_2025' && (
+                    {(config.examMode === 'thpt_2025' || config.examType === 'mixed') && (
                       <Field>
-                        <FieldLabel>Đúng-Sai (THPT)</FieldLabel>
-                        <Input type="number" value={config.dungSaiCount} disabled />
+                        <FieldLabel>Đúng-Sai</FieldLabel>
+                        <Input
+                          type="number"
+                          min={0}
+                          max={10}
+                          value={config.dungSaiCount}
+                          disabled={config.examMode === 'thpt_2025'}
+                          onChange={(e) => setConfig(prev => ({ ...prev, dungSaiCount: parseInt(e.target.value) || 0 }))}
+                        />
                       </Field>
                     )}
-                    {config.examMode === 'thpt_2025' && (
+                    {(config.examMode === 'thpt_2025' || config.examType === 'mixed') && (
                       <Field>
                         <FieldLabel>Trả lời ngắn</FieldLabel>
-                        <Input type="number" value={config.shortAnswerCount} disabled />
+                        <Input
+                          type="number"
+                          min={0}
+                          max={10}
+                          value={config.shortAnswerCount}
+                          disabled={config.examMode === 'thpt_2025'}
+                          onChange={(e) => setConfig(prev => ({ ...prev, shortAnswerCount: parseInt(e.target.value) || 0 }))}
+                        />
                       </Field>
                     )}
                     {(config.examMode === 'standard' && (config.examType === 'essay' || config.examType === 'mixed')) && (

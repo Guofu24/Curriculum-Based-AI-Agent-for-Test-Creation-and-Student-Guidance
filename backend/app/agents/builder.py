@@ -485,6 +485,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         allowed_concepts: list[str] | None = None,
         scope_chapters: list[str] | None = None,
         trace_id: str = "",
+        correction_strategies: dict[str, str] | None = None,
     ) -> BuilderOutput:
 
         """Build questions from blueprint."""
@@ -520,80 +521,87 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 for i in range(0, len(blueprint), self.CHUNK_SIZE)
             ]
 
-            flush_mode = False
+            # Single budget check for all chunks combined
+            budget_status = self.guardrails.check_budget(8000 * len(blueprint_chunks))
+            flush_mode = budget_status == "flush_needed"
+            if budget_status == "stop":
+                warnings.append("Token budget exhausted. Cannot generate questions.")
+            else:
+                if flush_mode:
+                    warnings.append("Token budget flush needed — using reduced context")
 
-            for i, chunk in enumerate(blueprint_chunks):
-                slot_start_index = i * self.CHUNK_SIZE
-                # Check token budget
-                budget_status = self.guardrails.check_budget(8000)
-                if budget_status == "stop":
-                    warnings.append("Token budget exhausted. Stopping generation.")
-                    break
-                if budget_status == "flush_needed":
-                    warnings.append(
-                        f"Token budget flush needed at chunk {i}, continuing with reduced context"
+                context_to_use = reduced_context_for_llm if flush_mode else context_for_llm
+                topics_snapshot = list(topics_used)
+
+                # Launch all chunks in parallel — each gets an independent topics copy
+                chunk_tasks = [
+                    self._generate_chunk(
+                        chunk=bp_chunk,
+                        context=context_to_use,
+                        retrieved_context=retrieved_context,
+                        scope_restriction=scope_restriction,
+                        topics_used=list(topics_snapshot),
+                        slot_start_index=i * self.CHUNK_SIZE,
+                        total_slots=len(blueprint),
+                        correction_strategies=correction_strategies,
                     )
-                    flush_mode = True
+                    for i, bp_chunk in enumerate(blueprint_chunks)
+                ]
+                chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
 
-                # Generate questions for this chunk IN PARALLEL
-                questions, chunk_warnings = await self._generate_chunk(
-                    chunk=chunk,
-                    context=reduced_context_for_llm if flush_mode else context_for_llm,
-                    retrieved_context=retrieved_context,
-                    scope_restriction=scope_restriction,
-                    topics_used=topics_used,
-                    slot_start_index=slot_start_index,
-                    total_slots=len(blueprint),
-                )
-
-                warnings.extend(chunk_warnings)
-
-                # Separate demo questions (safe by construction) from real LLM output
-                real_questions = [q for q in questions if not q.get("is_demo_question")]
-                demo_questions = [q for q in questions if q.get("is_demo_question")]
-
-                # Validate only real LLM-generated questions
-                validated = self.guardrails.validate_batch(real_questions)
-
-                for q in validated:
-                    if not q.get("filter_passed", True):
-                        warnings.append(
-                            f"Question {q.get('question_id')} failed filter: {q.get('filter_error')}"
-                        )
+                for chunk_idx, result in enumerate(chunk_results):
+                    if isinstance(result, Exception):
+                        warnings.append(f"Chunk {chunk_idx} failed: {result}")
                         continue
 
-                    # Map evidence_chunks sang source_evidence nếu chưa có
-                    if not q.get("source_evidence") and q.get("evidence_chunks"):
-                        q["source_evidence"] = [
-                            {
-                                "chunk_id": chunk.get("chunk_id", ""),
-                                "content": chunk.get("text", chunk.get("content", "")),
-                                "page_number": chunk.get("page_number"),
-                                "section": chunk.get("section_id", ""),
-                                "relevance_score": chunk.get("score", 1.0),
-                            }
-                            for chunk in q.get("evidence_chunks", [])
-                            if isinstance(chunk, dict)
-                        ]
+                    questions, chunk_warnings = result
+                    warnings.extend(chunk_warnings)
+                    metrics.completion_tokens += len(questions) * 50  # Estimate
 
-                    all_questions.append(q)
+                    real_questions = [q for q in questions if not q.get("is_demo_question")]
+                    demo_questions = [q for q in questions if q.get("is_demo_question")]
 
-                    # Track topics
-                    if q.get("topic_hint"):
-                        topics_used.append(q["topic_hint"])
+                    validated = self.guardrails.validate_batch(real_questions)
 
-                    # Track referenced chunks
-                    if q.get("evidence_chunks"):
-                        chunks_referenced.extend(q["evidence_chunks"])
+                    for q in validated:
+                        if not q.get("filter_passed", True):
+                            warnings.append(
+                                f"Question {q.get('question_id')} failed filter: {q.get('filter_error')}"
+                            )
+                            continue
 
-                # Demo questions skip guardrails — always included
-                for q in demo_questions:
-                    all_questions.append(q)
-                    if q.get("topic_hint"):
-                        topics_used.append(q["topic_hint"])
+                        stem = q.get("stem") or q.get("content") or ""
+                        if stem and allowed_concepts:
+                            in_scope, violation = scope_guard.is_allowed(stem)
+                            if not in_scope:
+                                warnings.append(
+                                    f"Question {q.get('question_id')} out of scope: {violation}"
+                                )
+                                continue
 
-                # Record token usage
-                metrics.completion_tokens += len(questions) * 50  # Estimate
+                        if not q.get("source_evidence") and q.get("evidence_chunks"):
+                            q["source_evidence"] = [
+                                {
+                                    "chunk_id": ev.get("chunk_id", ""),
+                                    "content": ev.get("text", ev.get("content", "")),
+                                    "page_number": ev.get("page_number"),
+                                    "section": ev.get("section_id", ""),
+                                    "relevance_score": ev.get("score", 1.0),
+                                }
+                                for ev in q.get("evidence_chunks", [])
+                                if isinstance(ev, dict)
+                            ]
+
+                        all_questions.append(q)
+                        if q.get("topic_hint"):
+                            topics_used.append(q["topic_hint"])
+                        if q.get("evidence_chunks"):
+                            chunks_referenced.extend(q["evidence_chunks"])
+
+                    for q in demo_questions:
+                        all_questions.append(q)
+                        if q.get("topic_hint"):
+                            topics_used.append(q["topic_hint"])
 
             # Build output
             elapsed_ms = int((time.time() - start_time) * 1000)
@@ -645,6 +653,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         topics_used: list[str],
         slot_start_index: int = 0,
         total_slots: int = 0,
+        correction_strategies: dict[str, str] | None = None,
     ) -> tuple[list[dict], list[str]]:
         """Generate questions for a blueprint chunk IN PARALLEL using semaphore.
 
@@ -673,6 +682,8 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
             if ch_id not in chid_context_map:
                 chid_context_map[ch_id] = []
             chid_context_map[ch_id].extend(v)
+
+        _correction_strategies = correction_strategies or {}
 
         async def _generate_one_with_semaphore(
             slot: dict,
@@ -731,6 +742,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     scope_restriction=scope_restriction,
                     topics_used=topics_used,
                     slot_number=slot_number,
+                    correction_strategy=_correction_strategies.get(slot.get("question_id", ""), ""),
                 )
                 return slot_number, question, q_warnings
 
@@ -774,6 +786,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         topics_used: list[str],
         slot_number: int = 0,
         question_context: str = "",
+        correction_strategy: str = "",
     ) -> tuple[dict | None, list[str]]:
         """
         Generate a single question for one blueprint slot.
@@ -810,8 +823,18 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         search_context = "\n".join(
                             f"- {r['title']}: {r['snippet']}" for r in results
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("SerpAPI search failed (non-critical): %s", exc)
+
+        # Inject Validator's targeted correction instruction when retrying a failed question
+        negotiation_block = ""
+        if correction_strategy:
+            negotiation_block = (
+                f"\n## ⚠️ YÊU CẦU SỬA LỖI TỪ VALIDATOR (PHẢI TUÂN THEO NGHIÊM NGẶT):\n"
+                f"{correction_strategy}\n"
+                f"Đây là lần sinh lại — câu hỏi cũ đã bị từ chối vì lý do trên. "
+                f"KHÔNG lặp lại lỗi cũ.\n"
+            )
 
         # Prompt asks for exactly ONE question (JSON array with 1 item)
         user_prompt = f"""Sinh để trả lời đúng một câu hỏi cho blueprint slot sau:
@@ -826,7 +849,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
 ## Ràng buộc:
 {scope_restriction}
-
+{negotiation_block}
 {bloom_guide}
 {distractor_guide}
 
@@ -974,8 +997,8 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 question_type=q.get("type", "mcq"),
             )
             q["bloom_classified"] = bloom_result.get("bloom_level")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("bloom_skill failed for %s: %s", q.get("question_id"), exc)
 
         try:
             diff_result = await self.difficulty_skill.run(
@@ -983,8 +1006,8 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 bloom_level=q.get("bloom_level", "thong_hieu"),
             )
             q["difficulty_score"] = diff_result.get("difficulty_score", 0.5)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("difficulty_skill failed for %s: %s", q.get("question_id"), exc)
 
         try:
             dedup_result = await self.dedup_skill.run(
@@ -993,15 +1016,15 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
             )
             if dedup_result.get("is_duplicate"):
                 q["dedup_warning"] = dedup_result.get("suggestion")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("dedup_skill failed for %s: %s", q.get("question_id"), exc)
 
         if q.get("latex_content"):
             try:
                 latex_result = self.latex_skill.run(raw_formula=q["latex_content"])
                 q["latex_rendered"] = latex_result
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("latex_skill failed for %s: %s", q.get("question_id"), exc)
 
     def _build_demo_question(self, slot: dict, context: str = "") -> dict:
         """Build a reasonable demo question from a blueprint slot when LLM fails.

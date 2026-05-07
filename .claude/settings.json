@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"e:\\\\Đồ án\\\\Project\\\\backend\\\\app\" -Recurse -Directory)",
+      "Bash(Test-Path \"e:\\\\Đồ án\\\\Project\\\\backend\\\\app\\\\agents\\\\graph\\\\nodes\\\\dispatch_tasks.py\")",
+      "Read(//e//**)"
+    ]
+  }
+}

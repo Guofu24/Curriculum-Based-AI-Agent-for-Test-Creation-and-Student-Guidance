@@ -36,6 +36,17 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
     cost_report = dict(state.get("cost_report", {}))
     warnings = list(state.get("warnings", []))
 
+    # Apply PlannerAgent overrides into exam_config (only when plan_type == "complex")
+    _PROTECTED = {"outline_feedback", "current_blueprint", "blueprint_history"}
+    _plan = state.get("execution_plan") or []
+    for _step in _plan:
+        if _step.get("tool") == "tool_outline_exam":
+            _ov = {k: v for k, v in (_step.get("params_override") or {}).items() if k not in _PROTECTED}
+            if _ov:
+                exam_config.update(_ov)
+                logger.info("execution_plan override applied to outline exam_config: %s for exam %s", list(_ov.keys()), exam_id)
+            break
+
     # ── Blueprint history tracking ───────────────────────────────────────────
     # Keep a running list of all blueprints generated in prior rejection cycles.
     # This gives the outline agent "memory" of what was already tried.
@@ -44,7 +55,7 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
 
     # G8: Inject rejection feedback into exam_config for re-generation
     rejection_history = state.get("checkpoint_1_rejection_history", [])
-    print(f"[create_outline] exam_id={exam_id}, rejection_history_len={len(rejection_history)}, entries={[r.get('feedback','')[:60] for r in rejection_history]}", flush=True)
+    logger.debug("[create_outline] exam_id=%s, rejection_history_len=%d", exam_id, len(rejection_history))
     if rejection_history:
         last_feedback = rejection_history[-1].get("feedback", "")
         if last_feedback:
@@ -59,7 +70,7 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
                     "blueprint": current_blueprint,
                 })
             warnings.append("Injecting blueprint rejection feedback for regeneration")
-            print(f"[create_outline] FEEDBACK INJECTED (from state): {last_feedback[:100]}", flush=True)
+            logger.debug("[create_outline] FEEDBACK INJECTED (from state): %.100s", last_feedback)
     else:
         # Fallback: read from Redis in case LangGraph state didn't persist rejection_history
         try:
@@ -81,15 +92,37 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
                             "blueprint": current_blueprint,
                         })
                     warnings.append("Injecting blueprint rejection feedback from Redis fallback")
-                    print(f"[create_outline] FEEDBACK INJECTED (from Redis): {_feedback[:100]}", flush=True)
+                    logger.debug("[create_outline] FEEDBACK INJECTED (from Redis): %.100s", _feedback)
         except Exception as _e:
-            print(f"[create_outline] Redis fallback failed: {_e}", flush=True)
+            logger.debug("[create_outline] Redis fallback failed: %s", _e)
 
     # Pass full blueprint history to outline agent so it can avoid repeating mistakes
     if blueprint_history:
         exam_config["blueprint_history"] = blueprint_history
 
-    print(f"[create_outline] exam_id={exam_id}, retrieved_context_chunks={len(retrieved_context)}, calling OutlineAgent...", flush=True)
+    # Consume coverage_report published by RetrievalAgent (peer-to-peer via message bus)
+    try:
+        from app.agents.messaging import AgentMessageBus
+        from app.core.redis_client import get_redis_client as _get_redis
+        bus = AgentMessageBus(_get_redis())
+        coverage_messages = await bus.consume(exam_id, recipient="outline", message_types=["coverage_report"])
+        if coverage_messages:
+            latest = coverage_messages[-1]
+            weak_chapters = latest.payload.get("weak_chapters", [])
+            if weak_chapters:
+                exam_config.setdefault("coverage_hints", {})["weak_chapters"] = weak_chapters
+                warnings.append(
+                    f"OutlineAgent received coverage_report from RetrievalAgent: "
+                    f"weak coverage in {weak_chapters} — adjusting distribution."
+                )
+                logger.info(
+                    "[create_outline] peer message: weak_chapters=%s → reducing question count for those chapters",
+                    weak_chapters,
+                )
+    except Exception as _e:
+        logger.debug("coverage_report consume failed (non-critical): %s", _e)
+
+    logger.debug("[create_outline] exam_id=%s, retrieved_context_chunks=%d, calling OutlineAgent...", exam_id, len(retrieved_context))
 
     # Stream reasoning to frontend
     _emit(state, {
@@ -106,7 +139,7 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
 
     blueprint = list(getattr(outline_result, "blueprint", []))
     distribution_summary = dict(getattr(outline_result, "distribution_summary", {}))
-    print(f"[create_outline] exam_id={exam_id}, blueprint_slots={len(blueprint)}, distribution={distribution_summary}", flush=True)
+    logger.debug("[create_outline] exam_id=%s, blueprint_slots=%d, distribution=%s", exam_id, len(blueprint), distribution_summary)
 
     if outline_result.status != AgentStatus.SUCCESS:
         warnings.append(f"Outline creation had issues: {outline_result.status.value}")

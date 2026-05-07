@@ -107,8 +107,9 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
       "issues": [
         {{
           "issue_type": "wrong_answer|bloom_mismatch|scope_violation|duplicate",
-          "detail": "mô tả lỗi",
-          "suggestion": "cách sửa"
+          "detail": "mô tả lỗi cụ thể",
+          "suggestion": "cách sửa chung",
+          "correction_strategy": "HƯỚNG DẪN SỬA CỤ THỂ cho Builder: ví dụ 'Tính lại đáp án B: v = u + at = 0 + 2*3 = 6 m/s, không phải 12 m/s. Sửa correct_answer thành B và explanation tương ứng.' hoặc 'Bloom yêu cầu van_dung nhưng câu chỉ hỏi định nghĩa — thêm bước tính toán 2 bước vào stem.' hoặc 'Stem chứa tên chương làm option — thay option C bằng một giá trị số cụ thể.'"
         }}
       ]
     }}

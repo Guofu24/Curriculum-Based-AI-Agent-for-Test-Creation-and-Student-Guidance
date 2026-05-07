@@ -35,3 +35,6 @@ pydantic[email]>=2.6.0
 aiofiles>=23.0.0
 google-search-results>=2.4.2
 langgraph>=0.2.0
+langgraph-checkpoint-postgres>=2.0.0  # Persistent HITL checkpoint state via PostgreSQL
+psycopg[binary]>=3.3.0                # psycopg3 async driver required by checkpoint-postgres
+psycopg-pool>=3.3.0                   # Connection pooling for psycopg3

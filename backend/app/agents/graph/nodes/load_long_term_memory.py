@@ -39,9 +39,15 @@ async def load_long_term_memory(state: ExamGraphState) -> ExamGraphState:
         logger.warning("Failed to load teacher preferences: %s", exc)
         warnings.append(f"Failed to load teacher preferences: {exc}")
 
+    # Seed topics_used with cross-exam history to prevent duplicate topics
+    existing_topics = list(state.get("topics_used", []))
+    historical_topics = teacher_prefs.get("topic_history", []) if teacher_prefs else []
+    combined_topics = list(set(existing_topics + historical_topics))
+
     return {
         **state,
         "teacher_prefs": teacher_prefs,
+        "topics_used": combined_topics,
         "warnings": warnings,
         "updated_at": state.get("updated_at"),
     }

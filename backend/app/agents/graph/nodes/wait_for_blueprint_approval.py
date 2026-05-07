@@ -41,8 +41,8 @@ def _process_approval_result(
                 "type": "blueprint_approved_received",
                 "exam_id": exam_id,
             }))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to emit blueprint_approved_received: %s", exc)
 
         return {
             **state,
@@ -73,8 +73,8 @@ def _process_approval_result(
             "exam_id": exam_id,
             "rejection_history": history,
         }))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to emit blueprint_rejected_received: %s", exc)
 
     return {
         **state,

@@ -40,6 +40,16 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
     bloom_targets = list(exam_config.get("bloom_distribution", {}).keys())
     textbook_namespace = state.get("textbook_namespace") or None
 
+    # Apply PlannerAgent overrides (only when plan_type == "complex")
+    _plan = state.get("execution_plan") or []
+    for _step in _plan:
+        if _step.get("tool") == "tool_retrieve_context":
+            _ov = _step.get("params_override") or {}
+            if _ov.get("bloom_targets"):
+                bloom_targets = list(_ov["bloom_targets"])
+                logger.info("execution_plan override: bloom_targets=%s for exam %s", bloom_targets, exam_id)
+            break
+
     # Stream reasoning start
     scope_str = ', '.join(scope) if scope else 'toàn bộ'
     source_label = f"namespace '{textbook_namespace}'" if textbook_namespace else f"document {document_id or '?'}"
@@ -90,6 +100,42 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
         "chunk": f"Tìm thấy {len(retrieved_chunks)} đoạn văn bản liên quan.\n",
     })
 
+    # Fix 3: dynamically enqueue focused_retrieval task for weak chapters
+    task_queue = list(state.get("task_queue") or [])
+    if coverage_map:
+        weak_chapters = [
+            ch for ch, cov in coverage_map.items()
+            if isinstance(cov, (int, float)) and cov < 0.3
+        ]
+        if weak_chapters:
+            task_queue.append({"type": "focused_retrieval", "chapters": weak_chapters})
+            logger.info(
+                "[retrieve_knowledge] exam=%s: enqueued focused_retrieval for weak chapters=%s",
+                exam_id, weak_chapters,
+            )
+
+    # Publish coverage report directly to OutlineAgent via message bus (peer-to-peer)
+    try:
+        from app.agents.messaging import AgentMessageBus
+        bus = AgentMessageBus(redis_client)
+        await bus.publish(
+            exam_id=exam_id,
+            sender="retrieval",
+            recipient="outline",
+            message_type="coverage_report",
+            payload={
+                "coverage_map": coverage_map,
+                "chunk_count": len(retrieved_chunks),
+                "chapters_covered": list(coverage_map.keys()),
+                "weak_chapters": [
+                    ch for ch, cov in coverage_map.items()
+                    if isinstance(cov, (int, float)) and cov < 0.3
+                ],
+            },
+        )
+    except Exception as _e:
+        logger.debug("coverage_report publish failed (non-critical): %s", _e)
+
     return {
         **state,
         "retrieval_result": {
@@ -100,6 +146,7 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
         },
         "retrieved_context": retrieved_chunks,
         "allowed_concepts": allowed_concepts,
+        "task_queue": task_queue,
         "cost_report": cost_report,
         "current_agent": AgentRole.RETRIEVAL,
         "warnings": warnings,

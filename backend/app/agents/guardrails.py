@@ -127,21 +127,30 @@ class ScopeGuard:
 
     def is_allowed(self, question_stem: str) -> tuple[bool, str | None]:
         """
-        Check if a question stem uses only allowed concepts.
+        Check if a question stem references content from the allowed scope.
         Returns (allowed, violation).
+
+        Logic: extract significant words (>3 chars) from the stem, then check
+        if any allowed concept shares vocabulary with the stem.  A question is
+        in-scope if at least one allowed concept overlaps with its wording.
         """
         if not self.allowed_concepts:
             return True, None
 
         stem_lower = question_stem.lower()
+        stem_words = {w for w in stem_lower.split() if len(w) > 3}
 
-        # Check for explicit out-of-scope terms
-        forbidden_terms = []
+        if not stem_words:
+            # Can't evaluate an empty / very short stem — pass through
+            return True, None
+
         for concept in self.allowed_concepts:
-            if concept.lower() not in stem_lower:
-                forbidden_terms.append(concept)
+            concept_words = {w for w in concept.lower().split() if len(w) > 3}
+            if stem_words & concept_words:  # non-empty intersection → in scope
+                return True, None
 
-        return True, None  # Allow all for now - LLM will handle via prompt
+        violation = "Question stem does not reference content from the allowed scope"
+        return False, violation
 
     def get_allowed_concepts_prompt(self) -> str:
         """Get the scope restriction prompt for LLM."""
@@ -197,9 +206,13 @@ class GuardrailsPipeline:
         """Validate a batch of questions."""
         return self.content_filter.validate_batch(questions)
 
-    def scope_guard(self, question_stem: str) -> tuple[bool, str | None]:
-        """Check scope guard for a question."""
-        guard = ScopeGuard()
+    def scope_guard(
+        self,
+        question_stem: str,
+        allowed_concepts: list[str] | None = None,
+    ) -> tuple[bool, str | None]:
+        """Check scope guard for a question against the provided allowed concepts."""
+        guard = ScopeGuard(allowed_concepts=allowed_concepts or [])
         return guard.is_allowed(question_stem)
 
     def get_scope_restriction(self, concepts: list[str], chapters: list[str]) -> str:
