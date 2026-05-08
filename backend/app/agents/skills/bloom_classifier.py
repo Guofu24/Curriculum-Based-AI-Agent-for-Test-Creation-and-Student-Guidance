@@ -48,6 +48,60 @@ Trả về JSON:
   "reasoning": "Giải thích ngắn tại sao chọn mức này"
 }"""
 
+    # Few-shot examples (1 per Bloom level) — real Vietnamese physics questions
+    # Purpose: anchor cognitive-level pattern, NOT topic content
+    FEW_SHOT_EXAMPLES = [
+        (
+            "Khi xịt nước hoa ở một góc của căn phòng thì ta vẫn ngửi được hương thơm ở một vị trí khác, vì "
+            "A. quạt máy thổi hương thơm bay xa hơn. B. nồng độ hương thơm trong lọ quá nhiều. "
+            "C. khi xịt nước hoa ra khỏi lọ, nước hoa sẽ ở thể hơi nên các hạt chuyển động tự do khắp căn phòng. "
+            "D. Tất cả các ý trên đều sai.",
+            "mcq",
+            '{"bloom_level":"nhan_biet","confidence":0.95,"reasoning":"Câu hỏi nhận biết hiện tượng khuếch tán — chỉ cần nhớ lại kiến thức về chuyển động phân tử khí, không yêu cầu suy luận hay tính toán"}',
+        ),
+        (
+            "Coi tia sét là dòng các electron chuyển động gần như thẳng đứng từ đám mây xuống mặt đất. "
+            "Biết thành phần nằm ngang của từ trường Trái Đất hướng về phía Bắc. "
+            "Do tác dụng của từ trường Trái Đất, tia sét có xu hướng lệch theo hướng nào? A. Bắc. B. Tây. C. Đông. D. Nam.",
+            "mcq",
+            '{"bloom_level":"thong_hieu","confidence":0.90,"reasoning":"Yêu cầu áp dụng quy tắc lực Lorentz để xác định hướng lệch — hiểu bản chất lực từ tác dụng lên dòng điện, không tính toán số cụ thể"}',
+        ),
+        (
+            "Một phân tử khí lí tưởng đang chuyển động qua tâm một bình cầu có đường kính d = 0,10 m. "
+            "Trong mỗi giây, phân tử này va chạm vào thành bình cầu 4000 lần. "
+            "Coi rằng phân tử này chỉ va chạm với thành bình và tốc độ của phân tử là không đổi sau mỗi va chạm. "
+            "Tốc độ chuyển động trung bình của phân tử khí trong bình là bao nhiêu m/s?",
+            "short_answer",
+            '{"bloom_level":"thong_hieu","confidence":0.88,"reasoning":"Tính tốc độ bằng 1 bước: v = 2d × n = 2×0,1×4000 = 800 m/s — áp dụng trực tiếp định nghĩa tốc độ, không có ẩn số trung gian"}',
+        ),
+        (
+            "Một lò phản ứng hạt nhân sử dụng uranium 235U, thanh nhiên liệu làm giàu đến 4%. "
+            "Mỗi hạt nhân 235U phân hạch tỏa ra năng lượng trung bình 200 MeV. "
+            "Khi khối lượng 235U còn lại 99,5% so với ban đầu thì 500 tấn nước làm mát tăng từ 30°C lên 250°C. "
+            "Biết 90% năng lượng dùng để làm nóng nước, nhiệt dung riêng nước 4200 J/kg.K, 1 MeV = 1,6×10⁻¹³ J. "
+            "Khối lượng các thanh nhiên liệu ban đầu là bao nhiêu kg?",
+            "short_answer",
+            '{"bloom_level":"van_dung","confidence":0.92,"reasoning":"Cần tính tuần tự qua 4 bước trung gian: nhiệt lượng nước hấp thụ → năng lượng U-235 giải phóng → số hạt phân hạch → khối lượng U-235 → khối lượng thanh nhiên liệu. Có ẩn số trung gian rõ ràng"}',
+        ),
+        (
+            "Ba chất điểm không thẳng hàng P1, P2, P3 có khối lượng m1, m2, m3 tương tác hấp dẫn với nhau. "
+            "Gọi T là trục đi qua khối tâm và vuông góc với mặt phẳng tam giác P1P2P3. "
+            "Các khoảng cách d12, d23, d13 và vận tốc góc ω quanh trục T phải thỏa mãn hệ thức gì "
+            "để dạng tam giác P1P2P3 không đổi khi hệ chuyển động?",
+            "essay",
+            '{"bloom_level":"van_dung_cao","confidence":0.95,"reasoning":"Bài toán 3 vật hấp dẫn yêu cầu thiết lập phương trình Newton cho từng chất điểm, kết hợp định luật hấp dẫn và điều kiện hình học để tìm ràng buộc — phân tích hệ phức hợp đa định luật, không có đáp số số"}',
+        ),
+        (
+            "Trái Đất chuyển động quanh Mặt Trời theo quỹ đạo tròn bán kính RT với chu kỳ T0 và vận tốc vT. "
+            "Một sao chổi chuyển động trong mặt phẳng quỹ đạo Trái Đất, đi gần Mặt Trời nhất ở khoảng cách kRT với vận tốc v1. "
+            "1. Xác định vận tốc v của sao chổi khi cắt quỹ đạo Trái Đất. "
+            "2. Chứng minh quỹ đạo sao chổi là elip, xác định bán trục lớn a = λRT và tâm sai e, chu kỳ T = nT0. "
+            "3. Tính khoảng thời gian τ sao chổi còn ở bên trong quỹ đạo Trái Đất dưới dạng tích phân và tính gần đúng.",
+            "essay",
+            '{"bloom_level":"van_dung_cao","confidence":0.96,"reasoning":"Kết hợp bảo toàn momen động lượng và năng lượng để tìm vận tốc, chứng minh quỹ đạo elip bằng phân tích hình học quỹ đạo, sau đó tính tích phân thời gian — đa công cụ, đa bước, yêu cầu chứng minh lý thuyết"}',
+        ),
+    ]
+
     @get_tracer().skill_span("bloom_classifier")
     async def classify(
         self,
@@ -60,10 +114,12 @@ Trả về JSON:
 
         user_content = f"Câu hỏi: {question_stem}\nLoại: {question_type}\nMôn: {subject}"
 
-        messages = [
-            {"role": "system", "content": self.BLOOM_RUBRIC},
-            {"role": "user", "content": user_content},
-        ]
+        # Build messages with few-shot examples before the real input
+        messages: list[dict] = [{"role": "system", "content": self.BLOOM_RUBRIC}]
+        for stem, q_type, expected_output in self.FEW_SHOT_EXAMPLES:
+            messages.append({"role": "user", "content": f"Câu hỏi: {stem}\nLoại: {q_type}\nMôn: vật lý"})
+            messages.append({"role": "assistant", "content": expected_output})
+        messages.append({"role": "user", "content": user_content})
 
         try:
             response = await client.chat(

@@ -28,8 +28,12 @@ class ParserTaskStatus:
 
 # Giống y hệt test_api.py
 MAX_LLM_RETRIES = 3
-GEMINI_MODEL = "gemma-4-31b-it"
 CHUNK_SIZE = 10
+
+def _get_gemini_model() -> str:
+    """Get Gemini model name from settings (configurable via GEMINI_MODEL env var)."""
+    from app.core.config import get_settings
+    return get_settings().GEMINI_MODEL
 
 
 class ParserChunkTask:
@@ -274,8 +278,8 @@ def _call_gemini_sync(
         if "400" in err_msg or "invalid" in err_lower or "expired" in err_lower:
             raise KeyUnavailable(err_msg) from e
 
-        # Polling timeout hoặc 500 internal → raise thường để worker retry
-        if "timed out" in err_lower or "500" in err_msg or "internal" in err_lower:
+        # Polling timeout hoặc 500/503 → raise thường để worker retry bằng key khác
+        if "timed out" in err_lower or "503" in err_msg or "500" in err_msg or "internal" in err_lower:
             raise Exception(err_msg) from e
 
 
@@ -421,10 +425,11 @@ def _parse_pdf_gemini(
     _log.info("🚀 KÍCH HOẠT HỆ THỐNG PHÂN TÁN threading...")
 
     # Primary Workers
+    gemini_model = _get_gemini_model()
     for i, key in enumerate(primary_keys):
         t = threading.Thread(
             target=_thread_worker,
-            args=(f"P{i+1}", key, False, coordinator, GEMINI_MODEL, progress_callback),
+            args=(f"P{i+1}", key, False, coordinator, gemini_model, progress_callback),
             daemon=True,
         )
         t.start()
@@ -434,7 +439,7 @@ def _parse_pdf_gemini(
     for i, key in enumerate(fallback_keys):
         t = threading.Thread(
             target=_thread_worker,
-            args=(f"F{i+1}", key, True, coordinator, GEMINI_MODEL, progress_callback),
+            args=(f"F{i+1}", key, True, coordinator, gemini_model, progress_callback),
             daemon=True,
         )
         t.start()

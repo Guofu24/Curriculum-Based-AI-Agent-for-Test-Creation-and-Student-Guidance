@@ -15,6 +15,14 @@ from app.core.config import get_settings
 # Domain 9: Prompt versioning
 OUTLINE_PROMPT_VERSION = "v2.1"
 
+# Fallback topic_hint templates per Bloom level (used when LLM outline fails or pads slots)
+BLOOM_HINT_TEMPLATE = {
+    "nhan_biet":   "Nhận biết và định nghĩa các khái niệm cơ bản trong chương.",
+    "thong_hieu":  "Giải thích hiện tượng, minh họa hoặc áp dụng công thức 1 bước. Dạng: 'Định nghĩa X là gì', 'Đơn vị của Y', 'Phát biểu định luật Z'.",
+    "van_dung":    "Bài toán tính toán 2-3 bước, có điều kiện ràng buộc, áp dụng công thức và logic giải thích, cần tính ẩn số trung gian trước khi ra kết quả.",
+    "van_dung_cao":"Bài toán phức hợp kết hợp nhiều định luật, phân tích hệ thống và giải quyết vấn đề tổng hợp.",
+}
+
 settings = get_settings()
 tracer = get_tracer()
 logger = logging.getLogger("app.agents.outline")
@@ -1170,7 +1178,7 @@ KIỂM TRA LẠI trước khi output.
                     "bloom_level": bloom_cycle[idx % len(bloom_cycle)],
                     "chapter": fallback_chapter,
                     "section": "",
-                    "topic_hint": f"Câu hỏi mức {bloom_cycle[idx % len(bloom_cycle)]}",
+                    "topic_hint": BLOOM_HINT_TEMPLATE.get(bloom_cycle[idx % len(bloom_cycle)], f"Câu hỏi mức {bloom_cycle[idx % len(bloom_cycle)]}"),
                     "content_type": "calculation" if q_type in ("short_answer", "dung_sai") else "text",
                     "estimated_difficulty": 0.5,
                 })
@@ -1568,7 +1576,7 @@ Tạo blueprint chi tiết (JSON thuần):"""
                     "bloom_level": bloom,
                     "chapter": chapter,
                     "section": None,
-                    "topic_hint": f"Câu hỏi mức {bloom}",
+                    "topic_hint": BLOOM_HINT_TEMPLATE.get(bloom, f"Câu hỏi mức {bloom}"),
                     "content_type": "calculation" if bloom in ["van_dung", "van_dung_cao"] else "text",
                     "estimated_difficulty": diff_map.get(bloom, 0.5),
                 })
@@ -1582,7 +1590,7 @@ Tạo blueprint chi tiết (JSON thuần):"""
                 "bloom_level": "van_dung",
                 "chapter": chapters[i % len(chapters)],
                 "section": None,
-                "topic_hint": "Câu tự luận vận dụng",
+                "topic_hint": BLOOM_HINT_TEMPLATE["van_dung"],
                 "content_type": "applied_problem",
                 "estimated_difficulty": 0.7,
             })
@@ -1598,7 +1606,7 @@ Tạo blueprint chi tiết (JSON thuần):"""
                     "bloom_level": bloom,
                     "chapter": chapters[i % len(chapters)],
                     "section": None,
-                    "topic_hint": f"Câu đúng-sai mức {bloom}",
+                    "topic_hint": BLOOM_HINT_TEMPLATE.get(bloom, f"Câu đúng-sai mức {bloom}"),
                     "content_type": "conceptual",
                     "estimated_difficulty": diff_map.get(bloom, 0.5),
                 })
@@ -1614,7 +1622,7 @@ Tạo blueprint chi tiết (JSON thuần):"""
                     "bloom_level": bloom,
                     "chapter": chapters[i % len(chapters)],
                     "section": None,
-                    "topic_hint": f"Câu trả lời ngắn mức {bloom}",
+                    "topic_hint": BLOOM_HINT_TEMPLATE.get(bloom, f"Câu trả lời ngắn mức {bloom}"),
                     "content_type": "calculation",
                     "estimated_difficulty": diff_map.get(bloom, 0.6),
                 })
