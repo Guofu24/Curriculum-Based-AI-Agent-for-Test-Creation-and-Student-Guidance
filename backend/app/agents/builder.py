@@ -361,19 +361,14 @@ Trả về JSON array (không có key bọc ngoài):
 - Phải kết hợp nhiều kiến thức/định luật
 - Câu hỏi bắt đầu bằng: "Tính", "Giải bài toán", "Xác định", "Vận dụng"
 - Ví dụ stem: "Một vật trượt trên mặt phẳng nghiêng 30°. Tính gia tốc biết hệ số ma sát μ=0.2."
-- Options MCQ: đáp án đúng cần tính toán đúng; distractors là các bước tính sai phổ biến (quên ma sát, dùng sai công thức, tính nhầm đơn vị)
-- BẮT BUỘC: Phải có ẩn số TRUNG GIAN — tức là phải tính một đại lượng phụ trước, mới tính được đáp án cuối
-- KIỂM TRA: Nếu chỉ cần thay số vào đúng 1 công thức → đó là thong_hieu, KHÔNG ĐƯỢC gán van_dung""",
+- Options MCQ: đáp án đúng cần tính toán đúng; distractors là các bước tính sai phổ biến (quên ma sát, dùng sai công thức, tính nhầm đơn vị)""",
 
         "van_dung_cao": """## Hướng dẫn cho câu hỏi Vận dụng cao (van_dung_cao)
 - Câu hỏi yêu cầu phân tích mối quan hệ, đánh giá, hoặc bài toán phức hợp
 - Kết hợp nhiều công thức, nhiều chương, hoặc dữ liệu thực tế
 - Câu hỏi bắt đầu bằng: "Phân tích", "Đánh giá", "So sánh và nhận xét", "Thiết kế"
 - Ví dụ stem: "Hai vật A và B nối bằng sợi dây qua ròng rọc. Phân tích chuyển động và tính gia tốc của hệ."
-- Options MCQ: đáp án đúng cần phân tích đúng toàn bộ hệ; distractors là các lỗi phân tích phổ biến (bỏ qua ma sát, nhầm chiều lực, bỏ qua ràng buộc hình học)
-- BẮT BUỘC: Kết hợp ít nhất 2 định luật/công thức KHÁC NHAU trong cùng bài toán
-- BẮT BUỘC: Có ít nhất 1 đại lượng KHÔNG cho trực tiếp — phải suy ra từ điều kiện bài toán
-- KIỂM TRA: Nếu không có bước thiết lập phương trình hoặc phân tích hệ → không đạt van_dung_cao""",
+- Options MCQ: đáp án đúng cần phân tích đúng toàn bộ hệ; distractors là các lỗi phân tích phổ biến (bỏ qua ma sát, nhầm chiều lực, bỏ qua ràng buộc hình học)""",
     }
 
     # Distractor quality guide
