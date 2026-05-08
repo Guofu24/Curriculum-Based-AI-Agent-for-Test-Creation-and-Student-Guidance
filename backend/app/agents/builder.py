@@ -6,6 +6,48 @@ import json
 import asyncio
 from typing import Any
 
+# ─────────────────────────────────────────────────────────────
+# Gemini Key Pool — async-safe round-robin fallback for builder
+# ─────────────────────────────────────────────────────────────
+
+class GeminiKeyPool:
+    """Async-safe key pool for Gemini fallback. Each acquire() returns the next
+    unused key across all slots, or None when the pool is exhausted."""
+
+    def __init__(self, keys: list[str], max_rounds: int = 2) -> None:
+        self._keys: list[str] = list(keys) * max_rounds if keys else []
+        self._idx: int = 0
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    async def acquire(self) -> str | None:
+        """Return next available key, or None if pool exhausted."""
+        async with self._lock:
+            if self._idx >= len(self._keys):
+                return None
+            key = self._keys[self._idx]
+            self._idx += 1
+            return key
+
+    @property
+    def has_keys(self) -> bool:
+        return bool(self._keys)
+
+
+async def _call_gemini_slot(api_key: str, messages: list[dict], model: str) -> str:
+    """Call Gemini via OpenAI-compatible endpoint (reuses openai SDK, no extra dep)."""
+    from openai import AsyncOpenAI
+    async with AsyncOpenAI(
+        api_key=api_key,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    ) as client:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=4000,
+            temperature=0.7,
+        )
+    return resp.choices[0].message.content or ""
+
 # Domain 9: Prompt versioning
 BUILDER_PROMPT_VERSION = "v2.1"
 
@@ -464,6 +506,12 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
         topics_used = [q.get("topic_hint", "") for q in existing_questions]
 
+        from app.core.config import get_settings as _gcfg
+        _sq_pool: GeminiKeyPool | None = None
+        _sqkeys = _gcfg().GEMINI_KEYS
+        if _sqkeys:
+            _sq_pool = GeminiKeyPool(_sqkeys)
+
         question, warnings = await self._generate_single_slot(
             slot=slot,
             context=context_all[:8000],
@@ -471,6 +519,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
             scope_restriction=scope_restriction,
             topics_used=topics_used,
             slot_number=0,
+            gemini_key_pool=_sq_pool,
         )
 
         if warnings:
@@ -538,6 +587,20 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 context_to_use = reduced_context_for_llm if flush_mode else context_for_llm
                 topics_snapshot = list(topics_used)
 
+                # Create Gemini key pool (shared across all slots for this build run)
+                from app.core.config import get_settings as _gcfg
+                _gemini_pool: GeminiKeyPool | None = None
+                _gkeys = _gcfg().GEMINI_KEYS
+                if _gkeys:
+                    _gemini_pool = GeminiKeyPool(_gkeys)
+                    logger.info("GeminiKeyPool ready: %d keys × 2 rounds = %d slots", len(_gkeys), len(_gkeys) * 2)
+
+                # Global semaphore — shared across ALL chunks so total concurrent
+                # LLM calls never exceeds MAX_CONCURRENT_LLM_CALLS regardless of
+                # how many chunks run in parallel.
+                _global_sem = asyncio.Semaphore(self.MAX_CONCURRENT_LLM_CALLS)
+                logger.info("Global semaphore: max %d concurrent LLM calls", self.MAX_CONCURRENT_LLM_CALLS)
+
                 # Launch all chunks in parallel — each gets an independent topics copy
                 chunk_tasks = [
                     self._generate_chunk(
@@ -549,6 +612,8 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         slot_start_index=i * self.CHUNK_SIZE,
                         total_slots=len(blueprint),
                         correction_strategies=correction_strategies,
+                        gemini_key_pool=_gemini_pool,
+                        semaphore=_global_sem,
                     )
                     for i, bp_chunk in enumerate(blueprint_chunks)
                 ]
@@ -659,15 +724,17 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         slot_start_index: int = 0,
         total_slots: int = 0,
         correction_strategies: dict[str, str] | None = None,
+        gemini_key_pool: GeminiKeyPool | None = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> tuple[list[dict], list[str]]:
         """Generate questions for a blueprint chunk IN PARALLEL using semaphore.
 
-        CHUNK_SIZE questions are generated concurrently (max 5 concurrent LLM calls).
-        Results are reordered by slot position to maintain stable output order
-        for the progress bar.
+        Semaphore is shared globally across all chunks (passed from build()) so
+        MAX_CONCURRENT_LLM_CALLS is a hard cap for the entire builder run, not
+        per-chunk. Falls back to a local semaphore if called without one.
         """
         warnings: list[str] = []
-        semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_LLM_CALLS)
+        semaphore = semaphore or asyncio.Semaphore(self.MAX_CONCURRENT_LLM_CALLS)
 
         # Build topic-keyed context map for per-question filtering
         topic_context_map = self._build_topic_context_map(retrieved_context)
@@ -748,6 +815,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     topics_used=topics_used,
                     slot_number=slot_number,
                     correction_strategy=_correction_strategies.get(slot.get("question_id", ""), ""),
+                    gemini_key_pool=gemini_key_pool,
                 )
                 return slot_number, question, q_warnings
 
@@ -792,6 +860,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         slot_number: int = 0,
         question_context: str = "",
         correction_strategy: str = "",
+        gemini_key_pool: GeminiKeyPool | None = None,
     ) -> tuple[dict | None, list[str]]:
         """
         Generate a single question for one blueprint slot.
@@ -866,7 +935,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
 Đây là JSON array MỘT câu hỏi:"""
 
-        max_retries = 2
+        max_retries = 0  # fail-fast: on first failure hand off to Gemini pool
         for attempt in range(max_retries + 1):
             try:
                 response = await self.llm.chat(
@@ -987,23 +1056,83 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 if attempt == max_retries:
                     break
 
-        # ── All retries exhausted — emit a demo question so the pipeline doesn't stall ──
+        # ── Primary provider exhausted — try Gemini key pool ──
+        if gemini_key_pool is not None and gemini_key_pool.has_keys:
+            from app.core.config import get_settings as _gcfg
+            _gmodel = _gcfg().GEMINI_MODEL
+            _gmessages = [
+                {"role": "system", "content": self.BUILDER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+            while True:
+                _gkey = await gemini_key_pool.acquire()
+                if _gkey is None:
+                    logger.warning("Slot %d: Gemini key pool exhausted — using demo question", slot_number)
+                    warnings.append(f"Slot {slot_number}: Gemini pool exhausted, using demo question")
+                    break
+                try:
+                    _gresp = await _call_gemini_slot(_gkey, _gmessages, _gmodel)
+                    if not _gresp or not _gresp.strip():
+                        continue
+                    _clean = _gresp.strip()
+                    if _clean.startswith("`"):
+                        _gl = [_l for _l in _clean.split("\n") if not _l.strip().startswith("```")]
+                        _clean = "\n".join(_gl).strip()
+                    _jstr = _extract_json_brackets(_clean)
+                    if not _jstr:
+                        continue
+                    _jstr = _sanitize_latex_escapes(_jstr)
+                    try:
+                        _gdata = json.loads(_jstr, strict=False)
+                    except json.JSONDecodeError:
+                        try:
+                            _gdata = json.loads(_repair_json_string(_jstr), strict=False)
+                        except json.JSONDecodeError:
+                            continue
+                    _graw: list = _gdata if isinstance(_gdata, list) else (_gdata.get("questions", [_gdata]) if isinstance(_gdata, dict) else [])
+                    if not _graw:
+                        continue
+                    q = _graw[0]
+                    if "question_id" not in q: q["question_id"] = q_id
+                    if "type" not in q: q["type"] = q_type
+                    if "bloom_level" not in q: q["bloom_level"] = bloom
+                    if "chapter" not in q: q["chapter"] = chapter
+                    q["estimated_difficulty"] = difficulty
+                    if q_type == "mcq" and "options" not in q:
+                        q["options"] = {"A": "Đáp án A", "B": "Đáp án B", "C": "Đáp án C", "D": "Đáp án D"}
+                        q["correct_answer"] = "A"; q["explanation"] = "Đáp án đúng là A."
+                    if q_type == "dung_sai" and "propositions" not in q:
+                        q["propositions"] = [{"label": l, "text": f"Mệnh đề {l}", "is_correct": l in ("a", "c")} for l in "abcd"]
+                    if q_type == "short_answer" and "correct_answer" not in q:
+                        q["correct_answer"] = ""; q["unit"] = ""; q["solution"] = ""
+                    if q_type == "essay" and "rubric" not in q:
+                        q["rubric"] = [{"score": s, "description": d} for s, d in [(10, "Hoàn toàn chính xác"), (7, "Đúng nhưng thiếu chi tiết"), (4, "Sai sót một phần"), (0, "Sai hoàn toàn")]]
+                        q["estimated_solve_time_minutes"] = 15
+                    await self._apply_skill_pipeline(q, topics_used)
+                    logger.info("Slot %d: Gemini fallback succeeded", slot_number)
+                    warnings.append(f"Slot {slot_number}: Used Gemini key fallback")
+                    return q, warnings
+                except Exception as _ge:
+                    logger.warning("Slot %d: Gemini key failed: %s — trying next", slot_number, str(_ge)[:120])
+                    continue
+
+        # ── All fallbacks exhausted — demo question ──
         logger.warning(f"Slot {slot_number}: All LLM retries failed — using demo question")
         warnings.append(f"Slot {slot_number}: LLM failed after {max_retries + 1} attempts, using demo question")
-
         demo_q = self._build_demo_question(slot, effective_context)
         return demo_q, warnings
 
     async def _apply_skill_pipeline(self, q: dict, topics_used: list[str]) -> None:
         """Run skill pipeline on a question (non-blocking, errors are swallowed)."""
+        # bloom_classified is an audit-only field — bloom_level is already set from
+        # the blueprint slot. Use the keyword-based fallback to avoid an extra LLM
+        # call per question (which was causing 429 rate-limit spikes after few-shot
+        # examples were added to BloomClassifierSkill).
         try:
-            bloom_result = await self.bloom_skill.run(
-                question_stem=q.get("stem", ""),
-                question_type=q.get("type", "mcq"),
-            )
+            bloom_result = self.bloom_skill._fallback_classify(q.get("stem", ""))
             q["bloom_classified"] = bloom_result.get("bloom_level")
         except Exception as exc:
-            logger.debug("bloom_skill failed for %s: %s", q.get("question_id"), exc)
+            logger.debug("bloom_skill fallback failed for %s: %s", q.get("question_id"), exc)
 
         try:
             diff_result = await self.difficulty_skill.run(
