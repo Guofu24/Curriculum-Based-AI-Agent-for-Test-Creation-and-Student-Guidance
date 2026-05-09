@@ -1276,6 +1276,33 @@ function QuestionCard({
                   </div>
                 )}
 
+                {getQType(question) === 'dung_sai' && question.propositions && question.propositions.length > 0 && (
+                  <div className="space-y-2">
+                    {question.propositions.map((prop) => (
+                      <div
+                        key={prop.label}
+                        className={cn(
+                          "flex items-start gap-3 rounded-md border p-2.5 text-sm",
+                          prop.is_correct
+                            ? "border-emerald-500/40 bg-emerald-500/10"
+                            : "border-red-500/30 bg-red-500/10"
+                        )}
+                      >
+                        <span className="mt-0.5 w-5 shrink-0 font-semibold">{prop.label})</span>
+                        <LatexRenderer className="flex-1 leading-relaxed">
+                          {prop.text}
+                        </LatexRenderer>
+                        <span className={cn(
+                          "shrink-0 text-xs font-medium",
+                          prop.is_correct ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"
+                        )}>
+                          {prop.is_correct ? "Đúng" : "Sai"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 {getQType(question) === 'essay' && (question.solution || question.rubric) && (
                   <div className="p-3 rounded-md bg-muted text-sm">
                     {question.solution && (

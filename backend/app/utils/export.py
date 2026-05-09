@@ -247,7 +247,10 @@ class ExamExporter:
             html_parts.append("<h2>Phần I: Trắc nghiệm</h2>")
             html_parts.append("<p>Hãy chọn đáp án đúng nhất.</p>")
             for i, q in enumerate(mcq_questions, 1):
-                html_parts.append(self._render_mcq_html(q, i, include_answers))
+                if self._get_qtype(q) == "dung_sai":
+                    html_parts.append(self._render_dung_sai_html(q, i, include_answers))
+                else:
+                    html_parts.append(self._render_mcq_html(q, i, include_answers))
 
         if essay_questions:
             html_parts.append("<h2>Phần II: Tự luận</h2>")
@@ -475,6 +478,33 @@ class ExamExporter:
         parts.append("</div></div>")
         return "\n".join(parts)
 
+    def _render_dung_sai_html(self, q: dict, index: int, include_answers: bool) -> str:
+        """Render THPT true/false question from propositions."""
+        raw_stem = q.get("stem") or q.get("content") or ""
+        stem = self._render_latex(html.escape(raw_stem))
+        propositions = self._normalize_propositions(q.get("propositions", []))
+        explanation = html.escape(q.get("explanation", ""))
+
+        parts = [
+            f"<div class='question'>",
+            f"<div class='question-stem'>CÃ¢u {index}. {stem}</div>",
+            "<div class='options'>",
+        ]
+
+        for label, text, is_correct in propositions:
+            escaped_text = self._render_latex(html.escape(str(text)))
+            if include_answers:
+                mark = "ÄÃºng" if is_correct else "Sai"
+                parts.append(f"<div class='option option-correct'>â—‹ {label}) {escaped_text} <strong>[{mark}]</strong></div>")
+            else:
+                parts.append(f"<div class='option'>â—‹ {label}) {escaped_text}</div>")
+
+        if include_answers and explanation:
+            parts.append(f"<div class='answer-block'>Giáº£i thÃ­ch: <span class='explanation'>{explanation}</span></div>")
+
+        parts.append("</div></div>")
+        return "\n".join(parts)
+
     def _render_essay_html(self, q: dict, index: int, include_answers: bool) -> str:
         """Render essay question with rubric."""
         raw_stem = q.get("stem") or q.get("content") or ""
@@ -512,6 +542,7 @@ class ExamExporter:
     def _render_answer_key(self, questions: list[dict]) -> str:
         """Render answer key at end of PDF (teacher version)."""
         mcq_questions = [q for q in questions if q.get("type") == "mcq" or q.get("question_type") == "mcq"]
+        dung_sai_questions = [q for q in questions if self._get_qtype(q) == "dung_sai"]
         essay_questions = [q for q in questions if q.get("type") == "essay" or q.get("question_type") == "essay"]
 
         rows: list[str] = []
@@ -524,6 +555,22 @@ class ExamExporter:
                 bloom = q.get("bloom_level", "-")
                 diff = q.get("difficulty_level", "-")
                 rows.append(f"<tr><td>{i}</td><td>{html.escape(str(ans))}</td><td>{html.escape(bloom)}</td><td>{html.escape(diff)}</td></tr>")
+            rows.append("</table>")
+
+        if dung_sai_questions:
+            rows.append("<h3>Đáp án Đúng-Sai</h3>")
+            rows.append("<table class='answer-key-table'>")
+            rows.append("<tr><th>Câu</th><th>a</th><th>b</th><th>c</th><th>d</th><th>Bloom</th></tr>")
+            for i, q in enumerate(dung_sai_questions, 1):
+                answer_map = {
+                    label.lower(): ("Đ" if is_correct else "S")
+                    for label, _, is_correct in self._normalize_propositions(q.get("propositions", []))
+                }
+                bloom = q.get("bloom_level", "-")
+                rows.append(
+                    f"<tr><td>{i}</td><td>{answer_map.get('a', '-')}</td><td>{answer_map.get('b', '-')}</td>"
+                    f"<td>{answer_map.get('c', '-')}</td><td>{answer_map.get('d', '-')}</td><td>{html.escape(bloom)}</td></tr>"
+                )
             rows.append("</table>")
 
         if essay_questions:
@@ -637,7 +684,10 @@ class ExamExporter:
             p.runs[0].italic = True
 
             for i, q in enumerate(mcq_questions, 1):
-                self._docx_add_mcq(doc, q, i, include_answers)
+                if self._get_qtype(q) == "dung_sai":
+                    self._docx_add_dung_sai(doc, q, i, include_answers)
+                else:
+                    self._docx_add_mcq(doc, q, i, include_answers)
 
         if essay_questions:
             doc.add_heading("Phần II: Tự luận", level=2)
@@ -700,6 +750,35 @@ class ExamExporter:
             run.italic = True
             run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
 
+    def _docx_add_dung_sai(
+        self, doc: Document, q: dict, index: int, include_answers: bool
+    ) -> None:
+        """Add a single THPT true/false question to the DOCX document."""
+        stem = self._strip_latex(q.get("stem") or q.get("content") or "")
+        propositions = self._normalize_propositions(q.get("propositions", []))
+        explanation = q.get("explanation", "")
+
+        p = doc.add_paragraph()
+        run = p.add_run(f"CÃ¢u {index}. {stem}")
+        run.bold = True
+        run.font.size = Pt(12)
+
+        for label, text, is_correct in propositions:
+            opt_para = doc.add_paragraph(style="List Bullet")
+            opt_para.paragraph_format.left_indent = Inches(0.4)
+            marker = f" [{('ÄÃºng' if is_correct else 'Sai')}]" if include_answers else ""
+            run = opt_para.add_run(f"{label}) {self._strip_latex(str(text))}{marker}")
+            if include_answers:
+                run.font.color.rgb = RGBColor(0x1A, 0x7F, 0x1A) if is_correct else RGBColor(0xA3, 0x1D, 0x1D)
+                run.bold = True
+
+        if include_answers and explanation:
+            p = doc.add_paragraph()
+            run = p.add_run(f"Giáº£i thÃ­ch: {self._strip_latex(explanation)}")
+            run.font.size = Pt(11)
+            run.italic = True
+            run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+
     def _docx_add_essay(
         self, doc: Document, q: dict, index: int, include_answers: bool
     ) -> None:
@@ -738,6 +817,7 @@ class ExamExporter:
         doc.add_heading("ĐÁP ÁN (Phiên bản giáo viên)", level=2)
 
         mcq_questions = [q for q in questions if q.get("type") == "mcq" or q.get("question_type") == "mcq"]
+        dung_sai_questions = [q for q in questions if self._get_qtype(q) == "dung_sai"]
         essay_questions = [q for q in questions if q.get("type") == "essay" or q.get("question_type") == "essay"]
 
         if mcq_questions:
@@ -755,6 +835,28 @@ class ExamExporter:
                 row[1].text = str(q.get("correct_answer", "-"))
                 row[2].text = str(q.get("bloom_level", "-"))
                 row[3].text = str(q.get("difficulty_level", "-"))
+
+        if dung_sai_questions:
+            doc.add_heading("Đúng-Sai", level=3)
+            table = doc.add_table(rows=1, cols=6)
+            table.style = "Table Grid"
+            hdr = table.rows[0].cells
+            for cell, text in zip(hdr, ["Câu", "a", "b", "c", "d", "Bloom"]):
+                cell.text = text
+                cell.paragraphs[0].runs[0].bold = True
+
+            for i, q in enumerate(dung_sai_questions, 1):
+                answer_map = {
+                    label.lower(): ("Đ" if is_correct else "S")
+                    for label, _, is_correct in self._normalize_propositions(q.get("propositions", []))
+                }
+                row = table.add_row().cells
+                row[0].text = str(i)
+                row[1].text = answer_map.get("a", "-")
+                row[2].text = answer_map.get("b", "-")
+                row[3].text = answer_map.get("c", "-")
+                row[4].text = answer_map.get("d", "-")
+                row[5].text = str(q.get("bloom_level", "-"))
 
         if essay_questions:
             doc.add_heading("Tự luận", level=3)
@@ -789,6 +891,32 @@ class ExamExporter:
             return "short_answer"
         # 'mcq' or any unrecognized type → treat as mcq
         return "mcq"
+
+    def _normalize_propositions(self, propositions) -> list[tuple[str, str, bool]]:
+        """Normalize THPT true/false propositions to (label, text, is_correct)."""
+        result: list[tuple[str, str, bool]] = []
+        if isinstance(propositions, list):
+            for idx, prop in enumerate(propositions):
+                default_label = chr(ord("a") + idx)
+                if isinstance(prop, dict):
+                    label = str(prop.get("label") or default_label)
+                    text = str(prop.get("text") or prop.get("statement") or "")
+                    is_correct = bool(prop.get("is_correct", False))
+                else:
+                    label = default_label
+                    text = str(prop)
+                    is_correct = False
+                result.append((label, text, is_correct))
+        elif isinstance(propositions, dict):
+            for label, value in propositions.items():
+                if isinstance(value, dict):
+                    text = str(value.get("text") or value.get("statement") or "")
+                    is_correct = bool(value.get("is_correct", False))
+                else:
+                    text = str(value)
+                    is_correct = False
+                result.append((str(label), text, is_correct))
+        return result
 
     def _normalize_options(self, options) -> list[tuple[str, str]]:
 
