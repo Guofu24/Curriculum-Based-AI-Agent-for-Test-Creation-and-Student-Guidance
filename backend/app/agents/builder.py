@@ -442,14 +442,36 @@ Output (essay luôn phải có cả "solution" và "rubric"):
 - KIỂM TRA: Nếu chỉ cần thay số vào đúng 1 công thức → đó là thong_hieu, KHÔNG ĐƯỢC gán van_dung""",
 
         "van_dung_cao": """## Hướng dẫn cho câu hỏi Vận dụng cao (van_dung_cao)
-- Câu hỏi yêu cầu phân tích mối quan hệ, đánh giá, hoặc bài toán phức hợp
-- Kết hợp nhiều công thức, nhiều chương, hoặc dữ liệu thực tế
-- Câu hỏi bắt đầu bằng: "Phân tích", "Đánh giá", "So sánh và nhận xét", "Thiết kế"
-- Ví dụ stem: "Hai vật A và B nối bằng sợi dây qua ròng rọc. Phân tích chuyển động và tính gia tốc của hệ."
-- Options MCQ: đáp án đúng cần phân tích đúng toàn bộ hệ; distractors là các lỗi phân tích phổ biến (bỏ qua ma sát, nhầm chiều lực, bỏ qua ràng buộc hình học)
+- Câu hỏi yêu cầu phân tích mối quan hệ, đánh giá, hoặc bài toán phức hợp nhiều bước
+- Kết hợp ít nhất 2 định luật/công thức KHÁC NHAU, có dữ liệu thực tế, ẩn số trung gian
+- Câu hỏi bắt đầu bằng: "Phân tích", "Đánh giá", "Xác định", bài toán có >=2 dữ kiện số ràng buộc
+- Ví dụ stem tốt: "Mạch RLC nối tiếp, tụ C thay đổi được, điều chỉnh để $U_C$ đạt cực đại. Khi đó điện áp tức thời cực đại trên R là $12a$. Biết lúc $u=16a$ thì $u_C=7a$. Hệ thức nào đúng?"
+- Ví dụ stem SAI (chỉ là van_dung): "Hai vật A và B nối bằng sợi dây qua ròng rọc. Tính gia tốc hệ."
+- Options MCQ: đáp án đúng cần phân tích đúng toàn bộ hệ; distractors là lỗi phân tích phổ biến
 - BẮT BUỘC: Kết hợp ít nhất 2 định luật/công thức KHÁC NHAU trong cùng bài toán
 - BẮT BUỘC: Có ít nhất 1 đại lượng KHÔNG cho trực tiếp — phải suy ra từ điều kiện bài toán
-- KIỂM TRA: Nếu không có bước thiết lập phương trình hoặc phân tích hệ → không đạt van_dung_cao""",
+- BẮT BUỘC: Lời giải/explanation phải có ít nhất 3 bước tường minh (Bước 1, Bước 2, Bước 3...)
+- KIỂM TRA: Nếu không có bước thiết lập phương trình trung gian hoặc phân tích hệ → không đạt van_dung_cao
+
+## VÍ DỤ VDC — MCQ (học cấu trúc độ khó, KHÔNG copy số liệu/chủ đề):
+Slot: {"type": "mcq", "bloom_level": "van_dung_cao", "chapter": "Dòng điện xoay chiều"}
+Output:
+[{"type": "mcq", "bloom_level": "van_dung_cao", "chapter": "Dòng điện xoay chiều", "stem": "Mạch RLC nối tiếp, tụ C thay đổi được, điều chỉnh để $U_C$ đạt cực đại. Khi đó điện áp tức thời cực đại trên R là $12a$. Biết lúc $u = 16a$ thì $u_C = 7a$. Hệ thức nào đúng?", "options": {"A": "$4R = 3\\omega L$", "B": "$3R = 4\\omega L$", "C": "$R = 2\\omega L$", "D": "$2R = \\omega L$"}, "correct_answer": "B", "explanation": "Bước 1: Điều kiện $U_{C\\max}$: $Z_C = (R^2 + Z_L^2)/Z_L$, suy ra $\\tan\\varphi = -R/Z_L$. Bước 2: Vì $\\tan\\varphi \\cdot \\tan\\varphi_{RL} = -1$, $u$ và $u_{RL}$ vuông pha, lập hệ thức: $u^2 Z_L^2 + u_{RL}^2 R^2 = U_0^2 Z_L^2$. Bước 3: $u = 16a$, $u_C = 7a$ suy ra $u_{RL} = 9a$. Bước 4: Thế vào hệ thức: $256Z_L^2 + 81R^2 = 144(R^2+Z_L^2)$, rút gọn được $9R^2 = 16Z_L^2$, tức $3R = 4\\omega L$."}]
+
+## VÍ DỤ VDC — DUNG_SAI (học cấu trúc độ khó, KHÔNG copy số liệu/chủ đề):
+Slot: {"type": "dung_sai", "bloom_level": "van_dung_cao", "chapter": "Dòng điện xoay chiều"}
+Output:
+[{"type": "dung_sai", "bloom_level": "van_dung_cao", "chapter": "Dòng điện xoay chiều", "stem": "Cho mạch RLC nối tiếp: $u = 200\\sqrt{2}\\cos(100\\pi t)\\,\\text{V}$, $R = 100\\,\\Omega$, $L = 1/\\pi\\,\\text{H}$, $C = 10^{-4}/(2\\pi)\\,\\text{F}$. Mắc thêm tụ $C'$ song song với $C$ để công suất đạt cực đại. Xác định đúng/sai:", "propositions": [{"label": "a", "text": "Trước khi mắc thêm $C'$, mạch đang có tính cảm kháng.", "is_correct": false}, {"label": "b", "text": "Để công suất cực đại, cần thêm $C' = \\frac{10^{-4}}{2\\pi}\\,\\text{F}$.", "is_correct": true}, {"label": "c", "text": "Sau khi mắc thêm $C'$, điện áp hiệu dụng trên bộ tụ $(C+C')$ bằng điện áp hiệu dụng trên $L$.", "is_correct": true}, {"label": "d", "text": "Sau khi mắc thêm $C'$, công suất cực đại của mạch là $200\\,\\text{W}$.", "is_correct": false}], "explanation": "Bước 1: $Z_L = 100\\,\\Omega$, $Z_C = 200\\,\\Omega$; vì $Z_C > Z_L$ mạch có tính dung kháng, (a) sai. Bước 2: Cộng hưởng khi $Z_{C\\text{total}} = Z_L = 100\\,\\Omega$, suy ra $C' = 10^{-4}/(2\\pi)\\,\\text{F}$, (b) đúng. Bước 3: Cộng hưởng $\\Rightarrow U_L = U_{C+C'}$, (c) đúng. Bước 4: $P_{\\max} = U^2/R = 400\\,\\text{W} \\neq 200\\,\\text{W}$, (d) sai."}]
+
+## VÍ DỤ VDC — SHORT_ANSWER (học cấu trúc độ khó, KHÔNG copy số liệu/chủ đề):
+Slot: {"type": "short_answer", "bloom_level": "van_dung_cao", "chapter": "Dao động cơ"}
+Output:
+[{"type": "short_answer", "bloom_level": "van_dung_cao", "chapter": "Dao động cơ", "stem": "Hai vật A, B cùng khối lượng $m = 200\\,\\text{g}$, nối dây dài $l = 20\\,\\text{cm}$. A gắn lò xo $k = 40\\,\\text{N/m}$, lò xo ban đầu tự nhiên. Hệ số ma sát $\\mu = 0{,}1$ với cả hai vật, $g = 10\\,\\text{m/s}^2$. Kéo B để lò xo giãn $6\\,\\text{cm}$ rồi thả. Tính khoảng cách giữa A và B khi cả hai dừng hẳn.", "correct_answer": "8", "unit": "cm", "solution": "Bước 1: Hệ (A+B) dao động quanh VTCB lệch $x_I = \\mu Mg/k = 1\\,\\text{cm}$; biên độ $A_1 = 5\\,\\text{cm}$. Bước 2: Dây chùng tại $x = 0$; $v^2 = \\omega^2(A_1^2 - x_I^2) = 2400\\,\\text{cm}^2/\\text{s}^2$. Bước 3: B trượt tự do $s_B = v^2/(2\\mu g) = 12\\,\\text{cm}$; dừng tại $x_B = 20 - 12 = 8\\,\\text{cm}$ tính từ A ban đầu. Bước 4: A dao động tắt dần một mình, dừng tại $x_A = 0$ (lực đàn hồi = 0 không thắng ma sát nghỉ). Bước 5: Khoảng cách = $x_B - x_A = 8\\,\\text{cm}$."}]
+
+## VÍ DỤ VDC — ESSAY (học cấu trúc độ khó, KHÔNG copy số liệu/chủ đề):
+Slot: {"type": "essay", "bloom_level": "van_dung_cao", "chapter": "Nhiệt động lực học"}
+Output:
+[{"type": "essay", "bloom_level": "van_dung_cao", "chapter": "Nhiệt động lực học", "stem": "Bình trụ đứng có tiết diện $S = 23\\,\\text{cm}^2$, dưới piston nặng $P = 10\\,\\text{N}$ chứa khí lý tưởng đơn nguyên tử. Ban đầu piston cách đáy $h = 30\\,\\text{cm}$; vòng chắn không cho piston vượt quá $H = 50\\,\\text{cm}$. Cho $p_0 = 100\\,\\text{kPa}$. (a) Tính áp suất ban đầu của khí. (b) Khi truyền nhiệt, xác định các giai đoạn của quá trình và nhiệt lượng khí nhận trong từng giai đoạn. (c) Tính tổng nhiệt lượng để áp suất cuối tăng gấp $\\alpha = 1{,}5$ lần áp suất ban đầu.", "solution": "Bước 1: Cân bằng piston ban đầu cho $p_1 = p_0 + P/S \\approx 1{,}043\\times10^5\\,\\text{Pa}$. Bước 2: Khi piston còn chuyển động tự do, quá trình đẳng áp từ $V_1 = Sh$ đến $V_2 = SH$, nên $Q_{12} = \\frac{5}{2}p_1S(H-h) \\approx 120\\,\\text{J}$. Bước 3: Khi piston chạm vòng chắn, thể tích không đổi và áp suất tăng từ $p_1$ đến $\\alpha p_1$, nên $Q_{23} = \\frac{3}{2}SH(\\alpha - 1)p_1 \\approx 90\\,\\text{J}$. Bước 4: Tổng nhiệt lượng $Q = Q_{12}+Q_{23} \\approx 210\\,\\text{J}$; điểm then chốt là nhận ra điều kiện chuyển từ đẳng áp sang đẳng tích.", "rubric": [{"score": 2, "description": "Tính đúng áp suất ban đầu từ cân bằng lực lên piston."}, {"score": 3, "description": "Nhận diện đúng hai giai đoạn đẳng áp rồi đẳng tích và điều kiện piston chạm vòng chắn."}, {"score": 3, "description": "Áp dụng đúng nhiệt lượng khí đơn nguyên tử cho từng giai đoạn, tính được $Q_{12}$ và $Q_{23}$."}, {"score": 2, "description": "Tổng hợp đúng kết quả và giải thích vai trò của ràng buộc vòng chắn."}]}]""",
     }
 
     # Distractor quality guide
@@ -1075,12 +1097,14 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         # Retry malformed/partial primary output before falling back. Provider/API
         # exceptions still fall through to fallback immediately to avoid 429 spam.
         max_retries = 2
+        # VDC gate correction hint — updated on each failed gate check, injected into next attempt
+        vdc_correction = ""
         for attempt in range(max_retries + 1):
             try:
                 response = await self.llm.chat(
                     messages=[
                         {"role": "system", "content": self.BUILDER_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
+                        {"role": "user", "content": user_prompt + vdc_correction},
                     ],
                     role="builder",
                     max_tokens=8000,
@@ -1207,6 +1231,34 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 # Apply skill pipeline (non-blocking)
                 await self._apply_skill_pipeline(q, topics_used)
 
+                # VDC hard gate: structural quality check — retry within budget if fails
+                if bloom == "van_dung_cao":
+                    gate_passed, gate_reason = self._check_vdc_quality(q)
+                    if not gate_passed and attempt < max_retries:
+                        vdc_correction = (
+                            f"\n\n## ⚠️ CÂU HỎI VỪA SINH CHƯA ĐẠT MỨC VẬN DỤNG CAO:\n"
+                            f"Lý do: {gate_reason}\n"
+                            f"Yêu cầu bắt buộc khi sinh lại:\n"
+                            f"- Lời giải/explanation phải có ít nhất 3 bước tường minh (Bước 1, Bước 2, Bước 3...)\n"
+                            f"- Stem phải cung cấp ít nhất 2 dữ kiện số/điều kiện ràng buộc khác nhau\n"
+                            f"- Phải kết hợp ít nhất 2 định luật/công thức khác nhau\n"
+                            f"- Phải có đại lượng trung gian phải tính trước mới ra được đáp án\n"
+                            f"- KHÔNG phải dạng thay số vào 1 công thức hoặc nhận xét định tính đơn giản\n"
+                        )
+                        warn_msg = f"Slot {slot_number}: VDC gate fail (attempt {attempt + 1}) — {gate_reason}, retrying"
+                        warnings.append(warn_msg)
+                        logger.warning(warn_msg)
+                        continue  # retry in budget
+                    elif not gate_passed:
+                        # Budget exhausted — mark but keep
+                        q["needs_review"] = True
+                        q["quality_warning"] = f"bloom_mismatch: {gate_reason}"
+                        q["difficulty_score"] = min(float(q.get("difficulty_score") or 0.5), 0.55)
+                        q["estimated_difficulty"] = min(float(q.get("estimated_difficulty") or 0.5), 0.55)
+                        warn_msg = f"Slot {slot_number}: VDC gate fail after all retries — {gate_reason}"
+                        warnings.append(warn_msg)
+                        logger.warning(warn_msg)
+
                 logger.info(f"Slot {slot_number} generated ok (attempt {attempt + 1})")
                 return q, warnings
 
@@ -1300,6 +1352,64 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         warnings.append(f"Slot {slot_number}: LLM failed after {max_retries + 1} attempts, using demo question")
         demo_q = self._build_demo_question(slot, effective_context)
         return demo_q, warnings
+
+    @staticmethod
+    def _check_vdc_quality(q: dict) -> tuple[bool, str]:
+        """Structural gate for van_dung_cao questions.
+
+        Checks question complexity without any LLM call.
+        Returns (passed, reason_if_failed).
+        """
+        import re
+        stem: str = q.get("stem", "")
+        q_type: str = q.get("type", "mcq")
+
+        # Pick the richest text field for step counting
+        detail_text = ""
+        if q_type == "mcq":
+            detail_text = str(q.get("explanation", "") or "")
+        elif q_type == "dung_sai":
+            detail_text = str(q.get("explanation", "") or "")
+        elif q_type == "short_answer":
+            detail_text = str(q.get("solution", "") or "")
+        elif q_type == "essay":
+            rubric = q.get("rubric", [])
+            if isinstance(rubric, list):
+                detail_text = " ".join(
+                    r.get("description", "") if isinstance(r, dict) else str(r)
+                    for r in rubric
+                )
+            elif isinstance(rubric, str):
+                detail_text = rubric
+            detail_text += " " + str(q.get("solution", "") or "")
+
+        # 1. Multi-step check: look for explicit step markers. Normalize
+        # Vietnamese diacritics first so both "Bước 1" and "Buoc 1" match.
+        import unicodedata
+        detail_norm = unicodedata.normalize("NFD", detail_text)
+        detail_norm = "".join(
+            ch for ch in detail_norm
+            if unicodedata.category(ch) != "Mn"
+        ).lower()
+        step_count = len(re.findall(r"\b(?:buoc|step)\s*\d+", detail_norm))
+        if step_count < 3:
+            return False, f"chỉ có {step_count} bước tường minh trong lời giải (cần ≥3)"
+
+        # 2. Numerical data / conditions in stem
+        numbers_in_stem = re.findall(r"\d+[.,]?\d*\s*(?:[a-zA-Zμ°Ωπ]+|\\text\{[^}]+\})??", stem)
+        if len(numbers_in_stem) < 2:
+            return False, f"stem chỉ có {len(numbers_in_stem)} dữ kiện số (cần ≥2)"
+
+        # 3. Math symbols present (LaTeX, operators)
+        math_hits = len(re.findall(r"\$[^$]+\$|\\[a-zA-Z]+|[=+\-*/^]", stem))
+        if math_hits < 2:
+            return False, "stem thiếu ký hiệu toán học / công thức"
+
+        # 4. Stem length — trivially short stems cannot be VDC
+        if len(stem) < 80:
+            return False, f"stem quá ngắn ({len(stem)} ký tự, cần ≥80)"
+
+        return True, ""
 
     async def _apply_skill_pipeline(self, q: dict, topics_used: list[str]) -> None:
         """Run skill pipeline on a question (non-blocking, errors are swallowed)."""
@@ -1455,6 +1565,15 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
             demo_q["correct_answer"] = "0"
             demo_q["unit"] = ""
             demo_q["solution"] = "Câu hỏi demo. Vui lòng tạo lại đề."
+
+        if bloom == "van_dung_cao":
+            demo_q["needs_review"] = True
+            demo_q["quality_warning"] = (
+                "bloom_mismatch: VDC used demo fallback, not enough evidence "
+                "that the question reaches van_dung_cao complexity"
+            )
+            demo_q["difficulty_score"] = min(float(demo_q.get("estimated_difficulty") or 0.5), 0.55)
+            demo_q["estimated_difficulty"] = min(float(demo_q.get("estimated_difficulty") or 0.5), 0.55)
 
         return demo_q
 
