@@ -273,6 +273,7 @@ export function GenerationLiveViewer({
 
   // Blueprint
   const [blueprintSlots, setBlueprintSlots] = useState<BlueprintSlot[]>([])
+  const [blueprintExpanded, setBlueprintExpanded] = useState(false)
   const [requirementsData, setRequirementsData] = useState<RequirementsData | null>(null)
 
   // Question stream
@@ -306,6 +307,14 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
   useEffect(() => {
     feedEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [feedItems])
+
+  useEffect(() => {
+    if (activeCheckpoint === 1) {
+      setBlueprintExpanded(true)
+    } else if (activeCheckpoint === 2) {
+      setBlueprintExpanded(false)
+    }
+  }, [activeCheckpoint])
 
   // Connection
   const wsRef = useRef<WebSocket | null>(null)
@@ -907,10 +916,30 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
               return (
                 <div key={item.id} className="mb-5 animate-in fade-in slide-in-from-bottom-2 duration-400">
                   <div className="rounded-xl border bg-card shadow-sm overflow-hidden">
-                    <div className="px-4 py-3 border-b bg-muted/20 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Database className="h-4 w-4 text-primary" />
-                        <span className="text-sm font-semibold">Sườn đề · {item.slots.length} câu hỏi</span>
+                    <div className="px-4 py-3 border-b bg-muted/20 space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Database className="h-4 w-4 text-primary shrink-0" />
+                          <span className="text-sm font-semibold truncate">Sườn đề · {item.slots.length} câu hỏi</span>
+                        </div>
+                        <button
+                          type="button"
+                          aria-expanded={blueprintExpanded}
+                          onClick={() => setBlueprintExpanded(open => !open)}
+                          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border bg-background px-2 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                        >
+                          {blueprintExpanded ? (
+                            <>
+                              <ChevronUp className="h-3.5 w-3.5" />
+                              Thu gọn
+                            </>
+                          ) : (
+                            <>
+                              <ChevronDown className="h-3.5 w-3.5" />
+                              Xem sườn
+                            </>
+                          )}
+                        </button>
                       </div>
                       <div className="flex gap-1.5 flex-wrap">
                         {BLOOM_ORDER.filter(b => item.bloomDist[b]).map(b => (
@@ -920,43 +949,45 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
                         ))}
                       </div>
                     </div>
-                    <div className="divide-y">
-                      {item.slots.map((slot, i) => {
-                        const bl = slot.bloom_level as BloomLevel | undefined
-                        const bc = bl && BLOOM_CONFIG[bl] ? BLOOM_CONFIG[bl] : null
-                        return (
-                          <div key={slot.question_id || i} className="flex items-start gap-3 px-4 py-2.5 hover:bg-muted/10 transition-colors">
-                            <span className="w-5 text-xs text-muted-foreground/50 text-right shrink-0 pt-0.5">{i + 1}</span>
-                            <div className="flex items-center gap-1.5 shrink-0 pt-0.5">
-                              <Badge variant={(slot.type || 'mcq') === 'mcq' ? 'secondary' : 'outline'} className="text-[10px] px-1.5">
-                                {(slot.type || 'mcq').toUpperCase()}
-                              </Badge>
-                              {bc && <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-medium", bc.bg, bc.color)}>{bc.short}</span>}
+                    {blueprintExpanded && (
+                      <div className="divide-y">
+                        {item.slots.map((slot, i) => {
+                          const bl = slot.bloom_level as BloomLevel | undefined
+                          const bc = bl && BLOOM_CONFIG[bl] ? BLOOM_CONFIG[bl] : null
+                          return (
+                            <div key={slot.question_id || i} className="flex items-start gap-3 px-4 py-2.5 hover:bg-muted/10 transition-colors">
+                              <span className="w-5 text-xs text-muted-foreground/50 text-right shrink-0 pt-0.5">{i + 1}</span>
+                              <div className="flex items-center gap-1.5 shrink-0 pt-0.5">
+                                <Badge variant={(slot.type || 'mcq') === 'mcq' ? 'secondary' : 'outline'} className="text-[10px] px-1.5">
+                                  {(slot.type || 'mcq').toUpperCase()}
+                                </Badge>
+                                {bc && <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-medium", bc.bg, bc.color)}>{bc.short}</span>}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                {slot.chapter && <p className="text-xs text-muted-foreground/70 mb-0.5">{slot.chapter as string}</p>}
+                                {(slot.primary_section_title || slot.section) && (
+                                  <p className="text-xs text-muted-foreground/80 mb-0.5 flex flex-wrap items-center gap-1">
+                                    <span className="font-medium text-primary/70">
+                                      {(slot.primary_section_title || slot.section) as string}
+                                    </span>
+                                    {slot.secondary_section_titles && (slot.secondary_section_titles as string[]).length > 0 && (
+                                      <>
+                                        {(slot.secondary_section_titles as string[]).map((t, si) => (
+                                          <span key={si} className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted border border-border/50 text-muted-foreground">
+                                            +{t}
+                                          </span>
+                                        ))}
+                                      </>
+                                    )}
+                                  </p>
+                                )}
+                                {slot.topic_hint && <p className="text-sm text-foreground">{slot.topic_hint as string}</p>}
+                              </div>
                             </div>
-                            <div className="flex-1 min-w-0">
-                              {slot.chapter && <p className="text-xs text-muted-foreground/70 mb-0.5">{slot.chapter as string}</p>}
-                              {(slot.primary_section_title || slot.section) && (
-                                <p className="text-xs text-muted-foreground/80 mb-0.5 flex flex-wrap items-center gap-1">
-                                  <span className="font-medium text-primary/70">
-                                    {(slot.primary_section_title || slot.section) as string}
-                                  </span>
-                                  {slot.secondary_section_titles && (slot.secondary_section_titles as string[]).length > 0 && (
-                                    <>
-                                      {(slot.secondary_section_titles as string[]).map((t, si) => (
-                                        <span key={si} className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted border border-border/50 text-muted-foreground">
-                                          +{t}
-                                        </span>
-                                      ))}
-                                    </>
-                                  )}
-                                </p>
-                              )}
-                              {slot.topic_hint && <p className="text-sm text-foreground">{slot.topic_hint as string}</p>}
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   {/* Inline HITL CP1 actions */}

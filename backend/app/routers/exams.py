@@ -300,6 +300,45 @@ def _feedback_to_dict(event) -> dict:
     }
 
 
+async def _hydrate_exam_from_redis_session_if_empty(
+    *,
+    exam,
+    user_id: UUID,
+    service: ExamService,
+    redis: RedisClient,
+):
+    """Recover generated questions from the HITL Redis session when DB is stale."""
+    if exam.questions:
+        return exam
+
+    try:
+        session_key = f"session:{exam.id}:{user_id}"
+        session = await redis.get_json(session_key)
+        if not isinstance(session, dict):
+            return exam
+
+        questions = session.get("questions") or []
+        if not isinstance(questions, list) or not questions:
+            return exam
+
+        blueprint = session.get("blueprint")
+        await service.update_questions(
+            exam_id=exam.id,
+            questions=questions,
+            cost_report=session.get("cost_report") or {},
+            blueprint=blueprint if isinstance(blueprint, list) else None,
+        )
+        logger.info(
+            "Hydrated exam %s from Redis session with %d questions",
+            exam.id,
+            len(questions),
+        )
+        return await service.get_exam(exam.id, user_id) or exam
+    except Exception as exc:
+        logger.warning("Failed to hydrate exam %s from Redis session: %s", exam.id, exc)
+        return exam
+
+
 @router.post(
     "/generate",
     response_model=ExamGenerateResponse,
@@ -550,6 +589,13 @@ async def get_exam(
 
     if not exam:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+
+    exam = await _hydrate_exam_from_redis_session_if_empty(
+        exam=exam,
+        user_id=current_user.id,
+        service=service,
+        redis=redis,
+    )
 
     # Load versions
     versions = await service.get_exam_history(exam_id, current_user.id)
@@ -1471,6 +1517,13 @@ async def get_review_data(
     if not exam:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
 
+    exam = await _hydrate_exam_from_redis_session_if_empty(
+        exam=exam,
+        user_id=current_user.id,
+        service=service,
+        redis=redis,
+    )
+
     # Load feedback events
     feedback_events = await service.get_feedback_events(exam_id, current_user.id)
     feedback_dicts = [_feedback_to_dict(f) for f in feedback_events]
@@ -1753,4 +1806,3 @@ async def submit_exam_review(
         result["message"] = "Review submitted successfully."
 
     return result
-

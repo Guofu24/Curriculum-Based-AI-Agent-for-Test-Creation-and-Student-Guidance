@@ -584,11 +584,27 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                     or []
                 )
                 cost_report_to_save = resume_result.get("cost_report") or {}
+                blueprint_to_save = resume_result.get("blueprint")
 
                 # Fallback: if graph resume didn't return questions (e.g. checkpointer state
                 # expired), try to get them from the Redis session which was saved during streaming.
-                if not questions_to_save and session:
-                    questions_to_save = session.get("questions") or []
+                session_for_persist = session
+                if not questions_to_save:
+                    try:
+                        latest_session = await self.short_term.load_session(exam_id, user_id)
+                        if latest_session:
+                            session_for_persist = latest_session
+                    except Exception as session_err:
+                        logger.warning(
+                            "Failed to reload Redis session before CP2 persist for exam %s: %s",
+                            exam_id,
+                            session_err,
+                        )
+
+                if not questions_to_save and session_for_persist:
+                    questions_to_save = session_for_persist.get("questions") or []
+                    cost_report_to_save = cost_report_to_save or session_for_persist.get("cost_report") or {}
+                    blueprint_to_save = blueprint_to_save or session_for_persist.get("blueprint")
                     logger.info(
                         f"Graph resume had no questions for exam {exam_id} — "
                         f"falling back to Redis session ({len(questions_to_save)} questions)"
@@ -602,6 +618,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                         exam_id=_uuid.UUID(exam_id),
                         questions=questions_to_save,
                         cost_report=cost_report_to_save,
+                        blueprint=blueprint_to_save if isinstance(blueprint_to_save, list) else None,
                     )
                     logger.info(
                         f"Persisted {len(questions_to_save)} questions to DB for exam {exam_id} after CP2 approval"

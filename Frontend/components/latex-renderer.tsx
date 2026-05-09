@@ -2,7 +2,7 @@
 
 import React from 'react'
 import 'katex/dist/katex.min.css'
-import { InlineMath, BlockMath } from 'react-katex'
+import katex, { type KatexOptions } from 'katex'
 import { cn } from '@/lib/utils'
 
 interface LatexRendererProps {
@@ -56,29 +56,58 @@ function parseSegments(raw: string): Segment[] {
   return segments
 }
 
-function SafeInlineMath({ latex }: { latex: string }) {
+const KATEX_OPTIONS: KatexOptions = {
+  throwOnError: false,
+  strict: 'ignore',
+  trust: false,
+}
+
+function renderKatex(latex: string, displayMode: boolean): string | null {
+  const originalWarn = typeof console !== 'undefined' ? console.warn : undefined
+
   try {
-    // Suppress KaTeX strict-mode warnings (e.g. Unicode chars in math mode)
-    const origWarn = console.warn
-    console.warn = () => {}
-    const result = <InlineMath math={latex} />
-    console.warn = origWarn
-    return result
+    if (originalWarn) {
+      console.warn = (...args: unknown[]) => {
+        const message = args.map(String).join(' ')
+        if (
+          message.includes('No character metrics') ||
+          message.includes('LaTeX-incompatible input')
+        ) {
+          return
+        }
+        originalWarn(...args)
+      }
+    }
+
+    return katex.renderToString(latex, {
+      ...KATEX_OPTIONS,
+      displayMode,
+    })
   } catch {
-    return <code className="text-red-500">{`$${latex}$`}</code>
+    return null
+  } finally {
+    if (originalWarn) {
+      console.warn = originalWarn
+    }
   }
 }
 
+function SafeInlineMath({ latex }: { latex: string }) {
+  const html = React.useMemo(() => renderKatex(latex, false), [latex])
+  if (!html) {
+    return <code className="text-red-500">{`$${latex}$`}</code>
+  }
+
+  return <span dangerouslySetInnerHTML={{ __html: html }} />
+}
+
 function SafeBlockMath({ latex }: { latex: string }) {
-  try {
-    const origWarn = console.warn
-    console.warn = () => {}
-    const result = <BlockMath math={latex} />
-    console.warn = origWarn
-    return result
-  } catch {
+  const html = React.useMemo(() => renderKatex(latex, true), [latex])
+  if (!html) {
     return <code className="text-red-500">{`$$${latex}$$`}</code>
   }
+
+  return <div dangerouslySetInnerHTML={{ __html: html }} />
 }
 
 export function LatexRenderer({ children, className, block }: LatexRendererProps) {
