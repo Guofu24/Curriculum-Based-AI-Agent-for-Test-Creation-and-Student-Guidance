@@ -28,6 +28,101 @@ tracer = get_tracer()
 logger = logging.getLogger("app.agents.outline")
 
 
+
+
+def _norm_text(s: str) -> str:
+    """Normalize Vietnamese text: lowercase + strip diacritics."""
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", s.strip().lower())
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+
+def _normalize_section_fields(
+    blueprint: list[dict],
+    scope_units: list[dict],
+) -> list[dict]:
+    """Deterministic post-process: fill/correct section metadata on every blueprint slot.
+
+    No LLM calls. Rules:
+    - Only units with section_title are valid section targets.
+    - Chapter-level units (scope_unit_key starts with __ch__) are never assigned as primary.
+    - primary resolved: section_id -> scope_unit_key -> chapter round-robin -> global fallback
+    - legacy slot["section"] = primary_section_title for builder/UI backward compat
+    - secondary filtered to valid keys, self removed, Bloom-capped (NB/TH=0, VD=1, VDC=2)
+    - All titles rebuilt from lookup (never trust LLM strings)
+    - No-op when scope_units empty or no section-level units.
+    """
+    sec_units = [u for u in scope_units if u.get("section_title")]
+    if not sec_units:
+        return blueprint
+
+    key_lookup: dict[str, dict] = {
+        u["scope_unit_key"]: u for u in sec_units
+        if not u["scope_unit_key"].startswith("__ch__")
+    }
+    sec_id_lookup: dict[str, dict] = {
+        u["section_id"]: u for u in sec_units if u.get("section_id")
+    }
+    ch_id_units: dict[str, list] = {}
+    ch_title_units: dict[str, list] = {}
+    for u in sec_units:
+        if u.get("chapter_id"):
+            ch_id_units.setdefault(u["chapter_id"], []).append(u)
+        if u.get("chapter_title"):
+            ch_title_units.setdefault(_norm_text(u["chapter_title"]), []).append(u)
+    all_section_units = sec_units[:]
+    rr_counter: dict[str, int] = {}
+
+    def _resolve_unit(slot: dict) -> dict | None:
+        sid = slot.get("primary_section_id") or ""
+        if sid and sid in sec_id_lookup:
+            return sec_id_lookup[sid]
+        key = slot.get("primary_scope_unit_key") or ""
+        if key and key in key_lookup:
+            return key_lookup[key]
+        ch_id = slot.get("chapter", "")
+        units = ch_id_units.get(ch_id) or ch_title_units.get(_norm_text(ch_id))
+        if not units:
+            units = all_section_units
+        if not units:
+            return None
+        rr_key = ch_id or "__global__"
+        idx = rr_counter.get(rr_key, 0)
+        rr_counter[rr_key] = idx + 1
+        return units[idx % len(units)]
+
+    bloom_secondary_cap = {
+        "nhan_biet": 0, "thong_hieu": 0, "van_dung": 1, "van_dung_cao": 2,
+    }
+
+    for slot in blueprint:
+        unit = _resolve_unit(slot)
+        if unit is None:
+            continue
+        slot["primary_section_id"] = unit.get("section_id")
+        slot["primary_section_title"] = unit.get("section_title", "")
+        slot["primary_scope_unit_key"] = unit.get("scope_unit_key", "")
+        slot["section"] = unit.get("section_title", "")  # legacy compat
+
+        raw_sec_keys: list[str] = list(slot.get("secondary_scope_unit_keys") or [])
+        for sid2 in (slot.get("secondary_section_ids") or []):
+            u2 = sec_id_lookup.get(sid2)
+            if u2:
+                raw_sec_keys.append(u2["scope_unit_key"])
+        primary_key = slot["primary_scope_unit_key"]
+        valid_sec_keys = [
+            k for k in dict.fromkeys(raw_sec_keys)
+            if k in key_lookup and k != primary_key
+        ]
+        cap = bloom_secondary_cap.get(slot.get("bloom_level", ""), 0)
+        valid_sec_keys = valid_sec_keys[:cap]
+        sec_resolved = [key_lookup[k] for k in valid_sec_keys if k in key_lookup]
+        slot["secondary_scope_unit_keys"] = [u["scope_unit_key"] for u in sec_resolved]
+        slot["secondary_section_ids"] = [u["section_id"] for u in sec_resolved if u.get("section_id")]
+        slot["secondary_section_titles"] = [u["section_title"] for u in sec_resolved if u.get("section_title")]
+
+    return blueprint
+
 class OutlineAgent:
     """
     Agent 2: Outline Agent
@@ -432,6 +527,7 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
             elapsed_ms = int((time.time() - start_time) * 1000)
             usage = metrics.prompt_tokens + metrics.completion_tokens
 
+            blueprint = _normalize_section_fields(blueprint, exam_config.get("scope_units") or [])
             return OutlineOutput(
                 status=AgentStatus.SUCCESS,
                 agent_name="outline",
@@ -565,6 +661,7 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
                         "by_chapter": {ch: sum(1 for s in blueprint if s.get("chapter") == ch) for ch in scope_chapters_r},
                     }
                     elapsed_ms = int((time.time() - start_time) * 1000)
+                    blueprint = _normalize_section_fields(blueprint, exam_config.get("scope_units") or [])
                     return OutlineOutput(
                         status=AgentStatus.PARTIAL,
                         agent_name="outline",
@@ -738,6 +835,7 @@ KIỂM TRA LẠI trước khi output.
         }
 
         elapsed_ms = int((time.time() - start_time) * 1000)
+        blueprint = _normalize_section_fields(blueprint, exam_config.get("scope_units") or [])
         return OutlineOutput(
             status=AgentStatus.SUCCESS,
             agent_name="outline",
@@ -994,6 +1092,7 @@ KIỂM TRA LẠI trước khi output.
         }
 
         elapsed_ms = int((time.time() - start_time) * 1000)
+        blueprint = _normalize_section_fields(blueprint, exam_config.get("scope_units") or [])
         return OutlineOutput(
             status=AgentStatus.PARTIAL,
             agent_name="outline",
@@ -1238,6 +1337,29 @@ KIỂM TRA LẠI trước khi output.
         bloom_counts = self._bloom_pct_to_counts(bloom_dist, total_questions)
         blueprint_history: list[dict] = exam_config.get("blueprint_history") or []
 
+        # Build section list for section-aware prompt (only section-level units, not __ch__)
+        scope_units: list[dict] = exam_config.get("scope_units") or []
+        _sec_units_for_prompt = [
+            u for u in scope_units
+            if u.get("section_title") and not u.get("scope_unit_key", "").startswith("__ch__")
+        ]
+        if _sec_units_for_prompt:
+            _sec_lines = [
+                f"  - {u['scope_unit_key']} | {u.get('chapter_title','')} > {u.get('section_title','')}"
+                for u in _sec_units_for_prompt
+            ]
+            section_list_str = (
+                "\n\n### Danh sách MỤC được phép dùng (scope_units):\n"
+                + "\n".join(_sec_lines)
+                + "\n\nMỗi slot PHẢI có field \"primary_scope_unit_key\" = một key trong danh sách trên.\n"
+                + "Quy tắc secondary: nhan_biet/thong_hieu → secondary_scope_unit_keys=[], "
+                + "van_dung → tối đa 1, van_dung_cao → tối đa 2. "
+                + "primary và secondary KHÔNG được trùng.\n"
+                + "Nếu không có section phù hợp, chọn key gần nhất với chapter của slot."
+            )
+        else:
+            section_list_str = ""
+
         # ── Pre-compute the EXACT slot matrix (bloom × type) ──────────────────
         # From current_blueprint, count per (bloom_level, type).
         # This gives LLM the precise breakdown it must preserve.
@@ -1366,7 +1488,7 @@ Bước 2: Tính số câu cụ thể mỗi chương (tổng phải bằng {tota
 Bước 3: Gán lại field "chapter" và "topic_hint" cho từng slot. Tuyệt đối KHÔNG thêm/xóa slot, KHÔNG thay đổi bloom_level, KHÔNG thay đổi type.
 Bước 4: Kiểm tra: tổng slot = {total_questions}? bloom counts khớp ma trận? mỗi chương trong scope có ít nhất 1 slot?
 
-Phạm vi (scope): {json.dumps(scope, ensure_ascii=False)}
+Phạm vi (scope): {json.dumps(scope, ensure_ascii=False)}{section_list_str}
 
 Output chỉ JSON thuần (không markdown, không giải thích):
 {{"blueprint": [<TOAN BO {total_questions} slot da chinh sua>], "distribution_summary": {{"by_bloom": {bloom_counts}, "by_chapter": {{}}}}}}"""
@@ -1418,7 +1540,7 @@ Phân bổ Bloom (số câu chính xác, không phải %):
 Quy đổi %: {pct_helper_create}
 
 ### Phạm vi (scope):
-{json.dumps(scope, ensure_ascii=False)}
+{json.dumps(scope, ensure_ascii=False)}{section_list_str}
 
 Quy tắc phân bổ mặc định:
 - Mỗi chương trong scope phải có ít nhất 1 câu
@@ -1644,6 +1766,7 @@ Tạo blueprint chi tiết (JSON thuần):"""
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 
+        blueprint = _normalize_section_fields(blueprint, exam_config.get("scope_units") or [])
         return OutlineOutput(
             status=AgentStatus.PARTIAL,
             agent_name="outline",

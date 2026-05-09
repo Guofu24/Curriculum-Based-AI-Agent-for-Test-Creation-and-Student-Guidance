@@ -781,6 +781,11 @@ async def detect_heading_tree_gemini_pdf(
             "[heading_detect] Using gemini_pdf result (%d chapters)",
             len(gemini_result["chapters"]),
         )
+        # Infer section-level prerequisites (same step as LLM path via post_process_heading_tree)
+        try:
+            gemini_result = await _infer_section_prerequisites(gemini_result)
+        except Exception as _e:
+            logger.warning("[heading_detect] section prereq inference skipped: %s", _e)
         return gemini_result
 
     # Fallback: dùng LLM result
@@ -1390,6 +1395,7 @@ async def post_process_heading_tree(
 
     1. Rule-based cleaning (fast, deterministic)
     2. LLM consolidation (only if still > max_chapters)
+    3. Section-level prerequisite inference (LLM, skip on error)
 
     Called once during document upload/processing.
     """
@@ -1403,5 +1409,90 @@ async def post_process_heading_tree(
     if num_chapters > max_chapters:
         cleaned = await llm_consolidate_heading_tree(cleaned, max_chapters)
 
+    # Step 3: Infer section-level prerequisites
+    try:
+        cleaned = await _infer_section_prerequisites(cleaned)
+    except Exception as _e:
+        logger.warning("[post_process_heading_tree] section prereq inference skipped: %s", _e)
+
     return cleaned
+
+
+async def _infer_section_prerequisites(tree: dict) -> dict:
+    """Use LLM to infer section_prerequisites from section titles.
+
+    Builds a flat list of all sections across chapters, asks the LLM which
+    sections depend on which others, then stores the result as:
+        tree["section_prerequisites"] = {"ch1_sec2": ["ch1_sec1"], ...}
+
+    Skips silently if there are no sections or LLM fails.
+    """
+    chapters = tree.get("chapters", [])
+
+    # Collect all sections across all chapters
+    all_sections: list[dict] = []
+    for ch in chapters:
+        for sec in ch.get("sections", []):
+            sec_id = sec.get("section_id", "")
+            sec_title = sec.get("title", "")
+            ch_title = ch.get("title", "")
+            if sec_id and sec_title:
+                all_sections.append({
+                    "id": sec_id,
+                    "label": f"{sec_id} | {ch_title} > {sec_title}",
+                })
+
+    if len(all_sections) < 2:
+        # Nothing to infer dependencies between
+        tree.setdefault("section_prerequisites", {})
+        return tree
+
+    section_list = "\n".join(f"- {s['label']}" for s in all_sections)
+
+    prompt = (
+        "Dưới đây là danh sách các MỤC (section) của một tài liệu học thuật:\n\n"
+        f"{section_list}\n\n"
+        "NHIỆM VỤ: Với mỗi section_id, liệt kê các section_id khác mà nó PHỤ THUỘC "
+        "(cần học trước mới hiểu được). Chỉ liệt kê phụ thuộc trực tiếp, rõ ràng.\n"
+        "Nếu một section không phụ thuộc section nào khác, KHÔNG đưa nó vào JSON.\n\n"
+        "Trả về JSON thuần (không markdown):\n"
+        '{\"ch2_sec2\": [\"ch2_sec1\"], \"ch3_sec1\": [\"ch1_sec2\"]}'
+    )
+
+    try:
+        from app.agents.llm import get_llm_client
+        import json as _json
+
+        llm = get_llm_client()
+        response = await llm.chat(
+            messages=[{"role": "user", "content": prompt}],
+            role="planner",
+            temperature=0.0,
+            max_tokens=1000,
+        )
+        text = response.strip()
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        raw: dict = _json.loads(text.strip())
+
+        # Validate: only keep entries where keys and values are known section_ids
+        known_ids = {s["id"] for s in all_sections}
+        section_prerequisites: dict[str, list[str]] = {}
+        for sec_id, deps in raw.items():
+            if sec_id not in known_ids:
+                continue
+            valid_deps = [d for d in (deps if isinstance(deps, list) else []) if d in known_ids]
+            if valid_deps:
+                section_prerequisites[sec_id] = valid_deps
+
+        tree["section_prerequisites"] = section_prerequisites
+        logger.info(
+            "[_infer_section_prerequisites] %d section dependency relations inferred",
+            sum(len(v) for v in section_prerequisites.values()),
+        )
+    except Exception as exc:
+        logger.warning("[_infer_section_prerequisites] failed: %s — skipping", exc)
+        tree.setdefault("section_prerequisites", {})
+
+    return tree
 

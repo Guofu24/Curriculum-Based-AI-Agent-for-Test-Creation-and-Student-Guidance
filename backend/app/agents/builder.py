@@ -381,6 +381,12 @@ Trả lời ngắn Format (THPT 2025 — điền kết quả số):
 - Options MCQ PHẢI là câu trả lời thực sự (số, định nghĩa, phát biểu) — không được là tên chương hay heading
 - Câu Đúng-Sai: mỗi mệnh đề phải là phát biểu khoa học cụ thể, có thể kiểm chứng
 
+## QUY TẮC PHẠM VI KIẾN THỨC (CỰC KỲ QUAN TRỌNG):
+- Phần ngữ cảnh được cung cấp CÓ THỂ gồm hai loại:
+  - **KIẾN THỨC TRỌNG TÂM**: Nội dung người dùng đã chọn — sinh câu hỏi TỪ PHẦN NÀY
+  - **KIẾN THỨC NỀN (TIÊN QUYẾT)**: Nội dung hỗ trợ, tiên quyết — CHỈ đọc để hiểu context, TUYỆT ĐỐI KHÔNG sinh câu hỏi từ phần này
+- Câu hỏi phải kiểm tra kiến thức trong phạm vi TRỌNG TÂM; background chỉ được dùng để viết distractors hoặc giải thích rõ hơn
+
 Trả về JSON array (không có key bọc ngoài):
 [câu_hỏi_1]
 
@@ -788,11 +794,47 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         ) -> tuple[int, dict | None, list[str]]:
             """Generate one question with semaphore limiting concurrency."""
             async with semaphore:
-                # Filter context to just this slot's chapter/section
+                # ── Section-aware chunk selection ─────────────────────────────────
+                import unicodedata as _ud
+                def _norm_sec(s: str) -> str:
+                    nfd = _ud.normalize("NFD", s.strip().lower())
+                    return "".join(c for c in nfd if _ud.category(c) != "Mn")
+
+                primary_sec_id    = slot.get("primary_section_id") or ""
+                primary_sec_title = slot.get("primary_section_title") or slot.get("section") or ""
+                secondary_sec_ids  = set(slot.get("secondary_section_ids") or [])
+                secondary_sec_titles = {
+                    _norm_sec(t) for t in (slot.get("secondary_section_titles") or []) if t
+                }
+
+                def _is_primary_chunk(c: dict) -> bool:
+                    if c.get("role") == "background":
+                        return False
+                    if primary_sec_id and c.get("section_id") == primary_sec_id:
+                        return True
+                    if primary_sec_title and _norm_sec(c.get("section", "")) == _norm_sec(primary_sec_title):
+                        return True
+                    return False
+
+                def _is_secondary_chunk(c: dict) -> bool:
+                    if c.get("role") == "background":
+                        return False
+                    sec_id = c.get("section_id", "")
+                    if sec_id and sec_id in secondary_sec_ids:
+                        return True
+                    sec_title_norm = _norm_sec(c.get("section", ""))
+                    if sec_title_norm and sec_title_norm in secondary_sec_titles:
+                        return True
+                    return False
+
+                sec_primary_chunks   = [c for c in retrieved_context if _is_primary_chunk(c)]
+                sec_secondary_chunks = [c for c in retrieved_context if _is_secondary_chunk(c)]
+                section_chunks = sec_primary_chunks + sec_secondary_chunks
+
+                # ── Chapter-level fallback (existing logic) ───────────────────────
                 slot_chapter = slot.get("chapter", "Unknown")
                 slot_section = slot.get("section", "") or ""
                 topic_key = f"{slot_chapter} > {slot_section}" if slot_section else slot_chapter
-                # Try exact match first, then normalized match
                 topic_chunks = topic_context_map.get(topic_key, [])
                 match_path = "exact" if topic_chunks else ""
                 if not topic_chunks:
@@ -819,15 +861,29 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                                 break
                 if not topic_chunks:
                     match_path = "FALLBACK_ALL"
+
+                # Prefer section-level chunks; fall back to chapter-level
+                if section_chunks:
+                    topic_chunks = section_chunks
+                    match_path = f"section({'id' if sec_primary_chunks else 'title'})"
+
+                # Collect background (prereq) chunks from full retrieved_context.
+                background_chunks = [
+                    c for c in retrieved_context if c.get("role") == "background"
+                ]
+
+                # Build context: primary topic chunks + background chunks (role-separated)
+                combined_for_slot = (topic_chunks if topic_chunks else []) + background_chunks
                 question_context_str = (
-                    self._build_context_for_llm(topic_chunks)
-                    if topic_chunks
+                    self._build_context_for_llm(combined_for_slot)
+                    if combined_for_slot
                     else context[:8000]
                 )
                 logger.info(
-                    "Slot %d chapter=%r → %d chunks (path: %s)",
+                    "Slot %d chapter=%r section=%r → %d chunks (path: %s)",
                     slot_number,
                     slot_chapter,
+                    primary_sec_title or primary_sec_id or "",
                     len(topic_chunks),
                     match_path,
                 )
@@ -842,7 +898,20 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     correction_strategy=_correction_strategies.get(slot.get("question_id", ""), ""),
                     gemini_key_pool=gemini_key_pool,
                 )
+
+                # Copy section metadata from slot into question for traceability
+                if question:
+                    for _field in (
+                        "primary_section_id", "primary_section_title", "primary_scope_unit_key",
+                        "secondary_section_ids", "secondary_section_titles",
+                        "secondary_scope_unit_keys",
+                    ):
+                        _val = slot.get(_field)
+                        if _val is not None:
+                            question[_field] = _val
+
                 return slot_number, question, q_warnings
+
 
         # Launch all slots in the chunk concurrently
         tasks = [
@@ -1366,28 +1435,54 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         return f"{prefix} {content}" if prefix else content
 
     def _build_context_for_llm(self, retrieved_context: list[dict]) -> str:
-        """Build a context string for the LLM prompt."""
-        parts = []
+        """Build a context string for the LLM prompt.
 
-        # Group by chapter
-        by_chapter: dict[str, list[str]] = {}
-        for chunk in retrieved_context:
-            chapter = chunk.get("chapter", "Unknown")
-            if chapter not in by_chapter:
-                by_chapter[chapter] = []
-            content = chunk.get("content", "")
-            latex = chunk.get("latex_repr")
-            if latex:
-                content = f"{content}\n[Formula: {latex}]"
-            by_chapter[chapter].append(content)
+        Chunks tagged with role='primary' are the main generation source.
+        Chunks tagged with role='background' are prerequisite knowledge — included
+        for context only; the LLM must NOT generate questions from them.
+        """
+        primary_chunks = [c for c in retrieved_context if c.get("role") != "background"]
+        background_chunks = [c for c in retrieved_context if c.get("role") == "background"]
 
-        for chapter, contents in by_chapter.items():
-            parts.append(f"### {chapter}")
-            for c in contents[:5]:  # Max 5 excerpts per chapter
-                parts.append(f"- {c[:500]}")
-            parts.append("")
+        def _format_by_chapter(chunks: list[dict], max_per_chapter: int = 5) -> str:
+            by_chapter: dict[str, list[str]] = {}
+            for chunk in chunks:
+                chapter = chunk.get("chapter", "Unknown")
+                section = chunk.get("section", "")
+                key = f"{chapter} › {section}" if section else chapter
+                if key not in by_chapter:
+                    by_chapter[key] = []
+                content = chunk.get("content", "")
+                latex = chunk.get("latex_repr")
+                if latex:
+                    content = f"{content}\n[Công thức: {latex}]"
+                by_chapter[key].append(content)
 
-        return "\n".join(parts)
+            parts = []
+            for key, contents in by_chapter.items():
+                parts.append(f"### {key}")
+                for c in contents[:max_per_chapter]:
+                    parts.append(f"- {c[:500]}")
+                parts.append("")
+            return "\n".join(parts)
+
+        sections: list[str] = []
+
+        if primary_chunks:
+            sections.append(
+                "## KIẾN THỨC TRỌNG TÂM\n"
+                "*(Sinh câu hỏi TRỰC TIẾP từ phần này — đây là nội dung người dùng đã chọn)*\n"
+            )
+            sections.append(_format_by_chapter(primary_chunks))
+
+        if background_chunks:
+            sections.append(
+                "## KIẾN THỨC NỀN (TIÊN QUYẾT)\n"
+                "*(KHÔNG sinh câu hỏi từ phần này — chỉ dùng để hiểu ngữ cảnh và giải thích khái niệm)*\n"
+            )
+            sections.append(_format_by_chapter(background_chunks, max_per_chapter=3))
+
+        return "\n".join(sections)
 
     def _build_topic_context_map(self, retrieved_context: list[dict]) -> dict[str, list[dict]]:
         """Build a dict mapping topic/chapter to relevant chunks for per-question context filtering.

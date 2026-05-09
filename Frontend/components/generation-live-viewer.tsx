@@ -148,6 +148,13 @@ interface BlueprintSlot {
   topic_hint?: string
   content_type?: string
   estimated_difficulty?: number
+  // Section-aware fields
+  primary_section_id?: string
+  primary_section_title?: string
+  primary_scope_unit_key?: string
+  secondary_section_ids?: string[]
+  secondary_section_titles?: string[]
+  secondary_scope_unit_keys?: string[]
   [key: string]: unknown
 }
 
@@ -928,6 +935,22 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
                             </div>
                             <div className="flex-1 min-w-0">
                               {slot.chapter && <p className="text-xs text-muted-foreground/70 mb-0.5">{slot.chapter as string}</p>}
+                              {(slot.primary_section_title || slot.section) && (
+                                <p className="text-xs text-muted-foreground/80 mb-0.5 flex flex-wrap items-center gap-1">
+                                  <span className="font-medium text-primary/70">
+                                    {(slot.primary_section_title || slot.section) as string}
+                                  </span>
+                                  {slot.secondary_section_titles && (slot.secondary_section_titles as string[]).length > 0 && (
+                                    <>
+                                      {(slot.secondary_section_titles as string[]).map((t, si) => (
+                                        <span key={si} className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted border border-border/50 text-muted-foreground">
+                                          +{t}
+                                        </span>
+                                      ))}
+                                    </>
+                                  )}
+                                </p>
+                              )}
                               {slot.topic_hint && <p className="text-sm text-foreground">{slot.topic_hint as string}</p>}
                             </div>
                           </div>

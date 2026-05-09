@@ -357,7 +357,7 @@ async def generate_exam(
 
     # Extract section titles and resolve canonical section_ids (per-chapter, avoids cross-chapter collisions)
     from app.routers.generate import _resolve_scope_section_ids
-    scope_sections, scope_section_ids = await _resolve_scope_section_ids(
+    scope_sections, scope_section_ids, scope_units = await _resolve_scope_section_ids(
         scope=list(config.scope) if config.scope else [],
         document_id=str(config.document_id) if config.document_id else None,
         db=db,
@@ -378,6 +378,7 @@ async def generate_exam(
             "extra_instructions": config.extra_instructions,
             "scope_sections": scope_sections if scope_sections else None,
             "scope_section_ids": scope_section_ids if scope_section_ids else None,
+            "scope_units": scope_units if scope_units else None,
         },
     )
 

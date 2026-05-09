@@ -33,16 +33,19 @@ async def _resolve_scope_section_ids(
     scope: list[str],
     document_id: str | None,
     db: AsyncSession,
-) -> tuple[list[str], list[str]]:
-    """
-    Parse scope strings of the form "Chapter > Section" and resolve:
-      - scope_sections: list of section title strings (title-based filter fallback)
-      - scope_section_ids: list of canonical section_id strings (ID-based primary filter)
+) -> tuple[list[str], list[str], list[dict]]:
+    """Parse scope strings and resolve section IDs + build scope_units.
 
-    Resolution uses per-chapter lookup {chapter_id → {sec_title → sec_id}} to
-    prevent cross-chapter title collisions (e.g. two chapters with "Bài tập").
+    Returns (scope_sections, scope_section_ids, scope_units) where:
+      - scope_sections: section title strings (title-based fallback filter)
+      - scope_section_ids: canonical section_id strings (ID-based primary filter)
+      - scope_units: list of {chapter_id, chapter_title, section_id, section_title,
+                              scope_unit_key} — source of truth for section constraints
 
-    Returns (scope_sections, scope_section_ids).
+    scope_unit_key rules:
+      - Has canonical section_id  -> key = section_id  (e.g. "ch2_sec1")
+      - Has section_title only    -> key = norm(ch)>norm(sec) with #n dedup suffix
+      - Chapter-level only        -> key = "__ch__"+norm(ch_title)  (internal, not LLM-facing)
     """
     import unicodedata
     import logging as _log2
@@ -51,17 +54,27 @@ async def _resolve_scope_section_ids(
         nfd = unicodedata.normalize("NFD", s.strip().lower())
         return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
 
+    def _make_key(ch_title: str, sec_title: str | None, sec_id: str | None,
+                  existing_keys: set) -> str:
+        if sec_id:
+            return sec_id
+        if sec_title:
+            base = f"{_norm(ch_title)}>{_norm(sec_title)}"
+            key, n = base, 1
+            while key in existing_keys:
+                key = f"{base}#{n}"
+                n += 1
+            return key
+        return f"__ch__{_norm(ch_title)}"
+
     scope_sections: list[str] = []
     scope_section_ids: list[str] = []
-
-    # Only proceed if at least one "Chapter > Section" entry exists
-    has_sections = any(isinstance(s, str) and " > " in s for s in scope)
-    if not has_sections:
-        return scope_sections, scope_section_ids
+    scope_units: list[dict] = []
+    existing_keys: set = set()
 
     # Build per-chapter section lookup from heading_tree
-    # Structure: {ch_title_norm → (ch_id, {sec_title_norm → sec_id})}
-    ch_lookup: dict[str, tuple[str, dict[str, str]]] = {}
+    # Structure: {ch_title_norm -> (ch_id, ch_title_raw, [{"title", "section_id", "title_norm"}])}
+    ch_lookup: dict[str, tuple] = {}
     if document_id:
         try:
             from sqlalchemy import select as _sel
@@ -74,37 +87,97 @@ async def _resolve_scope_section_ids(
                     _ch_id = _ch.get("chapter_id", "")
                     if not _ch_title or not _ch_id:
                         continue
-                    sec_map: dict[str, str] = {}
+                    secs: list[dict] = []
                     for _sec in _ch.get("sections", []):
                         _st = _sec.get("title", "").strip()
-                        _sid = _sec.get("section_id", "")
-                        if _st and _sid:
-                            sec_map[_st.lower()] = _sid
-                            sec_map[_norm(_st)] = _sid
-                    ch_lookup[_ch_title.lower()] = (_ch_id, sec_map)
-                    ch_lookup[_norm(_ch_title)] = (_ch_id, sec_map)
+                        _sid = _sec.get("section_id", "") or None
+                        if _st:
+                            secs.append({"title": _st, "section_id": _sid,
+                                         "title_norm": _norm(_st)})
+                    ch_lookup[_ch_title.lower()] = (_ch_id, _ch_title, secs)
+                    ch_lookup[_norm(_ch_title)] = (_ch_id, _ch_title, secs)
         except Exception as _e:
             _log2.getLogger("generate.router").debug("section_id resolve failed: %s", _e)
 
     for s in scope:
-        if not isinstance(s, str) or " > " not in s:
+        if not isinstance(s, str) or not s.strip():
             continue
-        ch_part, sec_part = s.split(" > ", 1)
-        ch_part = ch_part.strip()
-        sec_part = sec_part.strip()
-        if not sec_part:
-            continue
-        scope_sections.append(sec_part)
 
-        # Resolve canonical section_id via per-chapter lookup
-        _ch_entry = ch_lookup.get(ch_part.lower()) or ch_lookup.get(_norm(ch_part))
-        if _ch_entry:
-            _ch_id, sec_map = _ch_entry
-            sec_id = sec_map.get(sec_part.lower()) or sec_map.get(_norm(sec_part))
-            if sec_id and sec_id not in scope_section_ids:
-                scope_section_ids.append(sec_id)
+        if " > " in s:
+            # "Chapter > Section" entry
+            ch_part, sec_part = s.split(" > ", 1)
+            ch_part = ch_part.strip()
+            sec_part = sec_part.strip()
+            if not sec_part:
+                continue
+            scope_sections.append(sec_part)
 
-    return scope_sections, scope_section_ids
+            _ch_entry = ch_lookup.get(ch_part.lower()) or ch_lookup.get(_norm(ch_part))
+            ch_id = _ch_entry[0] if _ch_entry else None
+            ch_title = _ch_entry[1] if _ch_entry else ch_part
+            sec_id: str | None = None
+
+            if _ch_entry:
+                _ch_id_r, _ch_title_r, _secs_r = _ch_entry
+                sec_norm = _norm(sec_part)
+                for _sec in _secs_r:
+                    if _sec["title_norm"] == sec_norm or _sec["title"].lower() == sec_part.lower():
+                        sec_id = _sec["section_id"]
+                        break
+                if sec_id and sec_id not in scope_section_ids:
+                    scope_section_ids.append(sec_id)
+
+            key = _make_key(ch_title, sec_part, sec_id, existing_keys)
+            existing_keys.add(key)
+            scope_units.append({
+                "chapter_id": ch_id,
+                "chapter_title": ch_title,
+                "section_id": sec_id,
+                "section_title": sec_part,
+                "scope_unit_key": key,
+            })
+        else:
+            # Plain "Chapter" entry — expand to all sections in heading_tree
+            ch_part = s.strip()
+            _ch_entry = ch_lookup.get(ch_part.lower()) or ch_lookup.get(_norm(ch_part))
+            if _ch_entry:
+                _ch_id_r, _ch_title_r, _secs_r = _ch_entry
+                if _secs_r:
+                    for _sec in _secs_r:
+                        key = _make_key(_ch_title_r, _sec["title"], _sec["section_id"],
+                                        existing_keys)
+                        existing_keys.add(key)
+                        scope_units.append({
+                            "chapter_id": _ch_id_r,
+                            "chapter_title": _ch_title_r,
+                            "section_id": _sec["section_id"],
+                            "section_title": _sec["title"],
+                            "scope_unit_key": key,
+                        })
+                else:
+                    key = _make_key(_ch_title_r, None, None, existing_keys)
+                    existing_keys.add(key)
+                    scope_units.append({
+                        "chapter_id": _ch_id_r,
+                        "chapter_title": _ch_title_r,
+                        "section_id": None,
+                        "section_title": None,
+                        "scope_unit_key": key,
+                    })
+            else:
+                # Textbook / unknown — chapter-level unit only
+                key = _make_key(ch_part, None, None, existing_keys)
+                existing_keys.add(key)
+                scope_units.append({
+                    "chapter_id": None,
+                    "chapter_title": ch_part,
+                    "section_id": None,
+                    "section_title": None,
+                    "scope_unit_key": key,
+                })
+
+    return scope_sections, scope_section_ids, scope_units
+
 
 
 # ── Inline generation (shares FastAPI's async event loop — no loop conflicts) ──
@@ -374,7 +447,7 @@ async def _run_generation_inline(
 
             # Extract section titles and resolve canonical section_ids (per-chapter)
             if scope and isinstance(scope, list):
-                section_titles, section_ids = await _resolve_scope_section_ids(
+                section_titles, section_ids, scope_units = await _resolve_scope_section_ids(
                     scope=list(scope),
                     document_id=document_id,
                     db=db,
@@ -385,6 +458,10 @@ async def _run_generation_inline(
                 if section_ids:
                     resolved_config["scope_section_ids"] = section_ids
                     _logger.info("Resolved scope_section_ids: %s", section_ids)
+                if scope_units:
+                    resolved_config["scope_units"] = scope_units
+                    _logger.info("Built scope_units: %d units", len(scope_units))
+
 
             orchestrator = OrchestratorAgent(redis=redis_client, db_session=db)
             orchestrator.set_stream_callback(stream_callback)
@@ -578,7 +655,7 @@ async def generate_exam_fe(
     await check_generate_rate_limit(redis, str(current_user.id))
 
     # Extract section titles and resolve canonical section_ids (per-chapter)
-    scope_sections_fe, scope_section_ids_fe = await _resolve_scope_section_ids(
+    scope_sections_fe, scope_section_ids_fe, scope_units_fe = await _resolve_scope_section_ids(
         scope=list(config.scope) if config.scope else [],
         document_id=str(config.document_id) if config.document_id else None,
         db=db,
@@ -603,6 +680,7 @@ async def generate_exam_fe(
                 "extra_instructions": config.extra_instructions,
                 "scope_sections": scope_sections_fe if scope_sections_fe else None,
                 "scope_section_ids": scope_section_ids_fe if scope_section_ids_fe else None,
+                "scope_units": scope_units_fe if scope_units_fe else None,
                 "use_builtin_knowledge": config.use_builtin_knowledge,
                 "textbook_namespace": config.knowledge_namespace,
             },

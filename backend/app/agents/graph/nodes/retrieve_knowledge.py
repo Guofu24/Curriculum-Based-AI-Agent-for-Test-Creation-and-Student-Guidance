@@ -40,12 +40,12 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
     bloom_targets = list(exam_config.get("bloom_distribution", {}).keys())
     textbook_namespace = state.get("textbook_namespace") or None
 
-    # Expand scope with prerequisite chapters (BFS for transitive deps)
-    # prereq_chapters are passed separately to retrieval — they provide background context
-    # but are NOT used for question generation scope (section filter still applies to primary scope).
+    # Expand scope with prerequisite chapters AND sections (BFS for transitive deps).
+    # prereq chunks are tagged "background" — provide context but NOT used for question generation.
     scope_sections = list(exam_config.get("scope_sections") or [])
     scope_section_ids = list(exam_config.get("scope_section_ids") or [])
     prereq_chapters: list[str] = []
+    prereq_section_ids: list[str] = []
     if document_id and scope and not textbook_namespace:
         try:
             import uuid as _uuid
@@ -57,21 +57,44 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
                 _result = await _session.execute(select(Document).where(Document.id == _doc_uuid))
                 _doc = _result.scalar_one_or_none()
                 if _doc and _doc.heading_tree:
-                    prereq_graph = _doc.heading_tree.get("prerequisites", {})
-                    # BFS to collect all transitive prerequisites
-                    visited: set[str] = set(scope)
-                    queue = list(scope)
-                    while queue:
-                        ch = queue.pop(0)
-                        for prereq in prereq_graph.get(ch, []):
-                            if prereq not in visited:
-                                visited.add(prereq)
-                                queue.append(prereq)
+                    ht = _doc.heading_tree
+
+                    # ── Chapter-level BFS ──────────────────────────────────────────
+                    ch_prereq_graph: dict[str, list[str]] = ht.get("prerequisites", {})
+                    ch_visited: set[str] = set(scope)
+                    ch_queue = list(scope)
+                    while ch_queue:
+                        ch = ch_queue.pop(0)
+                        for prereq in ch_prereq_graph.get(ch, []):
+                            if prereq not in ch_visited:
+                                ch_visited.add(prereq)
+                                ch_queue.append(prereq)
                                 prereq_chapters.append(prereq)
+
+                    # ── Section-level BFS ──────────────────────────────────────────
+                    # Uses heading_tree["section_prerequisites"]: {section_id: [dep_section_id, ...]}
+                    # Falls back gracefully if not present (old documents without this field).
+                    sec_prereq_graph: dict[str, list[str]] = ht.get("section_prerequisites", {})
+                    if sec_prereq_graph and scope_section_ids:
+                        sec_visited: set[str] = set(scope_section_ids)
+                        sec_queue = list(scope_section_ids)
+                        while sec_queue:
+                            sec = sec_queue.pop(0)
+                            for dep in sec_prereq_graph.get(sec, []):
+                                if dep not in sec_visited:
+                                    sec_visited.add(dep)
+                                    sec_queue.append(dep)
+                                    prereq_section_ids.append(dep)
+
                     if prereq_chapters:
                         logger.info(
                             "[retrieve_knowledge] exam=%s: prereq chapters (transitive) %s",
                             exam_id, prereq_chapters,
+                        )
+                    if prereq_section_ids:
+                        logger.info(
+                            "[retrieve_knowledge] exam=%s: prereq section_ids (transitive) %s",
+                            exam_id, prereq_section_ids,
                         )
         except Exception as _e:
             logger.debug("[retrieve_knowledge] prerequisite expansion skipped: %s", _e)
@@ -113,6 +136,7 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
             scope_sections=scope_sections,
             scope_section_ids=scope_section_ids or None,
             prereq_chapters=prereq_chapters or None,
+            prereq_section_ids=prereq_section_ids or None,
         )
 
     retrieved_chunks = getattr(retrieval_result, "retrieved_chunks", [])
