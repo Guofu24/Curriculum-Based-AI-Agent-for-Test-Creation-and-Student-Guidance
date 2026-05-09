@@ -816,7 +816,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
                               {slot.question_id}
                             </TableCell>
                             <TableCell>
-                              <QuestionTypeBadge type={typeof slot.type === 'string' ? slot.type : 'mcq'} />
+                              <QuestionTypeBadge type={getQType(slot)} />
                             </TableCell>
                             <TableCell>
                               <BloomBadge level={typeof slot.bloom_level === 'string' ? slot.bloom_level : 'thong_hieu'} />
@@ -1081,7 +1081,7 @@ function QuestionCard({
           <div className="flex-1 min-w-0 space-y-3">
             {/* Header */}
             <div className="flex flex-wrap items-center gap-2">
-              <QuestionTypeBadge type={typeof question.type === 'string' ? question.type : 'mcq'} />
+              <QuestionTypeBadge type={getQType(question)} />
               <BloomBadge level={typeof question.bloom_level === 'string' ? question.bloom_level : 'thong_hieu'} />
               {typeof question.quality_score === 'number' && (
                 <Badge variant="outline" className={
@@ -1110,7 +1110,7 @@ function QuestionCard({
                   />
                 </Field>
 
-                {question.type === 'mcq' && (
+                {getQType(question) === 'mcq' && (
                   <>
                     <Field>
                       <FieldLabel>Đáp án A</FieldLabel>

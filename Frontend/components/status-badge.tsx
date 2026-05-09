@@ -3,7 +3,7 @@
 import { Badge } from '@/components/ui/badge'
 import { Spinner } from '@/components/ui/spinner'
 import { cn } from '@/lib/utils'
-import type { ExamStatus, BloomLevel } from '@/lib/api'
+import type { ExamStatus, BloomLevel, QuestionType } from '@/lib/api'
 
 // Document & Exam Status Badge
 type BadgeVariant = 'secondary' | 'default' | 'destructive' | 'outline'
@@ -102,13 +102,44 @@ export function QuestionTypeBadge({
   type,
   className 
 }: { 
-  type: 'mcq' | 'essay' | string | unknown
+  type: QuestionType | 'multiple_choice' | 'true_false' | 'fill_blank' | string | unknown
   className?: string 
 }) {
   const safeType = typeof type === 'string' ? type : 'mcq'
-  const config = safeType === 'mcq'
-    ? { label: 'Trắc nghiệm', className: 'bg-cyan-500/10 text-cyan-600 border-cyan-500/20 dark:text-cyan-400' }
-    : { label: 'Tự luận', className: 'bg-pink-500/10 text-pink-600 border-pink-500/20 dark:text-pink-400' }
+  const typeConfig: Record<string, { label: string; className: string }> = {
+    mcq: {
+      label: 'Tr\u1eafc nghi\u1ec7m',
+      className: 'bg-cyan-500/10 text-cyan-600 border-cyan-500/20 dark:text-cyan-400',
+    },
+    multiple_choice: {
+      label: 'Tr\u1eafc nghi\u1ec7m',
+      className: 'bg-cyan-500/10 text-cyan-600 border-cyan-500/20 dark:text-cyan-400',
+    },
+    essay: {
+      label: 'T\u1ef1 lu\u1eadn',
+      className: 'bg-pink-500/10 text-pink-600 border-pink-500/20 dark:text-pink-400',
+    },
+    dung_sai: {
+      label: '\u0110\u00fang-Sai',
+      className: 'bg-amber-500/10 text-amber-600 border-amber-500/20 dark:text-amber-400',
+    },
+    true_false: {
+      label: '\u0110\u00fang/Sai',
+      className: 'bg-amber-500/10 text-amber-600 border-amber-500/20 dark:text-amber-400',
+    },
+    short_answer: {
+      label: 'Tr\u1ea3 l\u1eddi ng\u1eafn',
+      className: 'bg-teal-500/10 text-teal-600 border-teal-500/20 dark:text-teal-400',
+    },
+    fill_blank: {
+      label: '\u0110i\u1ec1n khuy\u1ebft',
+      className: 'bg-violet-500/10 text-violet-600 border-violet-500/20 dark:text-violet-400',
+    },
+  }
+  const config = typeConfig[safeType] || {
+    label: safeType,
+    className: 'bg-muted text-muted-foreground border-border',
+  }
   
   return (
     <Badge 

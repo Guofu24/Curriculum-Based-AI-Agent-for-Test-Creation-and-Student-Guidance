@@ -57,7 +57,10 @@ function parseSegments(raw: string): Segment[] {
 }
 
 function renderText(value: string): string {
-  return value.replace(/\\\\\s+/g, '\n')
+  return value
+    .replace(/(?:\\r\\n|\\n|\\r)(?=\s*(?:[a-z][).]|\d+[).]|[-*•]))/gi, '\n')
+    .replace(/([.!?])\s+([a-d]\)\s*(?:\u0110\u00fang|Sai|True|False)\s*[.:])/gi, '$1\n$2')
+    .replace(/\\\\\s+/g, '\n')
 }
 
 const KATEX_OPTIONS: KatexOptions = {
