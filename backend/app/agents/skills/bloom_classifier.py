@@ -166,5 +166,5 @@ Trả về JSON:
         question_type: Literal["mcq", "essay"] = "mcq",
         subject: str = "general",
     ) -> dict:
-        """Alias for classify() to match skill interface."""
-        return await self.classify(question_stem, question_type, subject)
+        """Local keyword-based classification — no LLM call to avoid 429."""
+        return self._fallback_classify(question_stem)

@@ -118,7 +118,15 @@ class OpenAIProvider(BaseLLMProvider):
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-        return resp.choices[0].message.content or ""
+        choice = resp.choices[0]
+        content = choice.message.content or ""
+        logger.info(
+            "openai_chat_finish | model=%s finish_reason=%s content_len=%d",
+            model,
+            choice.finish_reason,
+            len(content),
+        )
+        return content
 
     async def chat_structured(
         self,

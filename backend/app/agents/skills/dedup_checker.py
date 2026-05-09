@@ -114,5 +114,5 @@ Các câu hỏi đã có:
         new_question_topic: str,
         existing_topics: list[str],
     ) -> dict:
-        """Alias for check() to match skill interface."""
-        return await self.check(new_question_topic, existing_topics)
+        """Local keyword overlap check — no LLM call to avoid 429."""
+        return self._fallback_check(new_question_topic, existing_topics)

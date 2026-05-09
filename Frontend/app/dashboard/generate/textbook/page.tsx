@@ -149,10 +149,31 @@ export default function TextbookGeneratePage() {
     })
   }
 
-  // Scope passed to backend = unique chapter names that have ≥1 section selected
-  const getScope = () => Array.from(new Set(
+  // Scope passed to backend:
+  //   - Fully selected chapter  → "Chapter name" (retrieve all sections)
+  //   - Partially selected      → "Chapter name > Section name" per selected section
+  const getScope = () => {
+    const result: string[] = []
+    for (const item of outline) {
+      const selectedSecs = item.sections.filter(s => config.selectedSections.has(sectionKey(item.chapter, s)))
+      if (selectedSecs.length === 0) continue
+      if (selectedSecs.length === item.sections.length) {
+        // Full chapter selected — backend retrieves all
+        result.push(item.chapter)
+      } else {
+        // Partial: send each selected section as "Chapter > Section"
+        for (const sec of selectedSecs) {
+          result.push(`${item.chapter} > ${sec}`)
+        }
+      }
+    }
+    return result
+  }
+
+  // For display only: count distinct chapters that have ≥1 section selected
+  const getScopeChapterCount = () => new Set(
     Array.from(config.selectedSections).map(k => k.split('|||')[0])
-  ))
+  ).size
 
   const bloomSum = Object.values(config.bloomDistribution).reduce((a, b) => a + b, 0)
   const isBloomValid = bloomSum === 100
@@ -348,7 +369,7 @@ export default function TextbookGeneratePage() {
                 <div className="flex justify-between items-center mt-6">
                   <span className="text-sm text-muted-foreground">
                     {totalSectionsSelected > 0
-                      ? `Đã chọn ${totalSectionsSelected} bài từ ${getScope().length} chương`
+                      ? `Đã chọn ${totalSectionsSelected} bài từ ${getScopeChapterCount()} chương`
                       : 'Chưa chọn bài nào'}
                   </span>
                   <Button onClick={() => setStep(2)} disabled={!canStep2}>

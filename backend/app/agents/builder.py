@@ -39,11 +39,12 @@ async def _call_gemini_slot(api_key: str, messages: list[dict], model: str) -> s
     async with AsyncOpenAI(
         api_key=api_key,
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        max_retries=0,
     ) as client:
         resp = await client.chat.completions.create(
             model=model,
             messages=messages,
-            max_tokens=4000,
+            max_tokens=8000,
             temperature=0.7,
         )
     return resp.choices[0].message.content or ""
@@ -310,6 +311,8 @@ Nhiệm vụ:
 - Ví dụ SAI: "stem": "Theo 'nguyên lý "bảo toàn năng lượng"', tính..."
 - Ví dụ ĐÚNG: "stem": "Theo nguyên lý bảo toàn năng lượng, tính..."
 - Không viết nhận xét kiểu 'Để tuân thủ yêu cầu...' hay chain-of-thought trong JSON
+- Think privately; do NOT output chain-of-thought, reasoning, analysis, planning, or self-check text
+- Output only the final JSON array; no markdown fences, no prose before/after JSON
 
 MCQ Format:
 {
@@ -379,7 +382,29 @@ Trả lời ngắn Format (THPT 2025 — điền kết quả số):
 - Câu Đúng-Sai: mỗi mệnh đề phải là phát biểu khoa học cụ thể, có thể kiểm chứng
 
 Trả về JSON array (không có key bọc ngoài):
-[câu_hỏi_1]"""
+[câu_hỏi_1]
+
+## VÍ DỤ MẪU (few-shot — học format và mức Bloom, KHÔNG copy nội dung):
+
+### Ví dụ 1 — nhan_biet / MCQ
+Slot: {"type": "mcq", "bloom_level": "nhan_biet", "chapter": "Sóng điện từ"}
+Output:
+[{"type": "mcq", "bloom_level": "nhan_biet", "chapter": "Sóng điện từ", "stem": "Khi nói về sóng điện từ, phát biểu nào sau đây là đúng?", "options": {"A": "Khi truyền trong chân không, sóng điện từ không mang theo năng lượng.", "B": "Sóng điện từ có thể là sóng dọc hoặc sóng ngang.", "C": "Sóng điện từ luôn lan truyền với tốc độ c = 3.10^8 m/s.", "D": "Tốc độ truyền sóng điện từ phụ thuộc vào môi trường."}, "correct_answer": "D", "explanation": "Sóng điện từ luôn là sóng ngang và mang năng lượng. Trong chân không tốc độ là c, nhưng trong môi trường có chiết suất n thì v = c/n, tức phụ thuộc môi trường."}]
+
+### Ví dụ 2 — thong_hieu / dung_sai
+Slot: {"type": "dung_sai", "bloom_level": "thong_hieu", "chapter": "Nhiệt học — Các nguyên lý nhiệt động lực học"}
+Output:
+[{"type": "dung_sai", "bloom_level": "thong_hieu", "chapter": "Nhiệt học — Các nguyên lý nhiệt động lực học", "stem": "Vào những ngày mùa đông lạnh giá, một học sinh thực hiện việc xoa nhanh hai lòng bàn tay vào nhau trong một khoảng thời gian ngắn và cảm thấy tay ấm lên. Sau đó, học sinh này áp lòng bàn tay vào mặt của mình. Các nhận xét sau đúng hay sai?", "propositions": [{"label": "a", "text": "Nội năng của bàn tay tăng lên do nhận công.", "is_correct": true}, {"label": "b", "text": "Bàn tay đã nhận nhiệt lượng từ cơ thể và ấm lên.", "is_correct": false}, {"label": "c", "text": "Khi áp lòng bàn tay vào mặt, có sự truyền nhiệt lượng từ mặt vào bàn tay.", "is_correct": false}, {"label": "d", "text": "Trong toàn bộ quá trình từ lúc xoa tay đến lúc áp tay vào mặt, tổng năng lượng (bao gồm cơ năng và nhiệt năng) của hệ luôn được bảo toàn.", "is_correct": true}], "explanation": "a) Đúng: xoa tay thực hiện công thắng ma sát, cơ năng chuyển hóa thành nhiệt năng làm nội năng tay tăng. b) Sai: tay ấm lên do nhận công từ xoa, không phải nhận nhiệt từ cơ thể. c) Sai: sau khi xoa tay ấm hơn mặt, nhiệt truyền từ tay sang mặt chứ không phải ngược lại. d) Đúng: xét hệ gồm cơ thể, bàn tay, mặt và môi trường thì tổng năng lượng được bảo toàn."}]
+
+### Ví dụ 3 — van_dung / short_answer
+Slot: {"type": "short_answer", "bloom_level": "van_dung", "chapter": "Vật lí hạt nhân"}
+Output:
+[{"type": "short_answer", "bloom_level": "van_dung", "chapter": "Vật lí hạt nhân", "stem": "Một lò phản ứng hạt nhân dùng uranium ${}^{235}_{92}\\\\text{U}$, thanh nhiên liệu làm giàu 4%. Mỗi hạt nhân phân hạch tỏa 200 MeV, 90% năng lượng dùng làm nóng 500 tấn nước từ 30°C lên 250°C. Khi khối lượng ${}^{235}_{92}\\\\text{U}$ còn lại 99,5% so với ban đầu. Biết c = 4200 J/(kg.K), 1 mol ${}^{235}_{92}\\\\text{U}$ = 235 g, 1 MeV = $1{,}6\\\\times10^{-13}$ J. Khối lượng các thanh nhiên liệu ban đầu là bao nhiêu kilôgam?", "correct_answer": "31", "unit": "kg", "solution": "Khối lượng U phân hạch: $m_{ph} = 0{,}5\\\\% \\\\times 4\\\\% \\\\times m = 2\\\\times10^{-4}m$ (g). Từ $\\\\frac{m_{ph}}{M}N_A \\\\cdot \\\\Delta E \\\\cdot H = m_n c \\\\Delta T$ suy ra $m_{ph} \\\\approx 6{,}26$ g, do đó $m \\\\approx 31310$ g $\\\\approx 31$ kg."}]
+
+### Ví dụ 4 — van_dung_cao / essay
+Slot: {"type": "essay", "bloom_level": "van_dung_cao", "chapter": "Cơ học thiên thể — Định luật Kepler"}
+Output:
+[{"type": "essay", "bloom_level": "van_dung_cao", "chapter": "Cơ học thiên thể — Định luật Kepler", "stem": "Trái Đất chuyển động quanh Mặt Trời theo quỹ đạo tròn bán kính $R_T = 150\\\\times10^9$ m với chu kỳ $T_0$ và vận tốc $v_T$. Một sao chổi chuyển động trong mặt phẳng quỹ đạo Trái Đất, đến gần Mặt Trời nhất ở khoảng cách $kR_T$ với vận tốc $v_1$. Cho k = 0,42; $v_T = 3\\\\times10^4$ m/s; $v_1 = 65{,}08\\\\times10^3$ m/s. (1) Xác định vận tốc v của sao chổi khi cắt quỹ đạo Trái Đất. (2) Chứng minh quỹ đạo là elip, xác định bán trục lớn $a = \\\\lambda R_T$, tâm sai e và chu kỳ $T = nT_0$. (3) Biểu diễn và tính gần đúng khoảng thời gian $\\\\tau$ sao chổi ở trong quỹ đạo Trái Đất.", "rubric": [{"score": 4, "description": "Giải đúng và đầy đủ cả 3 phần: tính v bằng bảo toàn năng lượng và mô men động lượng; chứng minh elip, tìm đúng $\\\\lambda, e, n$; biểu diễn $\\\\tau$ dưới dạng tích phân và tính được $\\\\tau \\\\approx 77$ ngày."}, {"score": 3, "description": "Giải đúng phần (1) và (2), phần (3) biểu diễn được tích phân nhưng tính gần đúng còn sai sót nhỏ hoặc chưa hoàn chỉnh."}, {"score": 2, "description": "Giải đúng phần (1), phần (2) tìm được $\\\\lambda$ hoặc e nhưng chưa đủ; phần (3) chưa làm hoặc sai."}, {"score": 1, "description": "Nêu được công thức bảo toàn năng lượng và mô men động lượng, lập được hệ phương trình nhưng chưa tính ra kết quả cụ thể nào."}]}]"""
 
     # Bloom-level-specific question generation guides
     BLOOM_TEMPLATES = {
@@ -433,7 +458,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 - Xấu: "Lực ma sát tỉ lệ thuận với tốc độ" (plausible nhưng pattern quá dễ nhận ra)"""
 
     # Concurrency limits
-    MAX_CONCURRENT_LLM_CALLS = 5  # semaphore limit to avoid rate limits
+    MAX_CONCURRENT_LLM_CALLS = 2  # semaphore limit to avoid rate limits
     CHUNK_SIZE = 5  # questions per LLM call
 
     def __init__(self, redis_client=None):
@@ -935,7 +960,9 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
 Đây là JSON array MỘT câu hỏi:"""
 
-        max_retries = 0  # fail-fast: on first failure hand off to Gemini pool
+        # Retry malformed/partial primary output before falling back. Provider/API
+        # exceptions still fall through to fallback immediately to avoid 429 spam.
+        max_retries = 2
         for attempt in range(max_retries + 1):
             try:
                 response = await self.llm.chat(
@@ -944,12 +971,14 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         {"role": "user", "content": user_prompt},
                     ],
                     role="builder",
-                    max_tokens=4000,
+                    max_tokens=8000,
                     temperature=0.7,
                 )
 
                 if not response or not response.strip():
-                    warnings.append(f"Slot {slot_number}: LLM returned empty response (attempt {attempt + 1})")
+                    msg = f"Slot {slot_number}: primary builder returned empty response (attempt {attempt + 1})"
+                    warnings.append(msg)
+                    logger.warning(msg)
                     continue
 
                 # Parse response — strip markdown fence first
@@ -962,7 +991,20 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 # Try to extract JSON using bracket matching (reliable for LLM output)
                 json_str = _extract_json_brackets(clean)
                 if not json_str:
-                    warnings.append(f"Slot {slot_number}: No JSON found in response (attempt {attempt + 1})")
+                    first_json_pos = next((i for i, ch in enumerate(clean) if ch in ("{", "[")), -1)
+                    if first_json_pos >= 0:
+                        msg = f"Slot {slot_number}: primary builder returned incomplete/unextractable JSON (attempt {attempt + 1})"
+                    else:
+                        msg = f"Slot {slot_number}: primary builder returned no JSON (attempt {attempt + 1})"
+                    warnings.append(msg)
+                    logger.warning(
+                        "%s | len=%d first_json_pos=%d prefix=%r suffix=%r",
+                        msg,
+                        len(clean),
+                        first_json_pos,
+                        clean[:500],
+                        clean[-500:],
+                    )
                     continue
 
                 # Fix bare LaTeX backslash escapes (e.g. \circ -> \\circ) so json.loads can parse
@@ -977,8 +1019,9 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         data = json.loads(repaired, strict=False)
                         logger.info(f"Slot {slot_number}: JSON repaired successfully (attempt {attempt + 1})")
                     except json.JSONDecodeError as je:
-                        warnings.append(f"Slot {slot_number}: JSON parse error after sanitize+repair")
-                        logger.warning(f"[DEBUG] Slot {slot_number} JSONDecodeError at char {je.pos}: {je.msg} | snippet: {repaired[max(0,je.pos-20):je.pos+40]!r}")
+                        msg = f"Slot {slot_number}: primary builder JSON parse error after sanitize+repair"
+                        warnings.append(msg)
+                        logger.warning("%s | char=%s msg=%s snippet=%r", msg, je.pos, je.msg, repaired[max(0, je.pos - 20):je.pos + 40])
                         continue
 
                 # Normalize: data can be {"questions": [...]} or [...]
@@ -989,7 +1032,9 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     questions_raw = data.get("questions", [data])
 
                 if not questions_raw:
-                    warnings.append(f"Slot {slot_number}: No questions in parsed JSON (attempt {attempt + 1})")
+                    msg = f"Slot {slot_number}: primary builder parsed JSON but found no questions (attempt {attempt + 1})"
+                    warnings.append(msg)
+                    logger.warning(msg)
                     continue
 
                 q = questions_raw[0]
@@ -1047,17 +1092,25 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 return q, warnings
 
             except json.JSONDecodeError as e:
-                warnings.append(f"Slot {slot_number}: JSON parse error (attempt {attempt + 1}): {e}")
+                msg = f"Slot {slot_number}: primary builder JSON parse error (attempt {attempt + 1}): {e}"
+                warnings.append(msg)
+                logger.warning(msg)
                 if attempt == max_retries:
                     break
 
             except Exception as e:
-                warnings.append(f"Slot {slot_number}: LLM error (attempt {attempt + 1}): {e}")
-                if attempt == max_retries:
-                    break
+                msg = f"Slot {slot_number}: primary builder LLM error (attempt {attempt + 1}): {e}"
+                warnings.append(msg)
+                logger.warning(msg)
+                break
 
         # ── Primary provider exhausted — try Gemini key pool ──
         if gemini_key_pool is not None and gemini_key_pool.has_keys:
+            logger.warning(
+                "Slot %d: primary builder failed; entering Gemini fallback. reasons=%s",
+                slot_number,
+                " | ".join(warnings[-5:]) if warnings else "unknown",
+            )
             from app.core.config import get_settings as _gcfg
             _gmodel = _gcfg().GEMINI_MODEL
             _gmessages = [

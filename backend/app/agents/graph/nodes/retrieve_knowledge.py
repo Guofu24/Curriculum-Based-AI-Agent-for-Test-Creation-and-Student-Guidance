@@ -44,6 +44,7 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
     # prereq_chapters are passed separately to retrieval — they provide background context
     # but are NOT used for question generation scope (section filter still applies to primary scope).
     scope_sections = list(exam_config.get("scope_sections") or [])
+    scope_section_ids = list(exam_config.get("scope_section_ids") or [])
     prereq_chapters: list[str] = []
     if document_id and scope and not textbook_namespace:
         try:
@@ -101,6 +102,7 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
             bloom_targets=bloom_targets,
             trace_id=exam_id,
             scope_sections=scope_sections,
+            scope_section_ids=scope_section_ids or None,
         )
     else:
         retrieval_result = await retrieval_agent.retrieve(
@@ -109,6 +111,7 @@ async def retrieve_knowledge(state: ExamGraphState) -> ExamGraphState:
             bloom_targets=bloom_targets,
             trace_id=exam_id,
             scope_sections=scope_sections,
+            scope_section_ids=scope_section_ids or None,
             prereq_chapters=prereq_chapters or None,
         )
 

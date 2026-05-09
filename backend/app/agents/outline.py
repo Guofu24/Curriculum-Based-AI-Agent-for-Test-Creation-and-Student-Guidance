@@ -80,8 +80,8 @@ Tạo sườn đề (blueprint) với các slot câu hỏi được phân bổ t
 }
 ```
 
-## Chain-of-thought (suy luận trước khi output)
-Với mỗi blueprint, trước tiên suy nghĩ:
+## Internal planning only (KHÔNG output)
+Suy nghĩ nội bộ theo các bước này, nhưng KHÔNG viết chain-of-thought, reasoning, analysis, planning, hoặc self-check ra response:
 1. Tổng câu = MCQ + Essay + Đúng-Sai + Trả lời ngắn = ?
 2. Phân bổ câu cho từng chapter: mỗi chapter được phân bao nhiêu câu?
 3. Trong mỗi chapter, phân bổ Bloom level như thế nào?
@@ -97,6 +97,7 @@ Trước khi trả JSON, kiểm tra:
 - [ ] Topic hints không trùng nhau trong cùng chapter
 
 ## Output format
+Chỉ trả về JSON thuần. Không markdown. Không giải thích. Không chain-of-thought.
 Trả về JSON với schema:
 {
   "blueprint": [slot...],
@@ -134,6 +135,10 @@ slot CHÍNH XÁC bằng số slot đã nhận được.
 - **thong_hieu**: Giải thích, so sánh, áp dụng đơn giản
 - **van_dung**: Tính toán 2-3 bước, có điều kiện
 - **van_dung_cao**: Phân tích, đánh giá, bài toán phức hợp
+
+## Output discipline
+Think privately; do NOT output chain-of-thought, reasoning, analysis, planning, or self-check text.
+Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sau JSON.
 
 ## Output format (BẮT BUỘC - JSON thuần, không markdown)
 {
@@ -183,7 +188,7 @@ slot CHÍNH XÁC bằng số slot đã nhận được.
 
             # Modification mode needs higher token limit:
             # 28 slots × ~200 chars/slot ≈ 5600 chars + distribution_summary overhead
-            _max_tokens = 8192 if is_modification else 4000
+            _max_tokens = 8192 if is_modification else 8000
 
             # Call LLM
             response = await self.llm.chat(
@@ -653,7 +658,7 @@ KIỂM TRA LẠI trước khi output.
                     {"role": "user", "content": self._build_outline_prompt(retrieved_context, exam_config)},
                 ],
                 role="outline",
-                max_tokens=8192 if exam_config.get("current_blueprint") else 4000,
+                max_tokens=8192 if exam_config.get("current_blueprint") else 8000,
                 temperature=0.2,
             )
             print(f"[OutlineAgent] RAW ({len(response)} chars): {response[:400]!r}", flush=True)

@@ -29,6 +29,84 @@ import uuid
 router = APIRouter(prefix="/api/v1/generate", tags=["Generation"])
 
 
+async def _resolve_scope_section_ids(
+    scope: list[str],
+    document_id: str | None,
+    db: AsyncSession,
+) -> tuple[list[str], list[str]]:
+    """
+    Parse scope strings of the form "Chapter > Section" and resolve:
+      - scope_sections: list of section title strings (title-based filter fallback)
+      - scope_section_ids: list of canonical section_id strings (ID-based primary filter)
+
+    Resolution uses per-chapter lookup {chapter_id → {sec_title → sec_id}} to
+    prevent cross-chapter title collisions (e.g. two chapters with "Bài tập").
+
+    Returns (scope_sections, scope_section_ids).
+    """
+    import unicodedata
+    import logging as _log2
+
+    def _norm(s: str) -> str:
+        nfd = unicodedata.normalize("NFD", s.strip().lower())
+        return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+    scope_sections: list[str] = []
+    scope_section_ids: list[str] = []
+
+    # Only proceed if at least one "Chapter > Section" entry exists
+    has_sections = any(isinstance(s, str) and " > " in s for s in scope)
+    if not has_sections:
+        return scope_sections, scope_section_ids
+
+    # Build per-chapter section lookup from heading_tree
+    # Structure: {ch_title_norm → (ch_id, {sec_title_norm → sec_id})}
+    ch_lookup: dict[str, tuple[str, dict[str, str]]] = {}
+    if document_id:
+        try:
+            from sqlalchemy import select as _sel
+            from app.models.document import Document as _Doc
+            _res = await db.execute(_sel(_Doc).where(_Doc.id == uuid.UUID(str(document_id))))
+            _doc = _res.scalar_one_or_none()
+            if _doc and _doc.heading_tree:
+                for _ch in _doc.heading_tree.get("chapters", []):
+                    _ch_title = _ch.get("title", "").strip()
+                    _ch_id = _ch.get("chapter_id", "")
+                    if not _ch_title or not _ch_id:
+                        continue
+                    sec_map: dict[str, str] = {}
+                    for _sec in _ch.get("sections", []):
+                        _st = _sec.get("title", "").strip()
+                        _sid = _sec.get("section_id", "")
+                        if _st and _sid:
+                            sec_map[_st.lower()] = _sid
+                            sec_map[_norm(_st)] = _sid
+                    ch_lookup[_ch_title.lower()] = (_ch_id, sec_map)
+                    ch_lookup[_norm(_ch_title)] = (_ch_id, sec_map)
+        except Exception as _e:
+            _log2.getLogger("generate.router").debug("section_id resolve failed: %s", _e)
+
+    for s in scope:
+        if not isinstance(s, str) or " > " not in s:
+            continue
+        ch_part, sec_part = s.split(" > ", 1)
+        ch_part = ch_part.strip()
+        sec_part = sec_part.strip()
+        if not sec_part:
+            continue
+        scope_sections.append(sec_part)
+
+        # Resolve canonical section_id via per-chapter lookup
+        _ch_entry = ch_lookup.get(ch_part.lower()) or ch_lookup.get(_norm(ch_part))
+        if _ch_entry:
+            _ch_id, sec_map = _ch_entry
+            sec_id = sec_map.get(sec_part.lower()) or sec_map.get(_norm(sec_part))
+            if sec_id and sec_id not in scope_section_ids:
+                scope_section_ids.append(sec_id)
+
+    return scope_sections, scope_section_ids
+
+
 # ── Inline generation (shares FastAPI's async event loop — no loop conflicts) ──
 
 async def _run_generation_inline(
@@ -294,17 +372,19 @@ async def _run_generation_inline(
             resolved_config = dict(exam_config or {})
             resolved_config["scope"] = normalized_scope
 
-            # Extract section titles from scope strings ("Chương > Phần" → "Phần")
+            # Extract section titles and resolve canonical section_ids (per-chapter)
             if scope and isinstance(scope, list):
-                section_titles: list[str] = []
-                for s in scope:
-                    if isinstance(s, str) and " > " in s:
-                        section_part = s.split(" > ", 1)[1].strip()
-                        if section_part:
-                            section_titles.append(section_part)
+                section_titles, section_ids = await _resolve_scope_section_ids(
+                    scope=list(scope),
+                    document_id=document_id,
+                    db=db,
+                )
                 if section_titles:
                     resolved_config["scope_sections"] = section_titles
                     _logger.info("Extracted scope_sections: %s", section_titles)
+                if section_ids:
+                    resolved_config["scope_section_ids"] = section_ids
+                    _logger.info("Resolved scope_section_ids: %s", section_ids)
 
             orchestrator = OrchestratorAgent(redis=redis_client, db_session=db)
             orchestrator.set_stream_callback(stream_callback)
@@ -497,14 +577,12 @@ async def generate_exam_fe(
     # Rate limit check
     await check_generate_rate_limit(redis, str(current_user.id))
 
-    # Extract section titles from scope strings ("Chương > Phần" → "Phần")
-    scope_sections: list[str] = []
-    if config.scope and isinstance(config.scope, list):
-        for s in config.scope:
-            if isinstance(s, str) and " > " in s:
-                section_part = s.split(" > ", 1)[1].strip()
-                if section_part:
-                    scope_sections.append(section_part)
+    # Extract section titles and resolve canonical section_ids (per-chapter)
+    scope_sections_fe, scope_section_ids_fe = await _resolve_scope_section_ids(
+        scope=list(config.scope) if config.scope else [],
+        document_id=str(config.document_id) if config.document_id else None,
+        db=db,
+    )
 
     service = ExamService(db, redis)
     try:
@@ -523,7 +601,8 @@ async def generate_exam_fe(
                 "bloom_distribution": config.bloom_distribution.model_dump(),
                 "user_prompt": config.user_prompt,
                 "extra_instructions": config.extra_instructions,
-                "scope_sections": scope_sections if scope_sections else None,
+                "scope_sections": scope_sections_fe if scope_sections_fe else None,
+                "scope_section_ids": scope_section_ids_fe if scope_section_ids_fe else None,
                 "use_builtin_knowledge": config.use_builtin_knowledge,
                 "textbook_namespace": config.knowledge_namespace,
             },

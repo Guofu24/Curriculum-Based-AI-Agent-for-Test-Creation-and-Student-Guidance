@@ -107,6 +107,7 @@ class RetrievalAgent:
         query_hints: list[str] | None = None,
         trace_id: str = "",
         scope_sections: list[str] | None = None,
+        scope_section_ids: list[str] | None = None,
         prereq_chapters: list[str] | None = None,
     ) -> RetrievalOutput:
         """Main retrieval method."""
@@ -279,10 +280,9 @@ class RetrievalAgent:
             if token_warning:
                 warnings.append(token_warning)
 
-            # ── Section filter: keep only chunks whose section matches scope_sections ──
-            # Prerequisite chunks (prereq_ch_set) are always kept — they provide
-            # background context and must not be filtered by the primary section scope.
-            if scope_sections:
+            # ── Section filter: prefer canonical section_id filter; fallback to title filter ──
+            # Prerequisite chunks (prereq_ch_set) always bypass — they provide background context.
+            if scope_section_ids or scope_sections:
                 import unicodedata
                 def _strip_d(s: str) -> str:
                     nfd = unicodedata.normalize("NFD", s.strip().lower())
@@ -294,32 +294,70 @@ class RetrievalAgent:
                     prereq_norm_ids.add(normalize_chapter_id(pch))
                     prereq_norm_ids.add(pch)
 
-                scope_sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
-                if scope_sec_set:
-                    filtered_chunks: list[dict] = []
-                    all_section_titles: set[str] = set()
+                # Primary filter: canonical section_id (exact set match — reliable)
+                if scope_section_ids:
+                    sec_id_set = set(scope_section_ids)
+                    filtered_chunks_id: list[dict] = []
                     for chunk in all_chunks:
                         ch_raw = chunk.get("metadata", {}).get("chapter", "")
                         ch_norm = normalize_chapter_id(ch_raw)
-                        # Prereq chunks bypass section filter — they are background context
                         if ch_norm in prereq_norm_ids or ch_raw in prereq_norm_ids:
-                            filtered_chunks.append(chunk)
+                            filtered_chunks_id.append(chunk)
                             continue
-                        chunk_sec = (chunk.get("metadata", {}).get("section") or "").strip()
-                        chunk_sec_norm = _strip_d(chunk_sec)
-                        if chunk_sec_norm:
-                            all_section_titles.add(chunk_sec_norm)
-                        if chunk_sec_norm and chunk_sec_norm in scope_sec_set:
-                            filtered_chunks.append(chunk)
+                        chunk_sec_id = (chunk.get("metadata", {}).get("section_id") or "").strip()
+                        if chunk_sec_id in sec_id_set:
+                            filtered_chunks_id.append(chunk)
                     logger.info(
-                        "[retrieve] scope_sections=%r → filtered %d chunks (from %d). "
-                        "Chunk sections found: %s",
-                        sorted(scope_sec_set), len(filtered_chunks), len(all_chunks),
-                        sorted(all_section_titles),
+                        "[retrieve] scope_section_ids=%r → filtered %d chunks (from %d via section_id)",
+                        sorted(sec_id_set), len(filtered_chunks_id), len(all_chunks),
                     )
-                    if filtered_chunks:
-                        all_chunks = filtered_chunks
-                    # If filtering removed everything, warn but keep chunks (fallback)
+                    if filtered_chunks_id:
+                        all_chunks = filtered_chunks_id
+                    else:
+                        logger.warning(
+                            "[retrieve] section_id filter returned 0 chunks — falling back to title filter"
+                        )
+                        # Fall through to title filter below
+                        scope_section_ids = None  # type: ignore[assignment]
+
+                # Fallback filter: title-based (diacritic-stripped string match)
+                if not scope_section_ids and scope_sections:
+                    scope_sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
+                    if scope_sec_set:
+                        filtered_chunks: list[dict] = []
+                        all_section_titles: set[str] = set()
+                        for chunk in all_chunks:
+                            ch_raw = chunk.get("metadata", {}).get("chapter", "")
+                            ch_norm = normalize_chapter_id(ch_raw)
+                            if ch_norm in prereq_norm_ids or ch_raw in prereq_norm_ids:
+                                filtered_chunks.append(chunk)
+                                continue
+                            chunk_sec = (chunk.get("metadata", {}).get("section") or "").strip()
+                            chunk_sec_norm = _strip_d(chunk_sec)
+                            if chunk_sec_norm:
+                                all_section_titles.add(chunk_sec_norm)
+                            if chunk_sec_norm and chunk_sec_norm in scope_sec_set:
+                                filtered_chunks.append(chunk)
+                        logger.info(
+                            "[retrieve] scope_sections (title fallback)=%r → filtered %d chunks (from %d). "
+                            "Chunk sections found: %s",
+                            sorted(scope_sec_set), len(filtered_chunks), len(all_chunks),
+                            sorted(all_section_titles),
+                        )
+                        if filtered_chunks:
+                            all_chunks = filtered_chunks
+                        # Both section_id and title filters failed — last-resort: keep full set.
+                        # Log a SCOPE_ISOLATION_BREACH so it's easy to find in logs.
+                        else:
+                            logger.warning(
+                                "[retrieve] SCOPE_ISOLATION_BREACH — both section_id and title "
+                                "filters returned 0 chunks. Keeping full retrieved set.\n"
+                                "  requested scope_sections=%r\n"
+                                "  chunk sections available=%r\n"
+                                "  Cause: metadata mismatch (likely pre-reindex document).",
+                                sorted(scope_sec_set),
+                                sorted(all_section_titles),
+                            )
 
             # Build coverage map
             coverage_map: dict[str, list[str]] = {}
@@ -385,6 +423,7 @@ class RetrievalAgent:
         query_hints: list[str] | None = None,
         trace_id: str = "",
         scope_sections: list[str] | None = None,
+        scope_section_ids: list[str] | None = None,  # accepted but unused (textbook ns has no section_id)
     ) -> RetrievalOutput:
         """
         Retrieval for built-in textbook knowledge (admin-uploaded namespace).
@@ -403,12 +442,31 @@ class RetrievalAgent:
             query_text = " ".join(expanded_queries[:3])
             embedding = await self.embedder.embed_text(query_text)
 
-            # Build chapter filter: {"chapter": {"$in": [...]}} if chapters specified
-            filter_meta: dict | None = None
-            if scope_chapters:
-                filter_meta = {"chapter": {"$in": scope_chapters}}
+            # Separate "Chapter > Section" compound entries (sent by FE partial selection).
+            # Pinecone metadata.chapter stores pure chapter names — strip " > section" suffix.
+            pure_chapters: list[str] = []
+            auto_sections: list[str] = []
+            for _ch in (scope_chapters or []):
+                if " > " in _ch:
+                    _ch_part, _sec_part = _ch.split(" > ", 1)
+                    pure_chapters.append(_ch_part.strip())
+                    if _sec_part.strip():
+                        auto_sections.append(_sec_part.strip())
+                else:
+                    pure_chapters.append(_ch)
+            # Merge caller-provided scope_sections with auto-extracted ones (dedup, preserve order)
+            effective_sections: list[str] | None = scope_sections
+            if auto_sections:
+                _merged = list(dict.fromkeys((scope_sections or []) + auto_sections))
+                effective_sections = _merged
 
-            top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(scope_chapters), 3)
+            # Build chapter filter with pure chapter names (no " > Section" contamination)
+            filter_meta: dict | None = None
+            _unique_chapters = list(dict.fromkeys(pure_chapters))
+            if _unique_chapters:
+                filter_meta = {"chapter": {"$in": _unique_chapters}}
+
+            top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(_unique_chapters) if _unique_chapters else 1, 3)
             all_chunks = await self.vector_store.query_textbook_namespace(
                 namespace=textbook_namespace,
                 query_embedding=embedding,
@@ -416,20 +474,29 @@ class RetrievalAgent:
                 filter_metadata=filter_meta,
             )
 
-            # Section filter
-            if scope_sections and all_chunks:
+            # Section filter — uses effective_sections (merged from explicit + auto-extracted)
+            if effective_sections and all_chunks:
                 import unicodedata
                 def _strip_d(s: str) -> str:
                     nfd = unicodedata.normalize("NFD", s.strip().lower())
                     return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-                sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
+                sec_set = {_strip_d(s) for s in effective_sections if s.strip()}
                 filtered = [
                     c for c in all_chunks
                     if _strip_d(c.get("metadata", {}).get("title") or "") in sec_set
                     or _strip_d(c.get("metadata", {}).get("section") or "") in sec_set
                 ]
+                logger.info(
+                    "[retrieve_textbook] section filter: sec_set=%r, matched=%d/%d",
+                    sorted(sec_set), len(filtered), len(all_chunks),
+                )
                 if filtered:
                     all_chunks = filtered
+                else:
+                    logger.warning(
+                        "[retrieve_textbook] section filter returned 0 chunks — "
+                        "keeping full chapter result (textbook has no canonical section_id)"
+                    )
 
             all_chunks, token_warning = self._enforce_token_budget(
                 all_chunks, max_tokens=settings.MAX_CONTEXT_TOKENS
