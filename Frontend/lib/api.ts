@@ -283,6 +283,11 @@ export interface DungSaiProposition {
   is_correct: boolean
 }
 
+export interface RubricItem {
+  score: number | string
+  description: string
+}
+
 export interface Question {
   id: string
   question_number?: number
@@ -294,7 +299,7 @@ export interface Question {
   correct_answer?: string
   unit?: string
   solution?: string
-  rubric?: Record<string, unknown>
+  rubric?: RubricItem[] | Record<string, unknown> | string
   explanation?: string
   bloom_level?: BloomLevel | string
   difficulty_score?: number

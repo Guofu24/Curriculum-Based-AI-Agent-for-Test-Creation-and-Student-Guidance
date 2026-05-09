@@ -64,7 +64,7 @@ interface QuestionGeneratedEvent {
     bloom_level?: BloomLevel
     difficulty_score?: number
     correct_answer?: string
-    rubric?: Record<string, unknown>
+    rubric?: RubricEntry[] | Record<string, unknown> | string
     explanation?: string
     chapter?: string
     propositions?: Array<{ label: string; text: string; is_correct: boolean }>
@@ -182,6 +182,47 @@ interface ValidationIssue {
 interface ClarificationQuestion {
   question_id: string
   question: string
+}
+
+type RubricEntry = {
+  score: string
+  description: string
+}
+
+function normalizeRubric(rubric: unknown): RubricEntry[] {
+  if (!rubric) return []
+
+  if (typeof rubric === "string") {
+    try {
+      return normalizeRubric(JSON.parse(rubric))
+    } catch {
+      return [{ score: "", description: rubric }]
+    }
+  }
+
+  if (Array.isArray(rubric)) {
+    return rubric
+      .map((item): RubricEntry | null => {
+        if (!item || typeof item !== "object") return null
+        const row = item as { score?: unknown; description?: unknown }
+        const description = typeof row.description === "string" ? row.description : ""
+        if (!description) return null
+        return {
+          score: row.score !== undefined && row.score !== null ? String(row.score) : "",
+          description,
+        }
+      })
+      .filter((item): item is RubricEntry => item !== null)
+  }
+
+  if (typeof rubric === "object") {
+    return Object.entries(rubric as Record<string, unknown>).map(([score, description]) => ({
+      score,
+      description: typeof description === "string" ? description : JSON.stringify(description),
+    }))
+  }
+
+  return []
 }
 
 interface CostReport {
@@ -1507,10 +1548,10 @@ function QuestionCard({
       {qType === "essay" && question.rubric && (
         <div className="rounded-lg border bg-muted/30 p-3 space-y-1">
           <p className="text-xs font-semibold text-muted-foreground mb-1">Đáp án & thang điểm</p>
-          {Object.entries(question.rubric).map(([score, desc]) => (
-            <div key={score} className="flex items-start gap-2 text-xs">
-              <span className="font-bold text-primary shrink-0 w-6">{score}đ</span>
-              <span className="text-muted-foreground">{String(desc)}</span>
+          {normalizeRubric(question.rubric).map((row, idx) => (
+            <div key={`${row.score}-${idx}`} className="flex items-start gap-2 text-xs">
+              {row.score && <span className="font-bold text-primary shrink-0 w-6">{row.score}đ</span>}
+              <MathText className="text-muted-foreground">{row.description}</MathText>
             </div>
           ))}
         </div>

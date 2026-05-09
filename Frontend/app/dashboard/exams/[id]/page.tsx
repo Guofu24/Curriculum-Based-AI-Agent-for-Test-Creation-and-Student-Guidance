@@ -96,6 +96,47 @@ interface McqEditForm {
 const getQType = (q: { type?: string; question_type?: string }) =>
   q.type || q.question_type || 'mcq'
 
+type RubricEntry = {
+  score: string
+  description: string
+}
+
+function normalizeRubric(rubric: unknown): RubricEntry[] {
+  if (!rubric) return []
+
+  if (typeof rubric === 'string') {
+    try {
+      return normalizeRubric(JSON.parse(rubric))
+    } catch {
+      return [{ score: '', description: rubric }]
+    }
+  }
+
+  if (Array.isArray(rubric)) {
+    return rubric
+      .map((item): RubricEntry | null => {
+        if (!item || typeof item !== 'object') return null
+        const row = item as { score?: unknown; description?: unknown }
+        const description = typeof row.description === 'string' ? row.description : ''
+        if (!description) return null
+        return {
+          score: row.score !== undefined && row.score !== null ? String(row.score) : '',
+          description,
+        }
+      })
+      .filter((item): item is RubricEntry => item !== null)
+  }
+
+  if (typeof rubric === 'object') {
+    return Object.entries(rubric as Record<string, unknown>).map(([score, description]) => ({
+      score,
+      description: typeof description === 'string' ? description : JSON.stringify(description),
+    }))
+  }
+
+  return []
+}
+
 const BLOOM_LABELS: Record<BloomLevel, string> = {
   nhan_biet: 'Nhận biết',
   thong_hieu: 'Thông hiểu',
@@ -393,7 +434,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
       const updated = await examsApi.updateQuestion(id, questionId, {
         content: editForm.content,
         options: optionsArray,
-        rubric: editForm.rubric ? { rubrics: editForm.rubric } as unknown as Record<string, unknown> : undefined,
+        rubric: editForm.rubric ? editForm.rubric : undefined,
         bloom_level: editForm.bloom_level as BloomLevel | undefined,
       })
       setExam(prev => {
@@ -1195,10 +1236,19 @@ function QuestionCard({
                 {getQType(question) === 'essay' && question.rubric && (
                   <div className="p-3 rounded-md bg-muted text-sm">
                     <p className="font-medium mb-1">Rubric:</p>
-                    <div className="text-muted-foreground">
-                      <LatexRenderer>
-                        {typeof question.rubric === 'string' ? question.rubric : JSON.stringify(question.rubric)}
-                      </LatexRenderer>
+                    <div className="space-y-2 text-muted-foreground">
+                      {normalizeRubric(question.rubric).map((row, idx) => (
+                        <div key={`${row.score}-${idx}`} className="flex items-start gap-2">
+                          {row.score && (
+                            <span className="mt-0.5 min-w-10 rounded bg-background px-1.5 py-0.5 text-center text-xs font-semibold text-primary">
+                              {row.score}đ
+                            </span>
+                          )}
+                          <LatexRenderer className="flex-1 text-sm leading-relaxed">
+                            {row.description}
+                          </LatexRenderer>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
