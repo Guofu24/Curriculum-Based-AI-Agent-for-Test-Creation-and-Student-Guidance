@@ -1193,6 +1193,36 @@ function QuestionCard({
                   </>
                 )}
 
+                {getQType(question) === 'short_answer' && (
+                  <>
+                    <Field>
+                      <FieldLabel>Đáp án đúng</FieldLabel>
+                      <Input
+                        value={editForm.correct_answer ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, correct_answer: e.target.value })}
+                        placeholder="Nhập đáp án..."
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel>Đơn vị (nếu có)</FieldLabel>
+                      <Input
+                        value={(editForm as Record<string, string>).unit ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, unit: e.target.value } as typeof editForm)}
+                        placeholder="Ví dụ: m/s, kg, J..."
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel>Lời giải</FieldLabel>
+                      <Textarea
+                        value={editForm.solution ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, solution: e.target.value })}
+                        rows={4}
+                        placeholder="Trình bày lời giải chi tiết..."
+                      />
+                    </Field>
+                  </>
+                )}
+
                 <Field>
                   <FieldLabel>Bloom Level</FieldLabel>
                   <Select
@@ -1274,6 +1304,32 @@ function QuestionCard({
                           ))}
                         </div>
                       </>
+                    )}
+                  </div>
+                )}
+
+                {getQType(question) === 'short_answer' && (question.correct_answer || (question as Record<string, unknown>).unit || question.solution) && (
+                  <div className="p-3 rounded-md bg-muted text-sm space-y-2">
+                    {question.correct_answer && (
+                      <div className="rounded-md border bg-background/70 p-2.5">
+                        <p className="text-xs font-medium uppercase tracking-wide text-primary mb-1">Đáp án</p>
+                        <div className="flex items-center gap-2">
+                          <LatexRenderer className="font-semibold">
+                            {question.correct_answer}
+                          </LatexRenderer>
+                          {(question as Record<string, unknown>).unit && (
+                            <span className="text-muted-foreground text-xs">({String((question as Record<string, unknown>).unit)})</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {question.solution && (
+                      <div className="rounded-md border bg-background/70 p-2.5">
+                        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground mb-1">Lời giải</p>
+                        <LatexRenderer className="text-sm leading-relaxed">
+                          {question.solution}
+                        </LatexRenderer>
+                      </div>
                     )}
                   </div>
                 )}
