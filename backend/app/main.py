@@ -129,15 +129,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Pinecone startup check skipped: %s", e)
 
-    # Pre-load embedding + reranker models so first request isn't slow (~15s cold start)
+    # Pre-load embedding model only — CrossEncoder (bge-reranker-v2-m3, 2.2 GB) is
+    # lazy-loaded on first retrieval request to avoid blocking server startup for minutes.
     try:
-        from app.rag.embedder import _get_model, _get_cross_encoder
+        from app.rag.embedder import _get_model
         logger.info("Pre-loading embedding model (BAAI/bge-m3)...")
-        await _get_model()
+        await asyncio.wait_for(_get_model(), timeout=120)
         logger.info("Embedding model loaded ✓")
-        logger.info("Pre-loading CrossEncoder reranker...")
-        await _get_cross_encoder()
-        logger.info("CrossEncoder reranker loaded ✓")
+        logger.info("CrossEncoder reranker (bge-reranker-v2-m3) will lazy-load on first use")
+    except asyncio.TimeoutError:
+        logger.warning("Embedding model preload timed out — will lazy-load on first use")
     except Exception as e:
         logger.warning("Model pre-loading failed (will lazy-load on first use): %s", e)
 

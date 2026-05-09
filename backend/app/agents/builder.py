@@ -656,6 +656,18 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 for chunk_idx, result in enumerate(chunk_results):
                     if isinstance(result, Exception):
                         warnings.append(f"Chunk {chunk_idx} failed: {result}")
+                        # Instead of silently dropping all slots in this chunk,
+                        # generate a demo fallback for each slot so question count
+                        # always matches the blueprint.
+                        failed_chunk_slots = blueprint_chunks[chunk_idx]
+                        for _slot in failed_chunk_slots:
+                            _demo = self._build_demo_question(_slot, "")
+                            all_questions.append(_demo)
+                            if _demo.get("topic_hint"):
+                                topics_used.append(_demo["topic_hint"])
+                            warnings.append(
+                                f"Slot {_slot.get('question_id', '?')} used demo fallback due to chunk failure"
+                            )
                         continue
 
                     questions, chunk_warnings = result
@@ -669,19 +681,25 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
                     for q in validated:
                         if not q.get("filter_passed", True):
-                            warnings.append(
-                                f"Question {q.get('question_id')} failed filter: {q.get('filter_error')}"
-                            )
-                            continue
+                            # Mark-and-keep instead of drop: question count must match blueprint.
+                            # Flag it so the teacher can see it needs attention, but don't discard it.
+                            warn_msg = f"Question {q.get('question_id')} failed filter: {q.get('filter_error')}"
+                            warnings.append(warn_msg)
+                            logger.warning(warn_msg)
+                            q["needs_review"] = True
+                            q["quality_warning"] = q.get("filter_error", "Failed quality check")
+                            # Fall through — append below
 
                         stem = q.get("stem") or q.get("content") or ""
                         if stem and allowed_concepts:
                             in_scope, violation = scope_guard.is_allowed(stem)
                             if not in_scope:
-                                warnings.append(
-                                    f"Question {q.get('question_id')} out of scope: {violation}"
-                                )
-                                continue
+                                warn_msg = f"Question {q.get('question_id')} out of scope: {violation}"
+                                warnings.append(warn_msg)
+                                logger.warning(warn_msg)
+                                # Mark out-of-scope but still keep in output
+                                q["needs_review"] = True
+                                q["quality_warning"] = violation or "Out of scope"
 
                         if not q.get("source_evidence") and q.get("evidence_chunks"):
                             q["source_evidence"] = [
@@ -715,7 +733,15 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 warnings.append("Builder produced 0 questions from a non-empty blueprint.")
                 status = AgentStatus.PARTIAL
 
-            logger.info(f"Builder finished: {len(all_questions)} questions")
+            _real_count = sum(1 for q in all_questions if not q.get("is_demo_question"))
+            _demo_count = sum(1 for q in all_questions if q.get("is_demo_question"))
+            _review_count = sum(1 for q in all_questions if q.get("needs_review"))
+            logger.info(
+                "Builder finished: %d questions total (real=%d, demo=%d, needs_review=%d) "
+                "from %d blueprint slots — elapsed=%dms",
+                len(all_questions), _real_count, _demo_count, _review_count,
+                len(blueprint), elapsed_ms,
+            )
             return BuilderOutput(
                 status=status,
                 agent_name="builder",
@@ -734,8 +760,22 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
         except Exception as e:
             warnings.append(f"Builder failed: {str(e)}")
+            logger.error("Builder top-level exception after %d questions: %s", len(all_questions), e, exc_info=True)
 
-            logger.info(f"Builder finished: {len(all_questions)} questions")
+            # Generate demo fallback for any blueprint slots not yet covered
+            covered_ids = {q.get("question_id") for q in all_questions}
+            for _slot in blueprint:
+                if _slot.get("question_id") not in covered_ids:
+                    _demo = self._build_demo_question(_slot, "")
+                    all_questions.append(_demo)
+                    warnings.append(
+                        f"Slot {_slot.get('question_id', '?')} used demo fallback due to builder exception"
+                    )
+
+            logger.info(
+                "Builder finished (partial): %d questions from %d slots",
+                len(all_questions), len(blueprint),
+            )
             return BuilderOutput(
                 status=AgentStatus.PARTIAL,
                 agent_name="builder",
