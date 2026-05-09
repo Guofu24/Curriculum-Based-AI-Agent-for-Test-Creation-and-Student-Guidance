@@ -1545,15 +1545,25 @@ function QuestionCard({
         </div>
       )}
 
-      {qType === "essay" && question.rubric && (
-        <div className="rounded-lg border bg-muted/30 p-3 space-y-1">
-          <p className="text-xs font-semibold text-muted-foreground mb-1">Đáp án & thang điểm</p>
-          {normalizeRubric(question.rubric).map((row, idx) => (
-            <div key={`${row.score}-${idx}`} className="flex items-start gap-2 text-xs">
-              {row.score && <span className="font-bold text-primary shrink-0 w-6">{row.score}đ</span>}
-              <MathText className="text-muted-foreground">{row.description}</MathText>
+      {qType === "essay" && (question.solution || question.rubric) && (
+        <div className="rounded-lg border bg-muted/30 p-3 space-y-2">
+          {question.solution && (
+            <div className="rounded-md border bg-background/70 p-2">
+              <p className="text-xs font-semibold text-muted-foreground mb-1">Lời giải mẫu</p>
+              <MathText className="text-xs text-muted-foreground leading-relaxed">{question.solution}</MathText>
             </div>
-          ))}
+          )}
+          {question.rubric && (
+            <>
+              <p className="text-xs font-semibold text-muted-foreground mb-1">Đáp án & thang điểm</p>
+              {normalizeRubric(question.rubric).map((row, idx) => (
+                <div key={`${row.score}-${idx}`} className="flex items-start gap-2 text-xs">
+                  {row.score && <span className="font-bold text-primary shrink-0 w-6">{row.score}đ</span>}
+                  <MathText className="text-muted-foreground">{row.description}</MathText>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
 

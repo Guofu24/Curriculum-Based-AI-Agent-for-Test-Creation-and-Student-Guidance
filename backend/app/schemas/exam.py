@@ -716,7 +716,7 @@ class EditQuestionRequest(BaseModel):
 
     - **question_id**: UUID of the question to edit
     - **updates**: Dict of fields to update. Supported keys:
-        `content`, `options`, `correct_answer`, `rubric`, `bloom_level`,
+        `content`, `options`, `correct_answer`, `solution`, `rubric`, `bloom_level`,
         `difficulty_score`, `explanation`, `source_citations`
 
     Example:
@@ -737,7 +737,7 @@ class EditQuestionRequest(BaseModel):
     updates: dict[str, Any] = Field(
         ...,
         description="Partial update dict. Only provided fields are modified. "
-                    "Supported keys: content, options, correct_answer, rubric, bloom_level, "
+                    "Supported keys: content, options, correct_answer, solution, rubric, bloom_level, "
                     "difficulty_score, explanation, source_citations, is_locked, is_human_edited.",
     )
 

@@ -333,6 +333,7 @@ Essay Format:
   "question_id": "ESSAY_001",
   "type": "essay",
   "stem": "Câu hỏi tự luận...",
+  "solution": "Lời giải mẫu ngắn gọn, nêu các ý chính và bước lập luận cần có để đạt điểm tối đa.",
   "rubric": [
     {"score": 4, "description": "Hoàn toàn đúng..."},
     {"score": 3, "description": "Đúng nhưng thiếu..."},
@@ -380,6 +381,8 @@ Trả lời ngắn Format (THPT 2025 — điền kết quả số):
 - Stem PHẢI là câu hỏi hoặc bài toán thực sự — có ít nhất 15 từ, có dấu hỏi hoặc yêu cầu rõ ràng
 - Options MCQ PHẢI là câu trả lời thực sự (số, định nghĩa, phát biểu) — không được là tên chương hay heading
 - Câu Đúng-Sai: mỗi mệnh đề phải là phát biểu khoa học cụ thể, có thể kiểm chứng
+- Câu tự luận Essay BẮT BUỘC có field "solution" là lời giải mẫu/ý chính cần đạt; rubric chỉ là thang điểm, KHÔNG thay thế solution
+- KHÔNG dùng "\\\\" để xuống dòng trong văn bản thường; nếu cần tách ý, dùng câu văn hoặc newline thật trong string
 
 ## QUY TẮC PHẠM VI KIẾN THỨC (CỰC KỲ QUAN TRỌNG):
 - Phần ngữ cảnh được cung cấp CÓ THỂ gồm hai loại:
@@ -409,7 +412,7 @@ Output:
 
 ### Ví dụ 4 — van_dung_cao / essay
 Slot: {"type": "essay", "bloom_level": "van_dung_cao", "chapter": "Cơ học thiên thể — Định luật Kepler"}
-Output:
+Output (essay luôn phải có cả "solution" và "rubric"):
 [{"type": "essay", "bloom_level": "van_dung_cao", "chapter": "Cơ học thiên thể — Định luật Kepler", "stem": "Trái Đất chuyển động quanh Mặt Trời theo quỹ đạo tròn bán kính $R_T = 150\\\\times10^9$ m với chu kỳ $T_0$ và vận tốc $v_T$. Một sao chổi chuyển động trong mặt phẳng quỹ đạo Trái Đất, đến gần Mặt Trời nhất ở khoảng cách $kR_T$ với vận tốc $v_1$. Cho k = 0,42; $v_T = 3\\\\times10^4$ m/s; $v_1 = 65{,}08\\\\times10^3$ m/s. (1) Xác định vận tốc v của sao chổi khi cắt quỹ đạo Trái Đất. (2) Chứng minh quỹ đạo là elip, xác định bán trục lớn $a = \\\\lambda R_T$, tâm sai e và chu kỳ $T = nT_0$. (3) Biểu diễn và tính gần đúng khoảng thời gian $\\\\tau$ sao chổi ở trong quỹ đạo Trái Đất.", "rubric": [{"score": 4, "description": "Giải đúng và đầy đủ cả 3 phần: tính v bằng bảo toàn năng lượng và mô men động lượng; chứng minh elip, tìm đúng $\\\\lambda, e, n$; biểu diễn $\\\\tau$ dưới dạng tích phân và tính được $\\\\tau \\\\approx 77$ ngày."}, {"score": 3, "description": "Giải đúng phần (1) và (2), phần (3) biểu diễn được tích phân nhưng tính gần đúng còn sai sót nhỏ hoặc chưa hoàn chỉnh."}, {"score": 2, "description": "Giải đúng phần (1), phần (2) tìm được $\\\\lambda$ hoặc e nhưng chưa đủ; phần (3) chưa làm hoặc sai."}, {"score": 1, "description": "Nêu được công thức bảo toàn năng lượng và mô men động lượng, lập được hệ phương trình nhưng chưa tính ra kết quả cụ thể nào."}]}]"""
 
     # Bloom-level-specific question generation guides
@@ -1153,6 +1156,13 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         {"score": 0, "description": "Sai hoàn toàn"},
                     ]
                     q["estimated_solve_time_minutes"] = 15
+                if q_type == "essay" and not q.get("solution"):
+                    q["solution"] = (
+                        q.get("sample_answer")
+                        or q.get("model_answer")
+                        or q.get("expected_answer")
+                        or "Lời giải mẫu cần trình bày đầy đủ các ý chính trong rubric."
+                    )
 
                 # Apply skill pipeline (non-blocking)
                 await self._apply_skill_pipeline(q, topics_used)
@@ -1230,6 +1240,13 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     if q_type == "essay" and "rubric" not in q:
                         q["rubric"] = [{"score": s, "description": d} for s, d in [(10, "Hoàn toàn chính xác"), (7, "Đúng nhưng thiếu chi tiết"), (4, "Sai sót một phần"), (0, "Sai hoàn toàn")]]
                         q["estimated_solve_time_minutes"] = 15
+                    if q_type == "essay" and not q.get("solution"):
+                        q["solution"] = (
+                            q.get("sample_answer")
+                            or q.get("model_answer")
+                            or q.get("expected_answer")
+                            or "Lời giải mẫu cần trình bày đầy đủ các ý chính trong rubric."
+                        )
                     await self._apply_skill_pipeline(q, topics_used)
                     logger.info("Slot %d: Gemini fallback succeeded", slot_number)
                     warnings.append(f"Slot {slot_number}: Used Gemini key fallback")
@@ -1377,6 +1394,10 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 {"score": 4, "description": "Sai sót một phần"},
                 {"score": 0, "description": "Sai hoàn toàn"},
             ]
+            demo_q["solution"] = (
+                "Lời giải mẫu cần nêu các ý chính, lập luận vật lí phù hợp và "
+                "trình bày rõ các bước xử lí theo yêu cầu của đề."
+            )
             demo_q["estimated_solve_time_minutes"] = 15
 
         if q_type == "dung_sai":

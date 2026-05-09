@@ -56,6 +56,10 @@ function parseSegments(raw: string): Segment[] {
   return segments
 }
 
+function renderText(value: string): string {
+  return value.replace(/\\\\\s+/g, '\n')
+}
+
 const KATEX_OPTIONS: KatexOptions = {
   throwOnError: false,
   strict: 'ignore',
@@ -126,13 +130,13 @@ export function LatexRenderer({ children, className, block }: LatexRendererProps
 
   // Pure text — no math found
   if (segments.length === 1 && segments[0].kind === 'text') {
-    return <span className={cn('whitespace-pre-wrap', className)}>{children}</span>
+    return <span className={cn('whitespace-pre-wrap', className)}>{renderText(children)}</span>
   }
 
   return (
     <span className={cn('whitespace-pre-wrap leading-relaxed', className)}>
       {segments.map((seg, i) => {
-        if (seg.kind === 'text') return <React.Fragment key={i}>{seg.value}</React.Fragment>
+        if (seg.kind === 'text') return <React.Fragment key={i}>{renderText(seg.value)}</React.Fragment>
         if (seg.kind === 'inline') return <SafeInlineMath key={i} latex={seg.value} />
         return (
           <span key={i} className="my-2 block">

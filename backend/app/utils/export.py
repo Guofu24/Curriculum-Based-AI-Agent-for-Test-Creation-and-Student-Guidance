@@ -8,6 +8,7 @@ from io import BytesIO
 from typing import Any
 from uuid import UUID
 import html
+import json
 import re
 
 from docx import Document
@@ -31,6 +32,44 @@ body {
     line-height: 1.7;
 }
 """
+
+
+def _normalize_rubric_rows(rubric: Any) -> list[dict[str, str]]:
+    """Return rubric rows from list/dict/JSON string/free text without raising."""
+    if not rubric:
+        return []
+
+    if isinstance(rubric, str):
+        try:
+            return _normalize_rubric_rows(json.loads(rubric))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return [{"score": "", "description": rubric}]
+
+    if isinstance(rubric, list):
+        rows: list[dict[str, str]] = []
+        for item in rubric:
+            if isinstance(item, dict):
+                desc = item.get("description", "")
+                if desc:
+                    rows.append({
+                        "score": str(item.get("score", "")),
+                        "description": str(desc),
+                    })
+            elif item:
+                rows.append({"score": "", "description": str(item)})
+        return rows
+
+    if isinstance(rubric, dict):
+        if "description" in rubric or "score" in rubric:
+            desc = rubric.get("description", "")
+            return [{"score": str(rubric.get("score", "")), "description": str(desc)}] if desc else []
+        return [
+            {"score": str(score), "description": str(description)}
+            for score, description in rubric.items()
+            if description
+        ]
+
+    return [{"score": "", "description": str(rubric)}]
 
 
 # ── ExamExporter ────────────────────────────────────────────────────────────────
@@ -440,7 +479,9 @@ class ExamExporter:
         """Render essay question with rubric."""
         raw_stem = q.get("stem") or q.get("content") or ""
         stem = self._render_latex(html.escape(raw_stem))
-        rubric = q.get("rubric") or []
+        raw_solution = q.get("solution") or q.get("sample_answer") or q.get("model_answer") or ""
+        solution = self._render_latex(html.escape(raw_solution)) if raw_solution else ""
+        rubric = _normalize_rubric_rows(q.get("rubric"))
         time_est = q.get("estimated_solve_time_minutes")
 
         parts = [
@@ -450,6 +491,11 @@ class ExamExporter:
 
         if time_est:
             parts.append(f"<p>Thời gian ước tính: {time_est} phút</p>")
+
+        if include_answers and solution:
+            parts.append("<div class='answer-block'>")
+            parts.append(f"<strong>Lời giải mẫu:</strong> <span class='explanation'>{solution}</span>")
+            parts.append("</div>")
 
         if include_answers and rubric:
             parts.append("<div class='rubric'>")
@@ -487,8 +533,8 @@ class ExamExporter:
             for i, q in enumerate(essay_questions, 1):
                 bloom = q.get("bloom_level", "-")
                 diff = q.get("difficulty_level", "-")
-                rubric = q.get("rubric") or []
-                rubric_str = "; ".join(f"{r.get('score', 0)}đ: {r.get('description', '')[:40]}" for r in rubric)
+                rubric = _normalize_rubric_rows(q.get("rubric"))
+                rubric_str = "; ".join(f"{r.get('score', '')}đ: {r.get('description', '')[:40]}" for r in rubric)
                 rows.append(
                     f"<tr><td>{i}</td><td>{html.escape(bloom)}</td><td>{html.escape(diff)}</td>"
                     f"<td style='text-align:left'>{html.escape(rubric_str[:80])}</td></tr>"
@@ -659,7 +705,8 @@ class ExamExporter:
     ) -> None:
         """Add a single essay question to the DOCX document."""
         stem = self._strip_latex(q.get("stem") or q.get("content") or "")
-        rubric = q.get("rubric") or []
+        solution = self._strip_latex(q.get("solution") or q.get("sample_answer") or q.get("model_answer") or "")
+        rubric = _normalize_rubric_rows(q.get("rubric"))
         time_est = q.get("estimated_solve_time_minutes")
 
         p = doc.add_paragraph()
@@ -671,6 +718,12 @@ class ExamExporter:
             p = doc.add_paragraph(f"Thời gian ước tính: {time_est} phút")
             p.runs[0].font.size = Pt(11)
             p.runs[0].italic = True
+
+        if include_answers and solution:
+            p = doc.add_paragraph()
+            run = p.add_run(f"Lời giải mẫu: {solution}")
+            run.font.size = Pt(11)
+            run.italic = True
 
         if include_answers and rubric:
             doc.add_paragraph("Đáp án và thang điểm:")
@@ -717,8 +770,8 @@ class ExamExporter:
                 row[0].text = str(i)
                 row[1].text = str(q.get("bloom_level", "-"))
                 row[2].text = str(q.get("difficulty_level", "-"))
-                rubric = q.get("rubric") or []
-                rubric_str = "; ".join(f"{r.get('score', 0)}đ" for r in rubric)
+                rubric = _normalize_rubric_rows(q.get("rubric"))
+                rubric_str = "; ".join(f"{r.get('score', '')}đ" for r in rubric)
                 row[3].text = rubric_str or "-"
 
     def _get_qtype(self, q: dict) -> str:
@@ -1104,7 +1157,8 @@ def _render_mcq_html(q: dict, index: int, show_answer: bool) -> str:
 def _render_essay_html(q: dict, index: int, show_answer: bool, include_rubric: bool) -> str:
     """Render a single essay question as HTML (legacy path)."""
     stem = html.escape(q.get("stem", ""))
-    rubric = q.get("rubric", [])
+    solution = html.escape(q.get("solution") or q.get("sample_answer") or q.get("model_answer") or "")
+    rubric = _normalize_rubric_rows(q.get("rubric"))
     time_est = q.get("estimated_solve_time_minutes")
 
     parts = [
@@ -1114,6 +1168,11 @@ def _render_essay_html(q: dict, index: int, show_answer: bool, include_rubric: b
 
     if time_est:
         parts.append(f"<p>Thời gian ước tính: {time_est} phút</p>")
+
+    if show_answer and solution:
+        parts.append("<div class='answer-block'>")
+        parts.append(f"<strong>Lời giải mẫu:</strong> {solution}")
+        parts.append("</div>")
 
     if include_rubric and rubric:
         parts.append("<div class='rubric'>")

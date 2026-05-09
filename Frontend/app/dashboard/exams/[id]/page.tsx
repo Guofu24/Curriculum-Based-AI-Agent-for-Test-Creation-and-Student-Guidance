@@ -87,6 +87,7 @@ interface McqEditForm {
   content?: string
   options: Record<string, string>
   rubric?: string
+  solution?: string
   bloom_level?: string
   correct_answer?: string
   [key: string]: unknown
@@ -422,6 +423,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
       options: optionsRecord,
       correct_answer: question.correct_answer,
       bloom_level: question.bloom_level,
+      solution: question.solution ?? '',
       rubric: question.rubric ? JSON.stringify(question.rubric) : '',
     })
   }
@@ -434,6 +436,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
       const updated = await examsApi.updateQuestion(id, questionId, {
         content: editForm.content,
         options: optionsArray,
+        solution: editForm.solution ? editForm.solution : undefined,
         rubric: editForm.rubric ? editForm.rubric : undefined,
         bloom_level: editForm.bloom_level as BloomLevel | undefined,
       })
@@ -1169,15 +1172,25 @@ function QuestionCard({
                   </>
                 )}
 
-                {question.type === 'essay' && (
-                  <Field>
-                    <FieldLabel>Rubric chấm điểm</FieldLabel>
-                    <Textarea
-                      value={editForm.rubric ?? ''}
-                      onChange={(e) => setEditForm({ ...editForm, rubric: e.target.value })}
-                      rows={4}
-                    />
-                  </Field>
+                {getQType(question) === 'essay' && (
+                  <>
+                    <Field>
+                      <FieldLabel>Lời giải mẫu</FieldLabel>
+                      <Textarea
+                        value={editForm.solution ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, solution: e.target.value })}
+                        rows={5}
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel>Rubric chấm điểm</FieldLabel>
+                      <Textarea
+                        value={editForm.rubric ?? ''}
+                        onChange={(e) => setEditForm({ ...editForm, rubric: e.target.value })}
+                        rows={4}
+                      />
+                    </Field>
+                  </>
                 )}
 
                 <Field>
@@ -1233,23 +1246,35 @@ function QuestionCard({
                   </div>
                 )}
 
-                {getQType(question) === 'essay' && question.rubric && (
+                {getQType(question) === 'essay' && (question.solution || question.rubric) && (
                   <div className="p-3 rounded-md bg-muted text-sm">
-                    <p className="font-medium mb-1">Rubric:</p>
-                    <div className="space-y-2 text-muted-foreground">
-                      {normalizeRubric(question.rubric).map((row, idx) => (
-                        <div key={`${row.score}-${idx}`} className="flex items-start gap-2">
-                          {row.score && (
-                            <span className="mt-0.5 min-w-10 rounded bg-background px-1.5 py-0.5 text-center text-xs font-semibold text-primary">
-                              {row.score}đ
-                            </span>
-                          )}
-                          <LatexRenderer className="flex-1 text-sm leading-relaxed">
-                            {row.description}
-                          </LatexRenderer>
+                    {question.solution && (
+                      <div className="mb-3 rounded-md border bg-background/70 p-2.5">
+                        <p className="font-medium mb-1">Lời giải mẫu:</p>
+                        <LatexRenderer className="text-sm leading-relaxed">
+                          {question.solution}
+                        </LatexRenderer>
+                      </div>
+                    )}
+                    {question.rubric && (
+                      <>
+                        <p className="font-medium mb-1">Rubric:</p>
+                        <div className="space-y-2 text-muted-foreground">
+                          {normalizeRubric(question.rubric).map((row, idx) => (
+                            <div key={`${row.score}-${idx}`} className="flex items-start gap-2">
+                              {row.score && (
+                                <span className="mt-0.5 min-w-10 rounded bg-background px-1.5 py-0.5 text-center text-xs font-semibold text-primary">
+                                  {row.score}đ
+                                </span>
+                              )}
+                              <LatexRenderer className="flex-1 text-sm leading-relaxed">
+                                {row.description}
+                              </LatexRenderer>
+                            </div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
+                      </>
+                    )}
                   </div>
                 )}
 
