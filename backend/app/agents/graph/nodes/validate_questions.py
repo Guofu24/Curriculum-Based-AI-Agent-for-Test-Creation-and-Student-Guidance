@@ -67,6 +67,29 @@ async def validate_questions(state: ExamGraphState) -> ExamGraphState:
         "issues": deduplicated_issues,
     })
 
+    # Publish targeted rebuild instructions directly to BuilderAgent (peer-to-peer)
+    if deduplicated_issues:
+        try:
+            from app.agents.messaging import AgentMessageBus
+            bus = AgentMessageBus(redis_client)
+            await bus.publish(
+                exam_id=exam_id,
+                sender="validator",
+                recipient="builder",
+                message_type="targeted_rebuild",
+                payload={
+                    "issues": deduplicated_issues,
+                    "failed_question_ids": list({i.get("question_id") for i in deduplicated_issues}),
+                    "correction_strategies": {
+                        i.get("question_id"): i.get("correction_strategy", "")
+                        for i in deduplicated_issues
+                        if i.get("correction_strategy")
+                    },
+                },
+            )
+        except Exception as _e:
+            logger.debug("targeted_rebuild publish failed (non-critical): %s", _e)
+
     return {
         **state,
         "validation_result": {

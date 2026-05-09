@@ -78,6 +78,17 @@ class ExamExporter:
                 raise ExamServiceError("Exam not found")
 
             questions = exam.questions or []
+            if not questions and exam.history:
+                # Fallback: recover from latest history snapshot if DB column is empty
+                latest = sorted(exam.history, key=lambda h: h.created_at, reverse=True)[0]
+                snapshot_q = (latest.snapshot or {}).get("questions", [])
+                if isinstance(snapshot_q, list) and snapshot_q:
+                    questions = snapshot_q
+                    import logging as _log
+                    _log.getLogger("app.utils.export").warning(
+                        "exam.questions empty for %s — recovered %d from history snapshot",
+                        exam_id, len(questions),
+                    )
             blueprint = exam.blueprint or {}
             html_content = self._render_html(exam, questions, blueprint, include_answers, include_blueprint)
 
@@ -128,6 +139,11 @@ class ExamExporter:
             raise ExamServiceError("Exam not found")
 
         questions = exam.questions or []
+        if not questions and exam.history:
+            latest = sorted(exam.history, key=lambda h: h.created_at, reverse=True)[0]
+            snapshot_q = (latest.snapshot or {}).get("questions", [])
+            if isinstance(snapshot_q, list) and snapshot_q:
+                questions = snapshot_q
         doc = self._build_docx(exam, questions, include_answers)
 
         buffer = BytesIO()
@@ -165,8 +181,12 @@ class ExamExporter:
         """
         title = html.escape(exam.title or "Đề kiểm tra")
         scope = exam.scope or []
-        mcq_questions = [q for q in questions if q.get("type") == "mcq" or q.get("question_type") == "mcq"]
-        essay_questions = [q for q in questions if q.get("type") == "essay" or q.get("question_type") == "essay"]
+        # Categorize all questions — never drop a question due to unknown type
+        mcq_questions = [q for q in questions if self._get_qtype(q) in ("mcq", "dung_sai", "short_answer")]
+        essay_questions = [q for q in questions if self._get_qtype(q) == "essay"]
+        # Any uncategorized questions fall into mcq_questions
+        categorized_ids = {id(q) for q in mcq_questions + essay_questions}
+        mcq_questions = mcq_questions + [q for q in questions if id(q) not in categorized_ids]
 
         html_parts: list[str] = [
             "<!DOCTYPE html>",
@@ -341,6 +361,39 @@ class ExamExporter:
         background-color: #e8f5e9;
         font-weight: bold;
     }}
+
+    /* Math rendering */
+    .math-inline {{
+        font-family: 'DejaVu Sans', 'Noto Sans', serif;
+        font-style: italic;
+        color: #1a1a1a;
+        white-space: nowrap;
+    }}
+    .math-block {{
+        display: block;
+        text-align: center;
+        font-family: 'DejaVu Sans', 'Noto Sans', serif;
+        font-style: italic;
+        margin: 0.5em 0;
+        color: #1a1a1a;
+    }}
+    /* Fraction rendering */
+    .math-frac {{
+        display: inline-block;
+        text-align: center;
+        vertical-align: middle;
+        font-size: 0.92em;
+        line-height: 1.1;
+    }}
+    .math-frac-num {{
+        display: block;
+        border-bottom: 1px solid currentColor;
+        padding: 0 3px 1px;
+    }}
+    .math-frac-den {{
+        display: block;
+        padding: 1px 3px 0;
+    }}
 </style>
 """
 
@@ -353,7 +406,8 @@ class ExamExporter:
 
     def _render_mcq_html(self, q: dict, index: int, include_answers: bool) -> str:
         """Render MCQ question. Options may be dict {A: text, B: text, ...} or list [{label, text}, ...]."""
-        stem = self._render_latex(html.escape(q.get("stem", "")))
+        raw_stem = q.get("stem") or q.get("content") or ""
+        stem = self._render_latex(html.escape(raw_stem))
         options = q.get("options", {})
         correct = str(q.get("correct_answer", "")).strip()
         explanation = html.escape(q.get("explanation", ""))
@@ -384,7 +438,8 @@ class ExamExporter:
 
     def _render_essay_html(self, q: dict, index: int, include_answers: bool) -> str:
         """Render essay question with rubric."""
-        stem = self._render_latex(html.escape(q.get("stem", "")))
+        raw_stem = q.get("stem") or q.get("content") or ""
+        stem = self._render_latex(html.escape(raw_stem))
         rubric = q.get("rubric") or []
         time_est = q.get("estimated_solve_time_minutes")
 
@@ -523,8 +578,12 @@ class ExamExporter:
 
         doc.add_paragraph()  # spacing
 
-        mcq_questions = [q for q in questions if q.get("type") == "mcq" or q.get("question_type") == "mcq"]
-        essay_questions = [q for q in questions if q.get("type") == "essay" or q.get("question_type") == "essay"]
+        # Categorize all questions — never drop a question due to unknown type
+        mcq_questions = [q for q in questions if self._get_qtype(q) in ("mcq", "dung_sai", "short_answer")]
+        essay_questions = [q for q in questions if self._get_qtype(q) == "essay"]
+        # Any uncategorized questions fall into mcq_questions
+        categorized_ids = {id(q) for q in mcq_questions + essay_questions}
+        mcq_questions = mcq_questions + [q for q in questions if id(q) not in categorized_ids]
 
         if mcq_questions:
             doc.add_heading("Phần I: Trắc nghiệm", level=2)
@@ -564,7 +623,7 @@ class ExamExporter:
         self, doc: Document, q: dict, index: int, include_answers: bool
     ) -> None:
         """Add a single MCQ question to the DOCX document."""
-        stem = self._strip_latex(q.get("stem", ""))
+        stem = self._strip_latex(q.get("stem") or q.get("content") or "")
         options = q.get("options", {})
         correct = str(q.get("correct_answer", "")).strip()
         explanation = q.get("explanation", "")
@@ -599,7 +658,7 @@ class ExamExporter:
         self, doc: Document, q: dict, index: int, include_answers: bool
     ) -> None:
         """Add a single essay question to the DOCX document."""
-        stem = self._strip_latex(q.get("stem", ""))
+        stem = self._strip_latex(q.get("stem") or q.get("content") or "")
         rubric = q.get("rubric") or []
         time_est = q.get("estimated_solve_time_minutes")
 
@@ -662,9 +721,24 @@ class ExamExporter:
                 rubric_str = "; ".join(f"{r.get('score', 0)}đ" for r in rubric)
                 row[3].text = rubric_str or "-"
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    def _get_qtype(self, q: dict) -> str:
+        """
+        Normalize question type from any field variant.
+        Returns 'mcq', 'essay', 'dung_sai', 'short_answer', or 'mcq' as default.
+        """
+        t = q.get("type") or q.get("question_type") or ""
+        t = str(t).lower().strip()
+        if t in ("essay", "tu_luan"):
+            return "essay"
+        if t in ("dung_sai",):
+            return "dung_sai"
+        if t in ("short_answer",):
+            return "short_answer"
+        # 'mcq' or any unrecognized type → treat as mcq
+        return "mcq"
 
     def _normalize_options(self, options) -> list[tuple[str, str]]:
+
         """
         Normalize question options to list of (label, text) tuples.
         Supports:
@@ -687,22 +761,153 @@ class ExamExporter:
         return []
 
     def _render_latex(self, text: str) -> str:
+        """LaTeX-to-HTML renderer for PDF export."""
+        text = re.sub(
+            r"\$\$(.+?)\$\$",
+            lambda m: f"<div class='math-block'>{self._latex_symbols(m.group(1), html_output=True)}</div>",
+            text, flags=re.DOTALL
+        )
+        text = re.sub(
+            r"\\\[(.+?)\\\]",
+            lambda m: f"<div class='math-block'>{self._latex_symbols(m.group(1), html_output=True)}</div>",
+            text, flags=re.DOTALL
+        )
+        text = re.sub(
+            r"\\\((.+?)\\\)",
+            lambda m: f"<span class='math-inline'>{self._latex_symbols(m.group(1), html_output=True)}</span>",
+            text, flags=re.DOTALL
+        )
+        text = re.sub(
+            r"(?<!\$)\$([^$\n]+?)\$(?!\$)",
+            lambda m: f"<span class='math-inline'>{self._latex_symbols(m.group(1), html_output=True)}</span>",
+            text
+        )
+        return text
+
+    def _latex_symbols(self, text: str, html_output: bool = False) -> str:
         """
-        Basic LaTeX-to-HTML renderer for inline math in PDF.
-        Converts $...$ → <em>...</em> (simple fallback for WeasyPrint).
-        For full LaTeX rendering use WeasyPrint's MathML support or
-        a proper converter like MathJax/KaTeX in post-processing.
+        Convert LaTeX symbols to HTML/Unicode.
+        html_output=True → render fractions as styled HTML (for WeasyPrint PDF).
+        html_output=False → plain Unicode text (for DOCX).
         """
-        # Inline math: $...$
-        text = re.sub(r"\$([^$]+)\$", r"<em>\1</em>", text)
+        # \left\right bracket pairs
+        text = re.sub(r"\\left\s*\|(.+?)\\right\s*\|", r"|\1|", text, flags=re.DOTALL)
+        text = re.sub(r"\\left\s*\((.+?)\\right\s*\)", r"(\1)", text, flags=re.DOTALL)
+        text = re.sub(r"\\left\s*\[(.+?)\\right\s*\]", r"[\1]", text, flags=re.DOTALL)
+        text = re.sub(r"\\left\s*\{(.+?)\\right\s*\}", r"{\1}", text, flags=re.DOTALL)
+        text = re.sub(r"\\(?:left|right)\s*[.|\[\](){}]?", "", text)
+
+        # Fractions: \frac{a}{b} and \dfrac{a}{b}
+        if html_output:
+            text = re.sub(
+                r"\\d?frac\{([^}]+)\}\{([^}]+)\}",
+                lambda m: (
+                    f"<span class='math-frac'>"
+                    f"<span class='math-frac-num'>{m.group(1)}</span>"
+                    f"<span class='math-frac-den'>{m.group(2)}</span>"
+                    f"</span>"
+                ),
+                text,
+            )
+        else:
+            text = re.sub(r"\\d?frac\{([^}]+)\}\{([^}]+)\}", r"\1/\2", text)
+
+        # Binomial coefficient: \binom{n}{k}
+        text = re.sub(r"\\binom\{([^}]+)\}\{([^}]+)\}", r"C(\1,\2)", text)
+
+        # Vector decorators (Unicode combining chars — best for single-char variables)
+        text = re.sub(r"\\vec\{([^}]*)\}", lambda m: m.group(1) + "⃗", text)       # ⃗
+        text = re.sub(r"\\hat\{([^}]*)\}", lambda m: m.group(1) + "̂", text)       # ̂
+        text = re.sub(r"\\overline\{([^}]*)\}", lambda m: m.group(1) + "̅", text)  # ̄
+        text = re.sub(r"\\bar\{([^}]*)\}", lambda m: m.group(1) + "̅", text)       # ̄
+        text = re.sub(r"\\tilde\{([^}]*)\}", lambda m: m.group(1) + "̃", text)     # ̃
+        text = re.sub(r"\\dot\{([^}]*)\}", lambda m: m.group(1) + "̇", text)       # ̇
+        text = re.sub(r"\\ddot\{([^}]*)\}", lambda m: m.group(1) + "̈", text)      # ̈
+        text = re.sub(r"\\widehat\{([^}]*)\}", lambda m: m.group(1) + "̂", text)   # ̂
+
+        # Superscript and subscript
+        text = re.sub(r"\^\{([^}]+)\}", r"<sup>\1</sup>", text)
+        text = re.sub(r"\^([A-Za-z0-9+\-])", r"<sup>\1</sup>", text)
+        text = re.sub(r"_\{([^}]+)\}", r"<sub>\1</sub>", text)
+        text = re.sub(r"_([A-Za-z0-9+\-])", r"<sub>\1</sub>", text)
+
+        # Sqrt: \sqrt[n]{x} and \sqrt{x}
+        text = re.sub(r"\\sqrt\[([^\]]+)\]\{([^}]+)\}", r"ⁿ√(\2)", text)
+        text = re.sub(r"\\sqrt\{([^}]+)\}", r"√(\1)", text)
+        text = re.sub(r"\\sqrt\b", r"√", text)
+
+        # Greek letters
+        greek = {
+            r"\\varepsilon": "ε", r"\\varphi": "φ", r"\\vartheta": "θ",
+            r"\\alpha": "α", r"\\beta": "β", r"\\gamma": "γ", r"\\delta": "δ",
+            r"\\epsilon": "ε", r"\\zeta": "ζ", r"\\eta": "η", r"\\theta": "θ",
+            r"\\lambda": "λ", r"\\mu": "μ", r"\\nu": "ν", r"\\xi": "ξ",
+            r"\\pi": "π", r"\\rho": "ρ", r"\\sigma": "σ", r"\\tau": "τ",
+            r"\\phi": "φ", r"\\chi": "χ", r"\\psi": "ψ", r"\\omega": "ω",
+            r"\\Gamma": "Γ", r"\\Delta": "Δ", r"\\Theta": "Θ", r"\\Lambda": "Λ",
+            r"\\Xi": "Ξ", r"\\Pi": "Π", r"\\Sigma": "Σ", r"\\Phi": "Φ",
+            r"\\Psi": "Ψ", r"\\Omega": "Ω",
+        }
+        for pat, sym in greek.items():
+            text = re.sub(pat, sym, text)
+
+        # Math operators
+        ops = {
+            r"\\times": "×", r"\\div": "÷", r"\\pm": "±", r"\\mp": "∓",
+            r"\\leq": "≤", r"\\geq": "≥", r"\\neq": "≠", r"\\approx": "≈",
+            r"\\infty": "∞", r"\\sum": "Σ", r"\\int": "∫", r"\\cdot": "·",
+            r"\\cdots": "⋯", r"\\ldots": "…", r"\\rightarrow": "→",
+            r"\\leftarrow": "←", r"\\Rightarrow": "⇒", r"\\Leftarrow": "⇐",
+            r"\\leftrightarrow": "↔", r"\\Leftrightarrow": "⇔",
+            r"\\in": "∈", r"\\notin": "∉", r"\\subset": "⊂", r"\\cup": "∪",
+            r"\\cap": "∩", r"\\forall": "∀", r"\\exists": "∃",
+            r"\\equiv": "≡", r"\\propto": "∝", r"\\perp": "⊥",
+            r"\\parallel": "∥", r"\\angle": "∠", r"\\triangle": "△",
+            r"\\nabla": "∇", r"\\partial": "∂", r"\\hbar": "ℏ",
+            r"\\circ": "°", r"\\degree": "°",
+        }
+        for pat, sym in ops.items():
+            text = re.sub(pat, sym, text)
+
+        # Remove text/font commands but keep their content
+        text = re.sub(
+            r"\\(?:text|mathrm|mathbf|mathit|mathbb|operatorname|boldsymbol|mathcal|mathscr)\{([^}]+)\}",
+            r"\1", text,
+        )
+        # Remove sizing/spacing commands
+        text = re.sub(r"\\(?:,|;|:|!|quad|qquad|enspace|thinspace)\b", " ", text)
+        text = re.sub(r"\\(?:big|Big|bigg|Bigg)[lgr]?\s*", "", text)
+        # Generic: \cmd{content} → content (for unknown commands with args)
+        text = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", text)
+        # Remove remaining bare \commands
+        text = re.sub(r"\\[a-zA-Z]+\b", "", text)
+        # Remove remaining braces
+        text = re.sub(r"[{}]", "", text)
         return text
 
     def _strip_latex(self, text: str) -> str:
         """
-        Strip LaTeX math delimiters for DOCX output.
-        $x^2$ → x^2
+        Strip LaTeX math delimiters and commands for DOCX plain-text output.
+        Converts math to readable Unicode where possible.
         """
-        return re.sub(r"\$([^$]+)\$", r"\1", text)
+        # Display math blocks: $$...$$ and \[...\]
+        text = re.sub(r"\$\$(.+?)\$\$", lambda m: self._latex_to_plain(m.group(1)), text, flags=re.DOTALL)
+        text = re.sub(r"\\\[(.+?)\\\]", lambda m: self._latex_to_plain(m.group(1)), text, flags=re.DOTALL)
+        # Inline math: \(...\)
+        text = re.sub(r"\\\((.+?)\\\)", lambda m: self._latex_to_plain(m.group(1)), text, flags=re.DOTALL)
+        # Inline math: $...$
+        text = re.sub(r"(?<!\$)\$([^$\n]+?)\$(?!\$)", lambda m: self._latex_to_plain(m.group(1)), text)
+        return text
+
+    def _latex_to_plain(self, text: str) -> str:
+        """
+        Convert LaTeX math expression to plain Unicode text for DOCX.
+        Applies the same symbol conversions as _latex_symbols but returns plain text.
+        """
+        result = self._latex_symbols(text)
+        # Remove HTML tags that _latex_symbols might have added
+        result = re.sub(r"<[^>]+>", "", result)
+        return result
 
 
 # ── Legacy standalone functions (backwards-compatible) ───────────────────────

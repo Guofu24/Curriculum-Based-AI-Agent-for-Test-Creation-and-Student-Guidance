@@ -107,6 +107,9 @@ class RetrievalAgent:
         query_hints: list[str] | None = None,
         trace_id: str = "",
         scope_sections: list[str] | None = None,
+        scope_section_ids: list[str] | None = None,
+        prereq_chapters: list[str] | None = None,
+        prereq_section_ids: list[str] | None = None,
     ) -> RetrievalOutput:
         """Main retrieval method."""
         start_time = time.time()
@@ -141,10 +144,19 @@ class RetrievalAgent:
             # NOTE: Models (bge-m3 + CrossEncoder) are pre-loaded at server startup
             # via lifespan in main.py — no per-request warmup needed.
 
+            # Merge primary scope + prerequisite chapters for retrieval/reranking.
+            # prereq_chapters are treated as scope for coverage guarantees but excluded
+            # from scope_sections filtering (they provide background context only).
+            effective_scope = list(scope_chapters) + [
+                ch for ch in (prereq_chapters or []) if ch not in scope_chapters
+            ]
+            prereq_ch_set: set[str] = set(prereq_chapters or [])
+            prereq_sec_set: set[str] = set(prereq_section_ids or [])
+
             # Step 2: Single document query (no per-chapter namespace split).
             # With single namespace per document, one query retrieves all relevant
             # vectors. We boost top_k to cover all chapters in scope.
-            boosted_top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(scope_chapters), 3)
+            boosted_top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(effective_scope), 3)
             all_chunks, retrieval_warnings = await self._parallel_query_chapters(
                 document_id=document_id,
                 chapters=["_all"],  # Single query to whole document namespace
@@ -160,7 +172,7 @@ class RetrievalAgent:
             MIN_CHUNKS_PER_CHAPTER = 5
             supplement_chunks, supplement_warnings = await self._supplement_missing_chapters(
                 document_id=document_id,
-                scope_chapters=scope_chapters,
+                scope_chapters=effective_scope,
                 existing_chunks=all_chunks,
                 expanded_queries=expanded_queries,
                 min_per_chapter=MIN_CHUNKS_PER_CHAPTER,
@@ -177,6 +189,9 @@ class RetrievalAgent:
                 )
             warnings.extend(supplement_warnings)
 
+            # (Step 2c moved: prereq section supplement runs AFTER rerank+budget+filter
+            #  so chunks are guaranteed to survive — see "protected_prereq_chunks" below)
+
             # Step 3: Rerank — guarantee scope chapters BEFORE token budget cut.
             #
             # Bug fix: the old per-chapter rerank grouped ALL chunks (from all 29
@@ -192,8 +207,9 @@ class RetrievalAgent:
             MIN_SCOPE_CHUNKS = 5  # minimum chunks per scope chapter
 
             # Normalize scope chapter IDs once (handles ch18 → ch18, roman numerals, etc.)
+            # Use effective_scope (primary + prereq) so all scope chunks get guaranteed coverage.
             scope_ch_ids: set[str] = set()
-            for ch in scope_chapters:
+            for ch in effective_scope:
                 nid = normalize_chapter_id(ch)
                 scope_ch_ids.add(nid)
                 scope_ch_ids.add(ch)  # also keep original string
@@ -269,32 +285,115 @@ class RetrievalAgent:
             if token_warning:
                 warnings.append(token_warning)
 
-            # ── Section filter: keep only chunks whose section matches scope_sections ──
-            if scope_sections:
+            # ── Section filter: prefer canonical section_id filter; fallback to title filter ──
+            # Prerequisite chunks (prereq_ch_set) always bypass — they provide background context.
+            if scope_section_ids or scope_sections:
                 import unicodedata
                 def _strip_d(s: str) -> str:
                     nfd = unicodedata.normalize("NFD", s.strip().lower())
                     return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-                scope_sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
-                if scope_sec_set:
-                    filtered_chunks: list[dict] = []
-                    all_section_titles: set[str] = set()
+
+                # Normalize prereq chapter IDs for exclusion check
+                prereq_norm_ids: set[str] = set()
+                for pch in prereq_ch_set:
+                    prereq_norm_ids.add(normalize_chapter_id(pch))
+                    prereq_norm_ids.add(pch)
+
+                # Primary filter: canonical section_id (exact set match — reliable)
+                if scope_section_ids:
+                    sec_id_set = set(scope_section_ids)
+                    filtered_chunks_id: list[dict] = []
                     for chunk in all_chunks:
-                        chunk_sec = (chunk.get("metadata", {}).get("section") or "").strip()
-                        chunk_sec_norm = _strip_d(chunk_sec)
-                        if chunk_sec_norm:
-                            all_section_titles.add(chunk_sec_norm)
-                        if chunk_sec_norm and chunk_sec_norm in scope_sec_set:
-                            filtered_chunks.append(chunk)
+                        ch_raw = chunk.get("metadata", {}).get("chapter", "")
+                        ch_norm = normalize_chapter_id(ch_raw)
+                        chunk_sec_id = (chunk.get("metadata", {}).get("section_id") or "").strip()
+                        # Bypass: prereq chapter OR prereq section → always keep (will be tagged background)
+                        if (
+                            ch_norm in prereq_norm_ids
+                            or ch_raw in prereq_norm_ids
+                            or (chunk_sec_id and chunk_sec_id in prereq_sec_set)
+                        ):
+                            filtered_chunks_id.append(chunk)
+                            continue
+                        if chunk_sec_id in sec_id_set:
+                            filtered_chunks_id.append(chunk)
                     logger.info(
-                        "[retrieve] scope_sections=%r → filtered %d chunks (from %d). "
-                        "Chunk sections found: %s",
-                        sorted(scope_sec_set), len(filtered_chunks), len(all_chunks),
-                        sorted(all_section_titles),
+                        "[retrieve] scope_section_ids=%r → filtered %d chunks (from %d via section_id)",
+                        sorted(sec_id_set), len(filtered_chunks_id), len(all_chunks),
                     )
-                    if filtered_chunks:
-                        all_chunks = filtered_chunks
-                    # If filtering removed everything, warn but keep chunks (fallback)
+                    if filtered_chunks_id:
+                        all_chunks = filtered_chunks_id
+                    else:
+                        logger.warning(
+                            "[retrieve] section_id filter returned 0 chunks — falling back to title filter"
+                        )
+                        # Fall through to title filter below
+                        scope_section_ids = None  # type: ignore[assignment]
+
+                # Fallback filter: title-based (diacritic-stripped string match)
+                if not scope_section_ids and scope_sections:
+                    scope_sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
+                    if scope_sec_set:
+                        filtered_chunks: list[dict] = []
+                        all_section_titles: set[str] = set()
+                        for chunk in all_chunks:
+                            ch_raw = chunk.get("metadata", {}).get("chapter", "")
+                            ch_norm = normalize_chapter_id(ch_raw)
+                            chunk_sec_id_fb = (chunk.get("metadata", {}).get("section_id") or "").strip()
+                            # Bypass: prereq chapter OR prereq section → always keep (will be tagged background)
+                            if (
+                                ch_norm in prereq_norm_ids
+                                or ch_raw in prereq_norm_ids
+                                or (chunk_sec_id_fb and chunk_sec_id_fb in prereq_sec_set)
+                            ):
+                                filtered_chunks.append(chunk)
+                                continue
+                            chunk_sec = (chunk.get("metadata", {}).get("section") or "").strip()
+                            chunk_sec_norm = _strip_d(chunk_sec)
+                            if chunk_sec_norm:
+                                all_section_titles.add(chunk_sec_norm)
+                            if chunk_sec_norm and chunk_sec_norm in scope_sec_set:
+                                filtered_chunks.append(chunk)
+                        logger.info(
+                            "[retrieve] scope_sections (title fallback)=%r → filtered %d chunks (from %d). "
+                            "Chunk sections found: %s",
+                            sorted(scope_sec_set), len(filtered_chunks), len(all_chunks),
+                            sorted(all_section_titles),
+                        )
+                        if filtered_chunks:
+                            all_chunks = filtered_chunks
+                        # Both section_id and title filters failed — last-resort: keep full set.
+                        # Log a SCOPE_ISOLATION_BREACH so it's easy to find in logs.
+                        else:
+                            logger.warning(
+                                "[retrieve] SCOPE_ISOLATION_BREACH — both section_id and title "
+                                "filters returned 0 chunks. Keeping full retrieved set.\n"
+                                "  requested scope_sections=%r\n"
+                                "  chunk sections available=%r\n"
+                                "  Cause: metadata mismatch (likely pre-reindex document).",
+                                sorted(scope_sec_set),
+                                sorted(all_section_titles),
+                            )
+
+            # Step 2c (deferred): Guaranteed inject prereq section chunks AFTER all
+            # rerank / token-budget / section-filter passes so they cannot be dropped.
+            # These chunks bypass rerank scoring and budget pruning entirely.
+            if prereq_sec_set and document_id:
+                protected_chunks, protect_warnings = await self._supplement_prereq_sections(
+                    document_id=document_id,
+                    prereq_section_ids=list(prereq_sec_set),
+                    existing_chunks=all_chunks,  # only fetch what's still missing
+                    expanded_queries=expanded_queries,
+                )
+                if protected_chunks:
+                    existing_ids_post = {c["chunk_id"] for c in all_chunks}
+                    injected = [c for c in protected_chunks if c["chunk_id"] not in existing_ids_post]
+                    all_chunks.extend(injected)
+                    logger.info(
+                        "[prereq_section_protect] injected %d chunks after filter pipeline",
+                        len(injected),
+                    )
+                warnings.extend(protect_warnings)
 
             # Build coverage map
             coverage_map: dict[str, list[str]] = {}
@@ -304,20 +403,39 @@ class RetrievalAgent:
                     coverage_map[ch] = []
                 coverage_map[ch].append(chunk["chunk_id"])
 
-            # Step 4: Build response
-            retrieved_chunks = [
-                {
+            # Step 4: Build response — tag each chunk with role: "primary" | "background"
+            # A chunk is "background" if:
+            #   (a) its chapter_id is in prereq_ch_set (chapter-level prereq), OR
+            #   (b) its section_id is in prereq_sec_set (section-level prereq)
+            # Background chunks provide context for the builder but MUST NOT be used
+            # to generate questions.
+            prereq_norm_ids_for_tag: set[str] = set()
+            for pch in prereq_ch_set:
+                prereq_norm_ids_for_tag.add(normalize_chapter_id(pch))
+                prereq_norm_ids_for_tag.add(pch)
+
+            retrieved_chunks = []
+            for c in all_chunks:
+                ch_raw = c["metadata"].get("chapter_id", "") or c["metadata"].get("chapter", "")
+                ch_norm = normalize_chapter_id(ch_raw)
+                sec_id_val = c["metadata"].get("section_id", "")
+                is_prereq = (
+                    ch_raw in prereq_norm_ids_for_tag
+                    or ch_norm in prereq_norm_ids_for_tag
+                    or (sec_id_val and sec_id_val in prereq_sec_set)
+                )
+                retrieved_chunks.append({
                     "chunk_id": c["chunk_id"],
                     "chapter": c["metadata"].get("chapter", ""),
                     "chapter_id": c["metadata"].get("chapter_id", ""),
                     "section": c["metadata"].get("section", ""),
+                    "section_id": c["metadata"].get("section_id", ""),
                     "content": c["metadata"].get("content", ""),
                     "content_type": c["metadata"].get("content_type", "text"),
                     "relevance_score": c.get("score", 0.0),
                     "latex_repr": c["metadata"].get("latex_repr"),
-                }
-                for c in all_chunks
-            ]
+                    "role": "background" if is_prereq else "primary",
+                })
 
             elapsed_ms = int((time.time() - start_time) * 1000)
             usage = metrics.prompt_tokens + metrics.completion_tokens
@@ -360,6 +478,7 @@ class RetrievalAgent:
         query_hints: list[str] | None = None,
         trace_id: str = "",
         scope_sections: list[str] | None = None,
+        scope_section_ids: list[str] | None = None,  # accepted but unused (textbook ns has no section_id)
     ) -> RetrievalOutput:
         """
         Retrieval for built-in textbook knowledge (admin-uploaded namespace).
@@ -378,12 +497,31 @@ class RetrievalAgent:
             query_text = " ".join(expanded_queries[:3])
             embedding = await self.embedder.embed_text(query_text)
 
-            # Build chapter filter: {"chapter": {"$in": [...]}} if chapters specified
-            filter_meta: dict | None = None
-            if scope_chapters:
-                filter_meta = {"chapter": {"$in": scope_chapters}}
+            # Separate "Chapter > Section" compound entries (sent by FE partial selection).
+            # Pinecone metadata.chapter stores pure chapter names — strip " > section" suffix.
+            pure_chapters: list[str] = []
+            auto_sections: list[str] = []
+            for _ch in (scope_chapters or []):
+                if " > " in _ch:
+                    _ch_part, _sec_part = _ch.split(" > ", 1)
+                    pure_chapters.append(_ch_part.strip())
+                    if _sec_part.strip():
+                        auto_sections.append(_sec_part.strip())
+                else:
+                    pure_chapters.append(_ch)
+            # Merge caller-provided scope_sections with auto-extracted ones (dedup, preserve order)
+            effective_sections: list[str] | None = scope_sections
+            if auto_sections:
+                _merged = list(dict.fromkeys((scope_sections or []) + auto_sections))
+                effective_sections = _merged
 
-            top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(scope_chapters), 3)
+            # Build chapter filter with pure chapter names (no " > Section" contamination)
+            filter_meta: dict | None = None
+            _unique_chapters = list(dict.fromkeys(pure_chapters))
+            if _unique_chapters:
+                filter_meta = {"chapter": {"$in": _unique_chapters}}
+
+            top_k = settings.RAG_TOP_K_PER_CHAPTER * max(len(_unique_chapters) if _unique_chapters else 1, 3)
             all_chunks = await self.vector_store.query_textbook_namespace(
                 namespace=textbook_namespace,
                 query_embedding=embedding,
@@ -391,20 +529,29 @@ class RetrievalAgent:
                 filter_metadata=filter_meta,
             )
 
-            # Section filter
-            if scope_sections and all_chunks:
+            # Section filter — uses effective_sections (merged from explicit + auto-extracted)
+            if effective_sections and all_chunks:
                 import unicodedata
                 def _strip_d(s: str) -> str:
                     nfd = unicodedata.normalize("NFD", s.strip().lower())
                     return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-                sec_set = {_strip_d(s) for s in scope_sections if s.strip()}
+                sec_set = {_strip_d(s) for s in effective_sections if s.strip()}
                 filtered = [
                     c for c in all_chunks
                     if _strip_d(c.get("metadata", {}).get("title") or "") in sec_set
                     or _strip_d(c.get("metadata", {}).get("section") or "") in sec_set
                 ]
+                logger.info(
+                    "[retrieve_textbook] section filter: sec_set=%r, matched=%d/%d",
+                    sorted(sec_set), len(filtered), len(all_chunks),
+                )
                 if filtered:
                     all_chunks = filtered
+                else:
+                    logger.warning(
+                        "[retrieve_textbook] section filter returned 0 chunks — "
+                        "keeping full chapter result (textbook has no canonical section_id)"
+                    )
 
             all_chunks, token_warning = self._enforce_token_budget(
                 all_chunks, max_tokens=settings.MAX_CONTEXT_TOKENS
@@ -684,6 +831,75 @@ Trả về JSON:
                         )
             except Exception as exc:
                 warnings.append(f"Supplement query failed for chapter '{chapter}': {exc}")
+
+        return supplement, warnings
+
+    async def _supplement_prereq_sections(
+        self,
+        document_id: str,
+        prereq_section_ids: list[str],
+        existing_chunks: list[dict],
+        expanded_queries: list[str],
+        min_per_section: int = 3,
+    ) -> tuple[list[dict], list[str]]:
+        """Guarantee at least min_per_section chunks from each prereq section_id.
+
+        Performs a targeted Pinecone query filtered by section_id for any prereq
+        section that is not already represented in existing_chunks.  This ensures
+        background prereq knowledge is always present in context even if the
+        initial semantic search did not surface those chunks.
+        """
+        warnings: list[str] = []
+        supplement: list[dict] = []
+
+        # Count how many chunks we already have per section_id
+        coverage: dict[str, int] = {}
+        for chunk in existing_chunks:
+            sid = chunk.get("metadata", {}).get("section_id", "")
+            if sid:
+                coverage[sid] = coverage.get(sid, 0) + 1
+
+        # Build shared embedding once
+        query_text = " ".join(expanded_queries[:3])
+        try:
+            embedding = await self.embedder.embed_text(query_text)
+        except Exception as exc:
+            warnings.append(f"[supplement_prereq_sections] embedding failed: {exc}")
+            return supplement, warnings
+
+        for sec_id in prereq_section_ids:
+            existing_count = coverage.get(sec_id, 0)
+            if existing_count >= min_per_section:
+                continue  # Already represented
+
+            need = min_per_section - existing_count
+            logger.info(
+                "[supplement_prereq_sections] section_id=%r has %d chunks, fetching %d more",
+                sec_id, existing_count, need,
+            )
+            try:
+                results = await self.vector_store.query_namespace(
+                    doc_id=document_id,
+                    chapter_id="_all",  # search whole namespace
+                    query_embedding=embedding,
+                    top_k=max(need * 2, 10),
+                    filter_metadata={"section_id": {"$eq": sec_id}},
+                )
+                if results:
+                    supplement.extend(results)
+                    logger.info(
+                        "[supplement_prereq_sections] section_id=%r → fetched %d chunks",
+                        sec_id, len(results),
+                    )
+                else:
+                    warnings.append(
+                        f"[supplement_prereq_sections] section_id={sec_id!r} returned 0 chunks "
+                        "— may not be indexed or section_id metadata missing."
+                    )
+            except Exception as exc:
+                warnings.append(
+                    f"[supplement_prereq_sections] query failed for section_id={sec_id!r}: {exc}"
+                )
 
         return supplement, warnings
 

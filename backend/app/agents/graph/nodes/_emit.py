@@ -37,9 +37,9 @@ def _emit(state: "ExamGraphState", event: dict) -> None:
         try:
             loop.create_task(_emit_async(manager, exam_id, event))
         except Exception as e:
-            logger.debug(f"_emit: create_task failed (non-critical): {e}")
-    except Exception:
-        pass
+            logger.debug("_emit: create_task failed (non-critical): %s", e)
+    except Exception as e:
+        logger.debug("_emit: setup failed (non-critical): %s", e)
 
 
 async def _emit_async(manager, exam_id: str, event: dict) -> None:

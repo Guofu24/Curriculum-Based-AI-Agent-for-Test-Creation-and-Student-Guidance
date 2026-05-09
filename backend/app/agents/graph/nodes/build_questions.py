@@ -44,6 +44,30 @@ async def build_questions(state: ExamGraphState) -> ExamGraphState:
 
     builder_agent = BuilderAgent(redis_client=redis_client)
 
+    # Consume targeted_rebuild messages from ValidatorAgent (peer-to-peer via message bus)
+    # These carry correction_strategy per question_id, richer than state retry_issues alone
+    _bus_correction_strategies: dict[str, str] = {}
+    try:
+        from app.agents.messaging import AgentMessageBus
+        bus = AgentMessageBus(redis_client)
+        rebuild_msgs = await bus.consume(exam_id, recipient="builder", message_types=["targeted_rebuild"])
+        for msg in rebuild_msgs:
+            for qid, strategy in msg.payload.get("correction_strategies", {}).items():
+                existing = _bus_correction_strategies.get(qid, "")
+                _bus_correction_strategies[qid] = (existing + "\n" + strategy).strip() if existing else strategy
+    except Exception as _e:
+        logger.debug("targeted_rebuild consume failed (non-critical): %s", _e)
+
+    # Apply PlannerAgent overrides (only when plan_type == "complex")
+    _plan = state.get("execution_plan") or []
+    for _step in _plan:
+        if _step.get("tool") == "tool_build_questions":
+            _ov = _step.get("params_override") or {}
+            if _ov.get("scope_chapters"):
+                scope = list(_ov["scope_chapters"])
+                logger.info("execution_plan override: scope_chapters=%s for exam %s", scope, exam_id)
+            break
+
     # Filter blueprint: if retry_issues exists, exclude good slots
     if retry_issues:
         bad_ids = {issue["question_id"] for issue in retry_issues}
@@ -63,6 +87,15 @@ async def build_questions(state: ExamGraphState) -> ExamGraphState:
         "chunk": f"Bắt đầu sinh {total} câu hỏi từ blueprint...\n",
     })
 
+    # Build correction_strategies: merge state retry_issues + bus messages from ValidatorAgent
+    correction_strategies: dict[str, str] = dict(_bus_correction_strategies)
+    for issue in retry_issues:
+        qid = issue.get("question_id", "")
+        strategy = issue.get("correction_strategy", "")
+        if qid and strategy:
+            existing = correction_strategies.get(qid, "")
+            correction_strategies[qid] = (existing + "\n" + strategy).strip() if existing else strategy
+
     builder_result = await builder_agent.build(
         blueprint=filtered_blueprint,
         retrieved_context=retrieved_context,
@@ -70,6 +103,7 @@ async def build_questions(state: ExamGraphState) -> ExamGraphState:
         allowed_concepts=allowed_concepts,
         scope_chapters=scope,
         trace_id=exam_id,
+        correction_strategies=correction_strategies or None,
     )
 
     new_questions = list(getattr(builder_result, "questions", []))

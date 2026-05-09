@@ -81,6 +81,47 @@ def semantic_chunk(
         return _simple_chunk(markdown, heading_tree, chunk_size, chunk_overlap)
 
 
+def _build_heading_tree_lookup(
+    heading_tree: dict,
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """
+    Build lookup maps from heading_tree:
+      - title_to_chapter_id: {lowercase_chapter_title -> canonical chapter_id}
+      - ch_sec_lookup:       {chapter_id -> {lowercase/norm_section_title -> section_id}}
+
+    Using per-chapter section lookup prevents cross-chapter title collisions
+    (e.g. two chapters both having a section named "Bài tập").
+
+    Returns (title_to_chapter_id, ch_sec_lookup).
+    """
+    import unicodedata
+
+    def _norm(s: str) -> str:
+        nfd = unicodedata.normalize("NFD", s.strip().lower())
+        return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+    title_to_chapter_id: dict[str, str] = {}
+    ch_sec_lookup: dict[str, dict[str, str]] = {}  # chapter_id → {sec_title_norm → sec_id}
+
+    for ch in heading_tree.get("chapters", []):
+        ch_title = ch.get("title", "").strip()
+        ch_id = ch.get("chapter_id", "")
+        if ch_title and ch_id:
+            title_to_chapter_id[ch_title.lower()] = ch_id
+            title_to_chapter_id[_norm(ch_title)] = ch_id
+        if ch_id:
+            sec_map: dict[str, str] = {}
+            for sec in ch.get("sections", []):
+                sec_title = sec.get("title", "").strip()
+                sec_id = sec.get("section_id", "")
+                if sec_title and sec_id:
+                    sec_map[sec_title.lower()] = sec_id
+                    sec_map[_norm(sec_title)] = sec_id
+            ch_sec_lookup[ch_id] = sec_map
+
+    return title_to_chapter_id, ch_sec_lookup
+
+
 def _simple_chunk(
     markdown: str,
     heading_tree: dict,
@@ -90,14 +131,19 @@ def _simple_chunk(
     """
     Fallback simple chunking when LlamaIndex is not available.
     Splits by paragraphs while preserving heading context.
-    Uses heading_tree to get canonical chapter_id for each heading.
+    Uses heading_tree to get canonical chapter_id and section_id for each heading.
     """
-    # Build title → canonical chapter_id lookup from heading_tree (case-insensitive)
-    title_to_canonical_id: dict[str, str] = {}
-    for ch in heading_tree.get("chapters", []):
-        ch_title = ch.get("title", "").strip().lower()
-        if ch_title and ch.get("chapter_id"):
-            title_to_canonical_id[ch_title] = ch["chapter_id"]
+    import unicodedata
+
+    def _norm(s: str) -> str:
+        nfd = unicodedata.normalize("NFD", s.strip().lower())
+        return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+    # Build canonical lookups from heading_tree (per-chapter for sections)
+    title_to_chapter_id, ch_sec_lookup = _build_heading_tree_lookup(heading_tree)
+
+    # Legacy compat: title_to_chapter_id already contains lowercase chapter titles
+    title_to_canonical_id_compat = title_to_chapter_id
 
     lines = markdown.split("\n")
     chunks: list[dict] = []
@@ -151,7 +197,7 @@ def _simple_chunk(
                     current_size = 0
                 current_chapter = title
                 # Use canonical chapter_id from heading_tree if available
-                canonical = title_to_canonical_id.get(title.lower())
+                canonical = title_to_canonical_id_compat.get(title.lower())
                 if canonical:
                     current_chapter_id = canonical
                 else:
@@ -169,7 +215,10 @@ def _simple_chunk(
                     current_chunks = [line]
                     current_size = len(line)
                 current_section = title
-                current_section_id = f"{current_chapter_id}_sec{_count_sections(chunks, current_chapter_id) + 1}"
+                # Lookup canonical section_id per current chapter (avoids cross-chapter collisions)
+                _ch_sec_map = ch_sec_lookup.get(current_chapter_id, {})
+                _sec_id = _ch_sec_map.get(title.lower()) or _ch_sec_map.get(_norm(title))
+                current_section_id = _sec_id or f"{current_chapter_id}_sec{_count_sections(chunks, current_chapter_id) + 1}"
 
             elif level == 3:
                 current_chunks.append(line)
@@ -195,13 +244,32 @@ def _get_heading_context(metadata: dict, heading_tree: dict) -> tuple[str, str, 
     Extract heading context (chapter, chapter_id, section, section_id)
     from LlamaIndex node metadata and heading tree.
 
+    section_id is now resolved from heading_tree canonical IDs (e.g. "ch1_sec2")
+    instead of a slug derived from the raw title text.
+
     Returns (chapter, chapter_id, section, section_id).
     chapter_id is guaranteed non-empty if heading_tree has chapters.
     """
+    import unicodedata
+
+    def _norm(s: str) -> str:
+        nfd = unicodedata.normalize("NFD", s.strip().lower())
+        return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
     chapter = ""
     chapter_id = ""
     section = ""
     section_id = ""
+
+    # Build canonical lookup maps from heading_tree (per-chapter for sections)
+    _, ch_sec_lookup = _build_heading_tree_lookup(heading_tree)
+    title_to_ch_id: dict[str, str] = {}
+    for ch in heading_tree.get("chapters", []):
+        ch_title = ch.get("title", "").strip()
+        ch_id = ch.get("chapter_id", "")
+        if ch_title and ch_id:
+            title_to_ch_id[ch_title.lower()] = ch_id
+            title_to_ch_id[_norm(ch_title)] = ch_id
 
     prev_heading = metadata.get("prev_heading", "")
     if prev_heading:
@@ -209,14 +277,23 @@ def _get_heading_context(metadata: dict, heading_tree: dict) -> tuple[str, str, 
         if match:
             level = len(match.group(1))
             title = match.group(2).strip()
-            heading_id = _title_to_id(title)
             if level == 1:
                 chapter = title
-                chapter_id = heading_id  # NEVER empty string (fixed in _title_to_id)
+                chapter_id = (
+                    title_to_ch_id.get(title.lower())
+                    or title_to_ch_id.get(_norm(title))
+                    or _title_to_id(title)
+                )
             elif level == 2:
                 section = title
-                section_id = heading_id
                 chapter_id = metadata.get("chapter_id", "")
+                # Lookup section_id scoped to resolved chapter_id
+                _ch_sec_map = ch_sec_lookup.get(chapter_id, {})
+                section_id = (
+                    _ch_sec_map.get(title.lower())
+                    or _ch_sec_map.get(_norm(title))
+                    or _title_to_id(title)
+                )
 
     # Fallback: ensure chapter_id is NEVER empty
     if not chapter_id and heading_tree:
@@ -296,5 +373,13 @@ def _title_to_chapter_id(title: str) -> str:
 
 
 def _count_sections(existing_chunks: list[dict], chapter_id: str) -> int:
-    """Count how many sections already exist for a chapter."""
-    return sum(1 for c in existing_chunks if c.get("chapter_id") == chapter_id and c.get("section_id"))
+    """Count how many UNIQUE sections already exist for a chapter.
+
+    Uses a set of section_ids to avoid over-counting: a section with 5 chunks
+    must still count as 1, not 5.
+    """
+    return len({
+        c["section_id"]
+        for c in existing_chunks
+        if c.get("chapter_id") == chapter_id and c.get("section_id")
+    })

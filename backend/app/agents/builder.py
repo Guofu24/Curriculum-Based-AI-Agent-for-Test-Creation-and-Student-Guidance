@@ -6,6 +6,49 @@ import json
 import asyncio
 from typing import Any
 
+# ─────────────────────────────────────────────────────────────
+# Gemini Key Pool — async-safe round-robin fallback for builder
+# ─────────────────────────────────────────────────────────────
+
+class GeminiKeyPool:
+    """Async-safe key pool for Gemini fallback. Each acquire() returns the next
+    unused key across all slots, or None when the pool is exhausted."""
+
+    def __init__(self, keys: list[str], max_rounds: int = 2) -> None:
+        self._keys: list[str] = list(keys) * max_rounds if keys else []
+        self._idx: int = 0
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    async def acquire(self) -> str | None:
+        """Return next available key, or None if pool exhausted."""
+        async with self._lock:
+            if self._idx >= len(self._keys):
+                return None
+            key = self._keys[self._idx]
+            self._idx += 1
+            return key
+
+    @property
+    def has_keys(self) -> bool:
+        return bool(self._keys)
+
+
+async def _call_gemini_slot(api_key: str, messages: list[dict], model: str) -> str:
+    """Call Gemini via OpenAI-compatible endpoint (reuses openai SDK, no extra dep)."""
+    from openai import AsyncOpenAI
+    async with AsyncOpenAI(
+        api_key=api_key,
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        max_retries=0,
+    ) as client:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=8000,
+            temperature=0.7,
+        )
+    return resp.choices[0].message.content or ""
+
 # Domain 9: Prompt versioning
 BUILDER_PROMPT_VERSION = "v2.1"
 
@@ -268,6 +311,8 @@ Nhiệm vụ:
 - Ví dụ SAI: "stem": "Theo 'nguyên lý "bảo toàn năng lượng"', tính..."
 - Ví dụ ĐÚNG: "stem": "Theo nguyên lý bảo toàn năng lượng, tính..."
 - Không viết nhận xét kiểu 'Để tuân thủ yêu cầu...' hay chain-of-thought trong JSON
+- Think privately; do NOT output chain-of-thought, reasoning, analysis, planning, or self-check text
+- Output only the final JSON array; no markdown fences, no prose before/after JSON
 
 MCQ Format:
 {
@@ -336,8 +381,36 @@ Trả lời ngắn Format (THPT 2025 — điền kết quả số):
 - Options MCQ PHẢI là câu trả lời thực sự (số, định nghĩa, phát biểu) — không được là tên chương hay heading
 - Câu Đúng-Sai: mỗi mệnh đề phải là phát biểu khoa học cụ thể, có thể kiểm chứng
 
+## QUY TẮC PHẠM VI KIẾN THỨC (CỰC KỲ QUAN TRỌNG):
+- Phần ngữ cảnh được cung cấp CÓ THỂ gồm hai loại:
+  - **KIẾN THỨC TRỌNG TÂM**: Nội dung người dùng đã chọn — sinh câu hỏi TỪ PHẦN NÀY
+  - **KIẾN THỨC NỀN (TIÊN QUYẾT)**: Nội dung hỗ trợ, tiên quyết — CHỈ đọc để hiểu context, TUYỆT ĐỐI KHÔNG sinh câu hỏi từ phần này
+- Câu hỏi phải kiểm tra kiến thức trong phạm vi TRỌNG TÂM; background chỉ được dùng để viết distractors hoặc giải thích rõ hơn
+
 Trả về JSON array (không có key bọc ngoài):
-[câu_hỏi_1]"""
+[câu_hỏi_1]
+
+## VÍ DỤ MẪU (few-shot — học format và mức Bloom, KHÔNG copy nội dung):
+
+### Ví dụ 1 — nhan_biet / MCQ
+Slot: {"type": "mcq", "bloom_level": "nhan_biet", "chapter": "Sóng điện từ"}
+Output:
+[{"type": "mcq", "bloom_level": "nhan_biet", "chapter": "Sóng điện từ", "stem": "Khi nói về sóng điện từ, phát biểu nào sau đây là đúng?", "options": {"A": "Khi truyền trong chân không, sóng điện từ không mang theo năng lượng.", "B": "Sóng điện từ có thể là sóng dọc hoặc sóng ngang.", "C": "Sóng điện từ luôn lan truyền với tốc độ c = 3.10^8 m/s.", "D": "Tốc độ truyền sóng điện từ phụ thuộc vào môi trường."}, "correct_answer": "D", "explanation": "Sóng điện từ luôn là sóng ngang và mang năng lượng. Trong chân không tốc độ là c, nhưng trong môi trường có chiết suất n thì v = c/n, tức phụ thuộc môi trường."}]
+
+### Ví dụ 2 — thong_hieu / dung_sai
+Slot: {"type": "dung_sai", "bloom_level": "thong_hieu", "chapter": "Nhiệt học — Các nguyên lý nhiệt động lực học"}
+Output:
+[{"type": "dung_sai", "bloom_level": "thong_hieu", "chapter": "Nhiệt học — Các nguyên lý nhiệt động lực học", "stem": "Vào những ngày mùa đông lạnh giá, một học sinh thực hiện việc xoa nhanh hai lòng bàn tay vào nhau trong một khoảng thời gian ngắn và cảm thấy tay ấm lên. Sau đó, học sinh này áp lòng bàn tay vào mặt của mình. Các nhận xét sau đúng hay sai?", "propositions": [{"label": "a", "text": "Nội năng của bàn tay tăng lên do nhận công.", "is_correct": true}, {"label": "b", "text": "Bàn tay đã nhận nhiệt lượng từ cơ thể và ấm lên.", "is_correct": false}, {"label": "c", "text": "Khi áp lòng bàn tay vào mặt, có sự truyền nhiệt lượng từ mặt vào bàn tay.", "is_correct": false}, {"label": "d", "text": "Trong toàn bộ quá trình từ lúc xoa tay đến lúc áp tay vào mặt, tổng năng lượng (bao gồm cơ năng và nhiệt năng) của hệ luôn được bảo toàn.", "is_correct": true}], "explanation": "a) Đúng: xoa tay thực hiện công thắng ma sát, cơ năng chuyển hóa thành nhiệt năng làm nội năng tay tăng. b) Sai: tay ấm lên do nhận công từ xoa, không phải nhận nhiệt từ cơ thể. c) Sai: sau khi xoa tay ấm hơn mặt, nhiệt truyền từ tay sang mặt chứ không phải ngược lại. d) Đúng: xét hệ gồm cơ thể, bàn tay, mặt và môi trường thì tổng năng lượng được bảo toàn."}]
+
+### Ví dụ 3 — van_dung / short_answer
+Slot: {"type": "short_answer", "bloom_level": "van_dung", "chapter": "Vật lí hạt nhân"}
+Output:
+[{"type": "short_answer", "bloom_level": "van_dung", "chapter": "Vật lí hạt nhân", "stem": "Một lò phản ứng hạt nhân dùng uranium ${}^{235}_{92}\\\\text{U}$, thanh nhiên liệu làm giàu 4%. Mỗi hạt nhân phân hạch tỏa 200 MeV, 90% năng lượng dùng làm nóng 500 tấn nước từ 30°C lên 250°C. Khi khối lượng ${}^{235}_{92}\\\\text{U}$ còn lại 99,5% so với ban đầu. Biết c = 4200 J/(kg.K), 1 mol ${}^{235}_{92}\\\\text{U}$ = 235 g, 1 MeV = $1{,}6\\\\times10^{-13}$ J. Khối lượng các thanh nhiên liệu ban đầu là bao nhiêu kilôgam?", "correct_answer": "31", "unit": "kg", "solution": "Khối lượng U phân hạch: $m_{ph} = 0{,}5\\\\% \\\\times 4\\\\% \\\\times m = 2\\\\times10^{-4}m$ (g). Từ $\\\\frac{m_{ph}}{M}N_A \\\\cdot \\\\Delta E \\\\cdot H = m_n c \\\\Delta T$ suy ra $m_{ph} \\\\approx 6{,}26$ g, do đó $m \\\\approx 31310$ g $\\\\approx 31$ kg."}]
+
+### Ví dụ 4 — van_dung_cao / essay
+Slot: {"type": "essay", "bloom_level": "van_dung_cao", "chapter": "Cơ học thiên thể — Định luật Kepler"}
+Output:
+[{"type": "essay", "bloom_level": "van_dung_cao", "chapter": "Cơ học thiên thể — Định luật Kepler", "stem": "Trái Đất chuyển động quanh Mặt Trời theo quỹ đạo tròn bán kính $R_T = 150\\\\times10^9$ m với chu kỳ $T_0$ và vận tốc $v_T$. Một sao chổi chuyển động trong mặt phẳng quỹ đạo Trái Đất, đến gần Mặt Trời nhất ở khoảng cách $kR_T$ với vận tốc $v_1$. Cho k = 0,42; $v_T = 3\\\\times10^4$ m/s; $v_1 = 65{,}08\\\\times10^3$ m/s. (1) Xác định vận tốc v của sao chổi khi cắt quỹ đạo Trái Đất. (2) Chứng minh quỹ đạo là elip, xác định bán trục lớn $a = \\\\lambda R_T$, tâm sai e và chu kỳ $T = nT_0$. (3) Biểu diễn và tính gần đúng khoảng thời gian $\\\\tau$ sao chổi ở trong quỹ đạo Trái Đất.", "rubric": [{"score": 4, "description": "Giải đúng và đầy đủ cả 3 phần: tính v bằng bảo toàn năng lượng và mô men động lượng; chứng minh elip, tìm đúng $\\\\lambda, e, n$; biểu diễn $\\\\tau$ dưới dạng tích phân và tính được $\\\\tau \\\\approx 77$ ngày."}, {"score": 3, "description": "Giải đúng phần (1) và (2), phần (3) biểu diễn được tích phân nhưng tính gần đúng còn sai sót nhỏ hoặc chưa hoàn chỉnh."}, {"score": 2, "description": "Giải đúng phần (1), phần (2) tìm được $\\\\lambda$ hoặc e nhưng chưa đủ; phần (3) chưa làm hoặc sai."}, {"score": 1, "description": "Nêu được công thức bảo toàn năng lượng và mô men động lượng, lập được hệ phương trình nhưng chưa tính ra kết quả cụ thể nào."}]}]"""
 
     # Bloom-level-specific question generation guides
     BLOOM_TEMPLATES = {
@@ -361,14 +434,19 @@ Trả về JSON array (không có key bọc ngoài):
 - Phải kết hợp nhiều kiến thức/định luật
 - Câu hỏi bắt đầu bằng: "Tính", "Giải bài toán", "Xác định", "Vận dụng"
 - Ví dụ stem: "Một vật trượt trên mặt phẳng nghiêng 30°. Tính gia tốc biết hệ số ma sát μ=0.2."
-- Options MCQ: đáp án đúng cần tính toán đúng; distractors là các bước tính sai phổ biến (quên ma sát, dùng sai công thức, tính nhầm đơn vị)""",
+- Options MCQ: đáp án đúng cần tính toán đúng; distractors là các bước tính sai phổ biến (quên ma sát, dùng sai công thức, tính nhầm đơn vị)
+- BẮT BUỘC: Phải có ẩn số TRUNG GIAN — tức là phải tính một đại lượng phụ trước, mới tính được đáp án cuối
+- KIỂM TRA: Nếu chỉ cần thay số vào đúng 1 công thức → đó là thong_hieu, KHÔNG ĐƯỢC gán van_dung""",
 
         "van_dung_cao": """## Hướng dẫn cho câu hỏi Vận dụng cao (van_dung_cao)
 - Câu hỏi yêu cầu phân tích mối quan hệ, đánh giá, hoặc bài toán phức hợp
 - Kết hợp nhiều công thức, nhiều chương, hoặc dữ liệu thực tế
 - Câu hỏi bắt đầu bằng: "Phân tích", "Đánh giá", "So sánh và nhận xét", "Thiết kế"
 - Ví dụ stem: "Hai vật A và B nối bằng sợi dây qua ròng rọc. Phân tích chuyển động và tính gia tốc của hệ."
-- Options MCQ: đáp án đúng cần phân tích đúng toàn bộ hệ; distractors là các lỗi phân tích phổ biến (bỏ qua ma sát, nhầm chiều lực, bỏ qua ràng buộc hình học)""",
+- Options MCQ: đáp án đúng cần phân tích đúng toàn bộ hệ; distractors là các lỗi phân tích phổ biến (bỏ qua ma sát, nhầm chiều lực, bỏ qua ràng buộc hình học)
+- BẮT BUỘC: Kết hợp ít nhất 2 định luật/công thức KHÁC NHAU trong cùng bài toán
+- BẮT BUỘC: Có ít nhất 1 đại lượng KHÔNG cho trực tiếp — phải suy ra từ điều kiện bài toán
+- KIỂM TRA: Nếu không có bước thiết lập phương trình hoặc phân tích hệ → không đạt van_dung_cao""",
     }
 
     # Distractor quality guide
@@ -386,7 +464,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 - Xấu: "Lực ma sát tỉ lệ thuận với tốc độ" (plausible nhưng pattern quá dễ nhận ra)"""
 
     # Concurrency limits
-    MAX_CONCURRENT_LLM_CALLS = 5  # semaphore limit to avoid rate limits
+    MAX_CONCURRENT_LLM_CALLS = 2  # semaphore limit to avoid rate limits
     CHUNK_SIZE = 5  # questions per LLM call
 
     def __init__(self, redis_client=None):
@@ -459,6 +537,12 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
         topics_used = [q.get("topic_hint", "") for q in existing_questions]
 
+        from app.core.config import get_settings as _gcfg
+        _sq_pool: GeminiKeyPool | None = None
+        _sqkeys = _gcfg().GEMINI_KEYS
+        if _sqkeys:
+            _sq_pool = GeminiKeyPool(_sqkeys)
+
         question, warnings = await self._generate_single_slot(
             slot=slot,
             context=context_all[:8000],
@@ -466,6 +550,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
             scope_restriction=scope_restriction,
             topics_used=topics_used,
             slot_number=0,
+            gemini_key_pool=_sq_pool,
         )
 
         if warnings:
@@ -485,6 +570,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         allowed_concepts: list[str] | None = None,
         scope_chapters: list[str] | None = None,
         trace_id: str = "",
+        correction_strategies: dict[str, str] | None = None,
     ) -> BuilderOutput:
 
         """Build questions from blueprint."""
@@ -520,80 +606,103 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 for i in range(0, len(blueprint), self.CHUNK_SIZE)
             ]
 
-            flush_mode = False
+            # Single budget check for all chunks combined
+            budget_status = self.guardrails.check_budget(8000 * len(blueprint_chunks))
+            flush_mode = budget_status == "flush_needed"
+            if budget_status == "stop":
+                warnings.append("Token budget exhausted. Cannot generate questions.")
+            else:
+                if flush_mode:
+                    warnings.append("Token budget flush needed — using reduced context")
 
-            for i, chunk in enumerate(blueprint_chunks):
-                slot_start_index = i * self.CHUNK_SIZE
-                # Check token budget
-                budget_status = self.guardrails.check_budget(8000)
-                if budget_status == "stop":
-                    warnings.append("Token budget exhausted. Stopping generation.")
-                    break
-                if budget_status == "flush_needed":
-                    warnings.append(
-                        f"Token budget flush needed at chunk {i}, continuing with reduced context"
+                context_to_use = reduced_context_for_llm if flush_mode else context_for_llm
+                topics_snapshot = list(topics_used)
+
+                # Create Gemini key pool (shared across all slots for this build run)
+                from app.core.config import get_settings as _gcfg
+                _gemini_pool: GeminiKeyPool | None = None
+                _gkeys = _gcfg().GEMINI_KEYS
+                if _gkeys:
+                    _gemini_pool = GeminiKeyPool(_gkeys)
+                    logger.info("GeminiKeyPool ready: %d keys × 2 rounds = %d slots", len(_gkeys), len(_gkeys) * 2)
+
+                # Global semaphore — shared across ALL chunks so total concurrent
+                # LLM calls never exceeds MAX_CONCURRENT_LLM_CALLS regardless of
+                # how many chunks run in parallel.
+                _global_sem = asyncio.Semaphore(self.MAX_CONCURRENT_LLM_CALLS)
+                logger.info("Global semaphore: max %d concurrent LLM calls", self.MAX_CONCURRENT_LLM_CALLS)
+
+                # Launch all chunks in parallel — each gets an independent topics copy
+                chunk_tasks = [
+                    self._generate_chunk(
+                        chunk=bp_chunk,
+                        context=context_to_use,
+                        retrieved_context=retrieved_context,
+                        scope_restriction=scope_restriction,
+                        topics_used=list(topics_snapshot),
+                        slot_start_index=i * self.CHUNK_SIZE,
+                        total_slots=len(blueprint),
+                        correction_strategies=correction_strategies,
+                        gemini_key_pool=_gemini_pool,
+                        semaphore=_global_sem,
                     )
-                    flush_mode = True
+                    for i, bp_chunk in enumerate(blueprint_chunks)
+                ]
+                chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
 
-                # Generate questions for this chunk IN PARALLEL
-                questions, chunk_warnings = await self._generate_chunk(
-                    chunk=chunk,
-                    context=reduced_context_for_llm if flush_mode else context_for_llm,
-                    retrieved_context=retrieved_context,
-                    scope_restriction=scope_restriction,
-                    topics_used=topics_used,
-                    slot_start_index=slot_start_index,
-                    total_slots=len(blueprint),
-                )
-
-                warnings.extend(chunk_warnings)
-
-                # Separate demo questions (safe by construction) from real LLM output
-                real_questions = [q for q in questions if not q.get("is_demo_question")]
-                demo_questions = [q for q in questions if q.get("is_demo_question")]
-
-                # Validate only real LLM-generated questions
-                validated = self.guardrails.validate_batch(real_questions)
-
-                for q in validated:
-                    if not q.get("filter_passed", True):
-                        warnings.append(
-                            f"Question {q.get('question_id')} failed filter: {q.get('filter_error')}"
-                        )
+                for chunk_idx, result in enumerate(chunk_results):
+                    if isinstance(result, Exception):
+                        warnings.append(f"Chunk {chunk_idx} failed: {result}")
                         continue
 
-                    # Map evidence_chunks sang source_evidence nếu chưa có
-                    if not q.get("source_evidence") and q.get("evidence_chunks"):
-                        q["source_evidence"] = [
-                            {
-                                "chunk_id": chunk.get("chunk_id", ""),
-                                "content": chunk.get("text", chunk.get("content", "")),
-                                "page_number": chunk.get("page_number"),
-                                "section": chunk.get("section_id", ""),
-                                "relevance_score": chunk.get("score", 1.0),
-                            }
-                            for chunk in q.get("evidence_chunks", [])
-                            if isinstance(chunk, dict)
-                        ]
+                    questions, chunk_warnings = result
+                    warnings.extend(chunk_warnings)
+                    metrics.completion_tokens += len(questions) * 50  # Estimate
 
-                    all_questions.append(q)
+                    real_questions = [q for q in questions if not q.get("is_demo_question")]
+                    demo_questions = [q for q in questions if q.get("is_demo_question")]
 
-                    # Track topics
-                    if q.get("topic_hint"):
-                        topics_used.append(q["topic_hint"])
+                    validated = self.guardrails.validate_batch(real_questions)
 
-                    # Track referenced chunks
-                    if q.get("evidence_chunks"):
-                        chunks_referenced.extend(q["evidence_chunks"])
+                    for q in validated:
+                        if not q.get("filter_passed", True):
+                            warnings.append(
+                                f"Question {q.get('question_id')} failed filter: {q.get('filter_error')}"
+                            )
+                            continue
 
-                # Demo questions skip guardrails — always included
-                for q in demo_questions:
-                    all_questions.append(q)
-                    if q.get("topic_hint"):
-                        topics_used.append(q["topic_hint"])
+                        stem = q.get("stem") or q.get("content") or ""
+                        if stem and allowed_concepts:
+                            in_scope, violation = scope_guard.is_allowed(stem)
+                            if not in_scope:
+                                warnings.append(
+                                    f"Question {q.get('question_id')} out of scope: {violation}"
+                                )
+                                continue
 
-                # Record token usage
-                metrics.completion_tokens += len(questions) * 50  # Estimate
+                        if not q.get("source_evidence") and q.get("evidence_chunks"):
+                            q["source_evidence"] = [
+                                {
+                                    "chunk_id": ev.get("chunk_id", ""),
+                                    "content": ev.get("text", ev.get("content", "")),
+                                    "page_number": ev.get("page_number"),
+                                    "section": ev.get("section_id", ""),
+                                    "relevance_score": ev.get("score", 1.0),
+                                }
+                                for ev in q.get("evidence_chunks", [])
+                                if isinstance(ev, dict)
+                            ]
+
+                        all_questions.append(q)
+                        if q.get("topic_hint"):
+                            topics_used.append(q["topic_hint"])
+                        if q.get("evidence_chunks"):
+                            chunks_referenced.extend(q["evidence_chunks"])
+
+                    for q in demo_questions:
+                        all_questions.append(q)
+                        if q.get("topic_hint"):
+                            topics_used.append(q["topic_hint"])
 
             # Build output
             elapsed_ms = int((time.time() - start_time) * 1000)
@@ -645,15 +754,18 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         topics_used: list[str],
         slot_start_index: int = 0,
         total_slots: int = 0,
+        correction_strategies: dict[str, str] | None = None,
+        gemini_key_pool: GeminiKeyPool | None = None,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> tuple[list[dict], list[str]]:
         """Generate questions for a blueprint chunk IN PARALLEL using semaphore.
 
-        CHUNK_SIZE questions are generated concurrently (max 5 concurrent LLM calls).
-        Results are reordered by slot position to maintain stable output order
-        for the progress bar.
+        Semaphore is shared globally across all chunks (passed from build()) so
+        MAX_CONCURRENT_LLM_CALLS is a hard cap for the entire builder run, not
+        per-chunk. Falls back to a local semaphore if called without one.
         """
         warnings: list[str] = []
-        semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_LLM_CALLS)
+        semaphore = semaphore or asyncio.Semaphore(self.MAX_CONCURRENT_LLM_CALLS)
 
         # Build topic-keyed context map for per-question filtering
         topic_context_map = self._build_topic_context_map(retrieved_context)
@@ -674,17 +786,55 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 chid_context_map[ch_id] = []
             chid_context_map[ch_id].extend(v)
 
+        _correction_strategies = correction_strategies or {}
+
         async def _generate_one_with_semaphore(
             slot: dict,
             slot_number: int,
         ) -> tuple[int, dict | None, list[str]]:
             """Generate one question with semaphore limiting concurrency."""
             async with semaphore:
-                # Filter context to just this slot's chapter/section
+                # ── Section-aware chunk selection ─────────────────────────────────
+                import unicodedata as _ud
+                def _norm_sec(s: str) -> str:
+                    nfd = _ud.normalize("NFD", s.strip().lower())
+                    return "".join(c for c in nfd if _ud.category(c) != "Mn")
+
+                primary_sec_id    = slot.get("primary_section_id") or ""
+                primary_sec_title = slot.get("primary_section_title") or slot.get("section") or ""
+                secondary_sec_ids  = set(slot.get("secondary_section_ids") or [])
+                secondary_sec_titles = {
+                    _norm_sec(t) for t in (slot.get("secondary_section_titles") or []) if t
+                }
+
+                def _is_primary_chunk(c: dict) -> bool:
+                    if c.get("role") == "background":
+                        return False
+                    if primary_sec_id and c.get("section_id") == primary_sec_id:
+                        return True
+                    if primary_sec_title and _norm_sec(c.get("section", "")) == _norm_sec(primary_sec_title):
+                        return True
+                    return False
+
+                def _is_secondary_chunk(c: dict) -> bool:
+                    if c.get("role") == "background":
+                        return False
+                    sec_id = c.get("section_id", "")
+                    if sec_id and sec_id in secondary_sec_ids:
+                        return True
+                    sec_title_norm = _norm_sec(c.get("section", ""))
+                    if sec_title_norm and sec_title_norm in secondary_sec_titles:
+                        return True
+                    return False
+
+                sec_primary_chunks   = [c for c in retrieved_context if _is_primary_chunk(c)]
+                sec_secondary_chunks = [c for c in retrieved_context if _is_secondary_chunk(c)]
+                section_chunks = sec_primary_chunks + sec_secondary_chunks
+
+                # ── Chapter-level fallback (existing logic) ───────────────────────
                 slot_chapter = slot.get("chapter", "Unknown")
                 slot_section = slot.get("section", "") or ""
                 topic_key = f"{slot_chapter} > {slot_section}" if slot_section else slot_chapter
-                # Try exact match first, then normalized match
                 topic_chunks = topic_context_map.get(topic_key, [])
                 match_path = "exact" if topic_chunks else ""
                 if not topic_chunks:
@@ -711,15 +861,29 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                                 break
                 if not topic_chunks:
                     match_path = "FALLBACK_ALL"
+
+                # Prefer section-level chunks; fall back to chapter-level
+                if section_chunks:
+                    topic_chunks = section_chunks
+                    match_path = f"section({'id' if sec_primary_chunks else 'title'})"
+
+                # Collect background (prereq) chunks from full retrieved_context.
+                background_chunks = [
+                    c for c in retrieved_context if c.get("role") == "background"
+                ]
+
+                # Build context: primary topic chunks + background chunks (role-separated)
+                combined_for_slot = (topic_chunks if topic_chunks else []) + background_chunks
                 question_context_str = (
-                    self._build_context_for_llm(topic_chunks)
-                    if topic_chunks
+                    self._build_context_for_llm(combined_for_slot)
+                    if combined_for_slot
                     else context[:8000]
                 )
                 logger.info(
-                    "Slot %d chapter=%r → %d chunks (path: %s)",
+                    "Slot %d chapter=%r section=%r → %d chunks (path: %s)",
                     slot_number,
                     slot_chapter,
+                    primary_sec_title or primary_sec_id or "",
                     len(topic_chunks),
                     match_path,
                 )
@@ -731,8 +895,23 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     scope_restriction=scope_restriction,
                     topics_used=topics_used,
                     slot_number=slot_number,
+                    correction_strategy=_correction_strategies.get(slot.get("question_id", ""), ""),
+                    gemini_key_pool=gemini_key_pool,
                 )
+
+                # Copy section metadata from slot into question for traceability
+                if question:
+                    for _field in (
+                        "primary_section_id", "primary_section_title", "primary_scope_unit_key",
+                        "secondary_section_ids", "secondary_section_titles",
+                        "secondary_scope_unit_keys",
+                    ):
+                        _val = slot.get(_field)
+                        if _val is not None:
+                            question[_field] = _val
+
                 return slot_number, question, q_warnings
+
 
         # Launch all slots in the chunk concurrently
         tasks = [
@@ -774,6 +953,8 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         topics_used: list[str],
         slot_number: int = 0,
         question_context: str = "",
+        correction_strategy: str = "",
+        gemini_key_pool: GeminiKeyPool | None = None,
     ) -> tuple[dict | None, list[str]]:
         """
         Generate a single question for one blueprint slot.
@@ -810,8 +991,18 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         search_context = "\n".join(
                             f"- {r['title']}: {r['snippet']}" for r in results
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("SerpAPI search failed (non-critical): %s", exc)
+
+        # Inject Validator's targeted correction instruction when retrying a failed question
+        negotiation_block = ""
+        if correction_strategy:
+            negotiation_block = (
+                f"\n## ⚠️ YÊU CẦU SỬA LỖI TỪ VALIDATOR (PHẢI TUÂN THEO NGHIÊM NGẶT):\n"
+                f"{correction_strategy}\n"
+                f"Đây là lần sinh lại — câu hỏi cũ đã bị từ chối vì lý do trên. "
+                f"KHÔNG lặp lại lỗi cũ.\n"
+            )
 
         # Prompt asks for exactly ONE question (JSON array with 1 item)
         user_prompt = f"""Sinh để trả lời đúng một câu hỏi cho blueprint slot sau:
@@ -826,7 +1017,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
 ## Ràng buộc:
 {scope_restriction}
-
+{negotiation_block}
 {bloom_guide}
 {distractor_guide}
 
@@ -838,6 +1029,8 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
 Đây là JSON array MỘT câu hỏi:"""
 
+        # Retry malformed/partial primary output before falling back. Provider/API
+        # exceptions still fall through to fallback immediately to avoid 429 spam.
         max_retries = 2
         for attempt in range(max_retries + 1):
             try:
@@ -847,12 +1040,14 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         {"role": "user", "content": user_prompt},
                     ],
                     role="builder",
-                    max_tokens=4000,
+                    max_tokens=8000,
                     temperature=0.7,
                 )
 
                 if not response or not response.strip():
-                    warnings.append(f"Slot {slot_number}: LLM returned empty response (attempt {attempt + 1})")
+                    msg = f"Slot {slot_number}: primary builder returned empty response (attempt {attempt + 1})"
+                    warnings.append(msg)
+                    logger.warning(msg)
                     continue
 
                 # Parse response — strip markdown fence first
@@ -865,7 +1060,20 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 # Try to extract JSON using bracket matching (reliable for LLM output)
                 json_str = _extract_json_brackets(clean)
                 if not json_str:
-                    warnings.append(f"Slot {slot_number}: No JSON found in response (attempt {attempt + 1})")
+                    first_json_pos = next((i for i, ch in enumerate(clean) if ch in ("{", "[")), -1)
+                    if first_json_pos >= 0:
+                        msg = f"Slot {slot_number}: primary builder returned incomplete/unextractable JSON (attempt {attempt + 1})"
+                    else:
+                        msg = f"Slot {slot_number}: primary builder returned no JSON (attempt {attempt + 1})"
+                    warnings.append(msg)
+                    logger.warning(
+                        "%s | len=%d first_json_pos=%d prefix=%r suffix=%r",
+                        msg,
+                        len(clean),
+                        first_json_pos,
+                        clean[:500],
+                        clean[-500:],
+                    )
                     continue
 
                 # Fix bare LaTeX backslash escapes (e.g. \circ -> \\circ) so json.loads can parse
@@ -880,8 +1088,9 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         data = json.loads(repaired, strict=False)
                         logger.info(f"Slot {slot_number}: JSON repaired successfully (attempt {attempt + 1})")
                     except json.JSONDecodeError as je:
-                        warnings.append(f"Slot {slot_number}: JSON parse error after sanitize+repair")
-                        logger.warning(f"[DEBUG] Slot {slot_number} JSONDecodeError at char {je.pos}: {je.msg} | snippet: {repaired[max(0,je.pos-20):je.pos+40]!r}")
+                        msg = f"Slot {slot_number}: primary builder JSON parse error after sanitize+repair"
+                        warnings.append(msg)
+                        logger.warning("%s | char=%s msg=%s snippet=%r", msg, je.pos, je.msg, repaired[max(0, je.pos - 20):je.pos + 40])
                         continue
 
                 # Normalize: data can be {"questions": [...]} or [...]
@@ -892,7 +1101,9 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     questions_raw = data.get("questions", [data])
 
                 if not questions_raw:
-                    warnings.append(f"Slot {slot_number}: No questions in parsed JSON (attempt {attempt + 1})")
+                    msg = f"Slot {slot_number}: primary builder parsed JSON but found no questions (attempt {attempt + 1})"
+                    warnings.append(msg)
+                    logger.warning(msg)
                     continue
 
                 q = questions_raw[0]
@@ -950,32 +1161,100 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 return q, warnings
 
             except json.JSONDecodeError as e:
-                warnings.append(f"Slot {slot_number}: JSON parse error (attempt {attempt + 1}): {e}")
+                msg = f"Slot {slot_number}: primary builder JSON parse error (attempt {attempt + 1}): {e}"
+                warnings.append(msg)
+                logger.warning(msg)
                 if attempt == max_retries:
                     break
 
             except Exception as e:
-                warnings.append(f"Slot {slot_number}: LLM error (attempt {attempt + 1}): {e}")
-                if attempt == max_retries:
-                    break
+                msg = f"Slot {slot_number}: primary builder LLM error (attempt {attempt + 1}): {e}"
+                warnings.append(msg)
+                logger.warning(msg)
+                break
 
-        # ── All retries exhausted — emit a demo question so the pipeline doesn't stall ──
+        # ── Primary provider exhausted — try Gemini key pool ──
+        if gemini_key_pool is not None and gemini_key_pool.has_keys:
+            logger.warning(
+                "Slot %d: primary builder failed; entering Gemini fallback. reasons=%s",
+                slot_number,
+                " | ".join(warnings[-5:]) if warnings else "unknown",
+            )
+            from app.core.config import get_settings as _gcfg
+            _gmodel = _gcfg().GEMINI_MODEL
+            _gmessages = [
+                {"role": "system", "content": self.BUILDER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+            while True:
+                _gkey = await gemini_key_pool.acquire()
+                if _gkey is None:
+                    logger.warning("Slot %d: Gemini key pool exhausted — using demo question", slot_number)
+                    warnings.append(f"Slot {slot_number}: Gemini pool exhausted, using demo question")
+                    break
+                try:
+                    _gresp = await _call_gemini_slot(_gkey, _gmessages, _gmodel)
+                    if not _gresp or not _gresp.strip():
+                        continue
+                    _clean = _gresp.strip()
+                    if _clean.startswith("`"):
+                        _gl = [_l for _l in _clean.split("\n") if not _l.strip().startswith("```")]
+                        _clean = "\n".join(_gl).strip()
+                    _jstr = _extract_json_brackets(_clean)
+                    if not _jstr:
+                        continue
+                    _jstr = _sanitize_latex_escapes(_jstr)
+                    try:
+                        _gdata = json.loads(_jstr, strict=False)
+                    except json.JSONDecodeError:
+                        try:
+                            _gdata = json.loads(_repair_json_string(_jstr), strict=False)
+                        except json.JSONDecodeError:
+                            continue
+                    _graw: list = _gdata if isinstance(_gdata, list) else (_gdata.get("questions", [_gdata]) if isinstance(_gdata, dict) else [])
+                    if not _graw:
+                        continue
+                    q = _graw[0]
+                    if "question_id" not in q: q["question_id"] = q_id
+                    if "type" not in q: q["type"] = q_type
+                    if "bloom_level" not in q: q["bloom_level"] = bloom
+                    if "chapter" not in q: q["chapter"] = chapter
+                    q["estimated_difficulty"] = difficulty
+                    if q_type == "mcq" and "options" not in q:
+                        q["options"] = {"A": "Đáp án A", "B": "Đáp án B", "C": "Đáp án C", "D": "Đáp án D"}
+                        q["correct_answer"] = "A"; q["explanation"] = "Đáp án đúng là A."
+                    if q_type == "dung_sai" and "propositions" not in q:
+                        q["propositions"] = [{"label": l, "text": f"Mệnh đề {l}", "is_correct": l in ("a", "c")} for l in "abcd"]
+                    if q_type == "short_answer" and "correct_answer" not in q:
+                        q["correct_answer"] = ""; q["unit"] = ""; q["solution"] = ""
+                    if q_type == "essay" and "rubric" not in q:
+                        q["rubric"] = [{"score": s, "description": d} for s, d in [(10, "Hoàn toàn chính xác"), (7, "Đúng nhưng thiếu chi tiết"), (4, "Sai sót một phần"), (0, "Sai hoàn toàn")]]
+                        q["estimated_solve_time_minutes"] = 15
+                    await self._apply_skill_pipeline(q, topics_used)
+                    logger.info("Slot %d: Gemini fallback succeeded", slot_number)
+                    warnings.append(f"Slot {slot_number}: Used Gemini key fallback")
+                    return q, warnings
+                except Exception as _ge:
+                    logger.warning("Slot %d: Gemini key failed: %s — trying next", slot_number, str(_ge)[:120])
+                    continue
+
+        # ── All fallbacks exhausted — demo question ──
         logger.warning(f"Slot {slot_number}: All LLM retries failed — using demo question")
         warnings.append(f"Slot {slot_number}: LLM failed after {max_retries + 1} attempts, using demo question")
-
         demo_q = self._build_demo_question(slot, effective_context)
         return demo_q, warnings
 
     async def _apply_skill_pipeline(self, q: dict, topics_used: list[str]) -> None:
         """Run skill pipeline on a question (non-blocking, errors are swallowed)."""
+        # bloom_classified is an audit-only field — bloom_level is already set from
+        # the blueprint slot. Use the keyword-based fallback to avoid an extra LLM
+        # call per question (which was causing 429 rate-limit spikes after few-shot
+        # examples were added to BloomClassifierSkill).
         try:
-            bloom_result = await self.bloom_skill.run(
-                question_stem=q.get("stem", ""),
-                question_type=q.get("type", "mcq"),
-            )
+            bloom_result = self.bloom_skill._fallback_classify(q.get("stem", ""))
             q["bloom_classified"] = bloom_result.get("bloom_level")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("bloom_skill fallback failed for %s: %s", q.get("question_id"), exc)
 
         try:
             diff_result = await self.difficulty_skill.run(
@@ -983,8 +1262,8 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 bloom_level=q.get("bloom_level", "thong_hieu"),
             )
             q["difficulty_score"] = diff_result.get("difficulty_score", 0.5)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("difficulty_skill failed for %s: %s", q.get("question_id"), exc)
 
         try:
             dedup_result = await self.dedup_skill.run(
@@ -993,15 +1272,15 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
             )
             if dedup_result.get("is_duplicate"):
                 q["dedup_warning"] = dedup_result.get("suggestion")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("dedup_skill failed for %s: %s", q.get("question_id"), exc)
 
         if q.get("latex_content"):
             try:
                 latex_result = self.latex_skill.run(raw_formula=q["latex_content"])
                 q["latex_rendered"] = latex_result
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("latex_skill failed for %s: %s", q.get("question_id"), exc)
 
     def _build_demo_question(self, slot: dict, context: str = "") -> dict:
         """Build a reasonable demo question from a blueprint slot when LLM fails.
@@ -1156,28 +1435,54 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         return f"{prefix} {content}" if prefix else content
 
     def _build_context_for_llm(self, retrieved_context: list[dict]) -> str:
-        """Build a context string for the LLM prompt."""
-        parts = []
+        """Build a context string for the LLM prompt.
 
-        # Group by chapter
-        by_chapter: dict[str, list[str]] = {}
-        for chunk in retrieved_context:
-            chapter = chunk.get("chapter", "Unknown")
-            if chapter not in by_chapter:
-                by_chapter[chapter] = []
-            content = chunk.get("content", "")
-            latex = chunk.get("latex_repr")
-            if latex:
-                content = f"{content}\n[Formula: {latex}]"
-            by_chapter[chapter].append(content)
+        Chunks tagged with role='primary' are the main generation source.
+        Chunks tagged with role='background' are prerequisite knowledge — included
+        for context only; the LLM must NOT generate questions from them.
+        """
+        primary_chunks = [c for c in retrieved_context if c.get("role") != "background"]
+        background_chunks = [c for c in retrieved_context if c.get("role") == "background"]
 
-        for chapter, contents in by_chapter.items():
-            parts.append(f"### {chapter}")
-            for c in contents[:5]:  # Max 5 excerpts per chapter
-                parts.append(f"- {c[:500]}")
-            parts.append("")
+        def _format_by_chapter(chunks: list[dict], max_per_chapter: int = 5) -> str:
+            by_chapter: dict[str, list[str]] = {}
+            for chunk in chunks:
+                chapter = chunk.get("chapter", "Unknown")
+                section = chunk.get("section", "")
+                key = f"{chapter} › {section}" if section else chapter
+                if key not in by_chapter:
+                    by_chapter[key] = []
+                content = chunk.get("content", "")
+                latex = chunk.get("latex_repr")
+                if latex:
+                    content = f"{content}\n[Công thức: {latex}]"
+                by_chapter[key].append(content)
 
-        return "\n".join(parts)
+            parts = []
+            for key, contents in by_chapter.items():
+                parts.append(f"### {key}")
+                for c in contents[:max_per_chapter]:
+                    parts.append(f"- {c[:500]}")
+                parts.append("")
+            return "\n".join(parts)
+
+        sections: list[str] = []
+
+        if primary_chunks:
+            sections.append(
+                "## KIẾN THỨC TRỌNG TÂM\n"
+                "*(Sinh câu hỏi TRỰC TIẾP từ phần này — đây là nội dung người dùng đã chọn)*\n"
+            )
+            sections.append(_format_by_chapter(primary_chunks))
+
+        if background_chunks:
+            sections.append(
+                "## KIẾN THỨC NỀN (TIÊN QUYẾT)\n"
+                "*(KHÔNG sinh câu hỏi từ phần này — chỉ dùng để hiểu ngữ cảnh và giải thích khái niệm)*\n"
+            )
+            sections.append(_format_by_chapter(background_chunks, max_per_chapter=3))
+
+        return "\n".join(sections)
 
     def _build_topic_context_map(self, retrieved_context: list[dict]) -> dict[str, list[dict]]:
         """Build a dict mapping topic/chapter to relevant chunks for per-question context filtering.

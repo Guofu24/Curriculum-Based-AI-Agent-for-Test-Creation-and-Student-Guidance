@@ -194,6 +194,8 @@ def _run_async_task(
     exam_config: dict | None,
     user_prompt: str | None,
     extra_instructions: str | None,
+    request_trace_id: str | None = None,
+    celery_task_id: str | None = None,
 ) -> dict:
     """
     Synchronous wrapper that runs the async generation pipeline.
@@ -201,7 +203,7 @@ def _run_async_task(
     Uses loop.run_until_complete() instead of asyncio.run() to avoid
     creating a nested event loop inside the already-running executor thread.
     """
-    trace_id = str(uuid.uuid4())
+    trace_id = request_trace_id or str(uuid.uuid4())
 
     async def _run():
         async with async_session_maker() as db:
@@ -217,6 +219,8 @@ def _run_async_task(
                 "scope": scope,
                 "bloom_distribution": (exam_config or {}).get("bloom_distribution"),
                 "demo_mode": settings.DEMO_MODE or not document_id,
+                "request_trace_id": request_trace_id,
+                "celery_task_id": celery_task_id,
             }
 
             # Setup stream callback for WebSocket + Redis pub/sub
@@ -422,8 +426,8 @@ def _run_async_task(
                     finally:
                         err_loop.close()
                         asyncio.set_event_loop(None)
-                except Exception:
-                    pass
+                except Exception as _emit_exc:
+                    logger.warning("Failed to emit pipeline_paused event for %s: %s", exam_id, _emit_exc)
             return {
                 "exam_id": exam_id,
                 "status": "paused_at_checkpoint",
@@ -465,6 +469,7 @@ def generate_exam_task(
     exam_config: dict | None = None,
     user_prompt: str | None = None,
     extra_instructions: str | None = None,
+    request_trace_id: str | None = None,
 ) -> dict:
     """
     Run the full multi-agent exam generation pipeline.
@@ -500,6 +505,8 @@ def generate_exam_task(
         exam_config=exam_config,
         user_prompt=user_prompt,
         extra_instructions=extra_instructions,
+        request_trace_id=request_trace_id,
+        celery_task_id=self.request.id,
     )
 
 

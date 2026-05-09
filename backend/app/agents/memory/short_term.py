@@ -1,9 +1,12 @@
 """Short-term memory (Redis): session:{exam_id}:{user_id} with TTL 7200s."""
 
 import json
+import logging
 from typing import Any, Optional
 
 from app.core.redis_client import RedisClient
+
+logger = logging.getLogger("app.agents.memory")
 
 # Short-term memory TTL: 2 hours
 SHORT_TERM_TTL = 7200
@@ -60,8 +63,8 @@ class ShortTermMemory:
         existing: dict = {}
         try:
             existing = await self.load_session(exam_id, user_id) or {}
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("ShortTermMemory: failed to load existing session %s: %s", exam_id, exc)
 
         if exam_config is not None:
             existing["exam_config"] = exam_config

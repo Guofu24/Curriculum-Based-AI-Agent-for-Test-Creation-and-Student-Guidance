@@ -139,8 +139,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 questions = result.get("clarification_questions", [])
                 if questions:
                     return {"clarification_questions": questions[:3]}
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Clarity check LLM failed (non-critical): %s", _e)
         return None
 
     async def generate_exam(
@@ -340,8 +340,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                         if event.get("type") in ("blueprint_rejected", "hitl_rejected"):
                             logger.info(f"Blueprint rejected via pub/sub for exam {exam_id}")
                             return False
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("Pub/sub JSON parse error (non-critical): %s", _e)
 
                 # Also check Redis key periodically (belt-and-suspenders)
                 val = await self.redis.get(key)
@@ -416,8 +416,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             history = json.loads(existing) if existing else []
             history.append({"feedback": feedback, "timestamp": time.time()})
             await self.redis.set(history_key, json.dumps(history), ttl=3600)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.warning("Failed to save rejection history to Redis for exam %s: %s", exam_id, _e)
 
         # Emit updated HITL checkpoint 1 with new blueprint immediately
         # (Celery task will re-run and emit via WebSocket again)
@@ -435,7 +435,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                 blueprint = outline_result.blueprint
             if hasattr(outline_result, 'distribution_summary'):
                 distribution_summary = outline_result.distribution_summary
-        except Exception:
+        except Exception as _e:
+            logger.warning("Failed to regenerate outline on blueprint rejection for exam %s: %s", exam_id, _e)
             blueprint = []
             distribution_summary = {}
 
@@ -517,8 +518,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                         preferred_exam_types={"types": [exam_config.get("exam_type", "mixed")]},
                         subject_focus=",".join(exam_config.get("scope", [])),
                     )
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("Failed to save teacher preferences to long-term memory: %s", _e)
 
             # Snapshot exam_history with change_type='published'
             if session:
@@ -537,8 +538,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                     hist_list = _json.loads(existing_hist) if existing_hist else []
                     hist_list.append(history_entry)
                     await self.redis.set(history_key, _json.dumps(hist_list), ttl=86400)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning("Failed to save exam history to Redis for exam %s: %s", exam_id, _e)
 
                 await self.short_term.save_session(
                     exam_id, user_id,
@@ -559,10 +560,11 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             try:
                 from langgraph.types import Command
                 from app.agents.graph.builder import build_exam_graph
-                graph = build_exam_graph()
-                config = {"configurable": {"thread_id": exam_id, "recursion_limit": 500}}
+                if self.graph is None:
+                    self.graph = build_exam_graph()
+                config = {"configurable": {"thread_id": exam_id}, "recursion_limit": 500}
                 logger.info(f"Resuming graph for exam {exam_id} at CP2 with approved=True")
-                resume_result = await graph.ainvoke(
+                resume_result = await self.graph.ainvoke(
                     Command(resume={"approved": True, "feedback": feedback}),
                     config=config,
                 ) or {}
@@ -604,6 +606,14 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                     logger.info(
                         f"Persisted {len(questions_to_save)} questions to DB for exam {exam_id} after CP2 approval"
                     )
+                    # Emit "completed" so the frontend WebSocket handler (switch-case
+                    # on type="completed") knows the pipeline is done and can show
+                    # the completion banner. This is critical on the CP2-timeout
+                    # fallback path where the graph never emits its own completion event.
+                    await self._emit({
+                        "type": "completed",
+                        "exam_id": exam_id,
+                    })
                 elif not questions_to_save:
                     logger.warning(
                         f"No questions to persist for exam {exam_id} after CP2 approval — "
@@ -671,13 +681,14 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             try:
                 from langgraph.types import Command
                 from app.agents.graph.builder import build_exam_graph
-                graph = build_exam_graph()
-                config = {"configurable": {"thread_id": exam_id, "recursion_limit": 500}}
+                if self.graph is None:
+                    self.graph = build_exam_graph()
+                config = {"configurable": {"thread_id": exam_id}, "recursion_limit": 500}
                 logger.info(
                     "Resuming graph for exam %s at CP2 with approved=False, feedback=%r",
                     exam_id, feedback,
                 )
-                await graph.ainvoke(
+                await self.graph.ainvoke(
                     Command(resume={"approved": False, "feedback": feedback or ""}),
                     config=config,
                 ) or {}
@@ -698,8 +709,8 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
                         user_prompt=original_config.get("user_prompt", ""),
                         extra_instructions=feedback,
                     )
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.error("Failed to dispatch Celery regeneration task for exam %s: %s", exam_id, _e)
 
             # Log rejection FeedbackEvent
             try:

@@ -15,14 +15,98 @@ from app.agents.graph.nodes import ALL_NODES
 
 logger = logging.getLogger("app.agents.graph")
 
-# Shared checkpointer: all graph instances share the same memory.
-# This allows resume_from_state() to work across different agent instances.
-_shared_checkpointer = MemorySaver()
+# Lazy checkpointer — initialized at app startup via init_shared_checkpointer().
+# Falls back to MemorySaver if langgraph-checkpoint-postgres is not installed or
+# PostgreSQL is unavailable.  MemorySaver loses state on restart, which breaks HITL
+# checkpoint resume — always prefer the Postgres-backed checkpointer in production.
+_shared_checkpointer = None
+_shared_pg_conn = None  # psycopg AsyncConnection — closed at app shutdown
 
 
-def get_shared_checkpointer() -> MemorySaver:
-    """Return the shared checkpointer for all graph instances."""
+def get_shared_checkpointer():
+    """Return the active checkpointer (AsyncPostgresSaver or MemorySaver fallback)."""
+    global _shared_checkpointer
+    if _shared_checkpointer is None:
+        logger.warning(
+            "LangGraph checkpointer not initialized — using MemorySaver (state lost on "
+            "restart). Call init_shared_checkpointer() at app startup."
+        )
+        _shared_checkpointer = MemorySaver()
     return _shared_checkpointer
+
+
+async def init_shared_checkpointer() -> None:
+    """
+    Initialize the shared LangGraph checkpointer with PostgreSQL persistence.
+
+    Must be called once during application startup (FastAPI lifespan).
+    Falls back to MemorySaver when:
+      - langgraph-checkpoint-postgres / psycopg not installed
+      - PostgreSQL is unreachable
+
+    Postgres-backed checkpointer survives server restarts, enabling HITL
+    checkpoint resume across Celery worker restarts and process bounces.
+    Creates the required checkpoint tables via checkpointer.setup() on first run.
+    """
+    global _shared_checkpointer, _shared_pg_conn
+    if _shared_checkpointer is not None:
+        return  # Already initialized
+
+    try:
+        import psycopg  # type: ignore
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # type: ignore
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        # DATABASE_URL uses the asyncpg driver prefix (for SQLAlchemy).
+        # psycopg3 expects a plain postgresql:// URL.
+        pg_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+
+        conn = await psycopg.AsyncConnection.connect(pg_url, autocommit=True)
+        checkpointer = AsyncPostgresSaver(conn)
+        await checkpointer.setup()  # Creates checkpoint tables if they don't exist
+        _shared_checkpointer = checkpointer
+        _shared_pg_conn = conn
+        logger.info("LangGraph checkpointer: AsyncPostgresSaver (PostgreSQL) ✓")
+
+    except ImportError:
+        logger.warning(
+            "langgraph-checkpoint-postgres or psycopg not installed — "
+            "install with: pip install langgraph-checkpoint-postgres 'psycopg[binary]'. "
+            "Falling back to MemorySaver (HITL state lost on restart)."
+        )
+        _shared_checkpointer = MemorySaver()
+
+    except Exception as exc:
+        logger.warning(
+            "AsyncPostgresSaver init failed (%s) — falling back to MemorySaver.", exc
+        )
+        _shared_checkpointer = MemorySaver()
+
+
+def get_checkpointer_type() -> str:
+    """Return the active checkpointer class name for health-check logging."""
+    if _shared_checkpointer is None:
+        return "uninitialized"
+    return type(_shared_checkpointer).__name__
+
+
+async def close_shared_checkpointer() -> None:
+    """
+    Close the PostgreSQL connection used by the checkpointer.
+    Must be called at application shutdown (FastAPI lifespan teardown).
+    """
+    global _shared_pg_conn
+    if _shared_pg_conn is not None:
+        try:
+            await _shared_pg_conn.close()
+            logger.info("LangGraph checkpointer connection closed.")
+        except Exception as exc:
+            logger.debug("Error closing checkpointer connection: %s", exc)
+        _shared_pg_conn = None
+
+
+
 
 
 # ── Conditional edge routing functions ──────────────────────────────────────────
@@ -37,7 +121,11 @@ def _is_clarification_needed(state: ExamGraphState) -> str:
 
 
 def _is_complex_request(state: ExamGraphState) -> str:
-    """Route after decide_plan."""
+    """Route after decide_plan.
+
+    Returns "complex" to fan-out to BOTH plan_complex and retrieve_knowledge in parallel,
+    or "simple" to go directly to retrieve_knowledge.
+    """
     return state.get("plan_type", "simple")
 
 
@@ -152,7 +240,11 @@ def build_exam_graph(checkpointer=None):
     workflow.add_edge(START, "initialize")
     workflow.add_edge("initialize", "clarification_check")
     workflow.add_edge("load_long_term_memory", "decide_plan")
-    workflow.add_edge("plan_complex", "retrieve_knowledge")
+    workflow.add_edge("fanout_complex", "plan_complex")
+    workflow.add_edge("fanout_complex", "retrieve_knowledge")
+    workflow.add_edge("plan_complex", "merge_plan_retrieval")
+    workflow.add_edge("merge_plan_retrieval", "dispatch_tasks")
+    workflow.add_edge("dispatch_tasks", "create_outline")
     workflow.add_edge("handle_retrieval_failure", "create_outline")
     workflow.add_edge("emit_checkpoint_1", "wait_for_blueprint_approval")
     workflow.add_edge("handle_outline_failure", END)
@@ -179,22 +271,24 @@ def build_exam_graph(checkpointer=None):
         }
     )
 
-    # Complexity routing
+    # Fix 1: Complexity routing
+    # complex → fanout_complex (passthrough) → plan_complex AND retrieve_knowledge run in parallel
+    # simple → retrieve_knowledge directly (skips fanout and planner)
     workflow.add_conditional_edges(
         "decide_plan",
         _is_complex_request,
         {
-            "complex": "plan_complex",
+            "complex": "fanout_complex",
             "simple": "retrieve_knowledge",
         }
     )
 
-    # Retrieval → Outline
+    # Retrieval status routing (both simple and complex paths flow through here)
     workflow.add_conditional_edges(
         "retrieve_knowledge",
         _check_retrieval_status,
         {
-            "success": "create_outline",
+            "success": "merge_plan_retrieval",
             "failed": "handle_retrieval_failure",
         }
     )

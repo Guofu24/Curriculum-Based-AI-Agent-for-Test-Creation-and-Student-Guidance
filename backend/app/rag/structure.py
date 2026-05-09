@@ -583,33 +583,100 @@ def _extract_partial_json(text: str) -> dict:
     return {"chapters": []}
 
 
-async def detect_heading_tree_gemini_pdf(
-    pdf_bytes: bytes,
-    markdown: str,
-) -> dict:
+def _compress_pdf_for_vision(pdf_bytes: bytes) -> bytes:
     """
-    Primary heading detector: sends the full PDF to Gemini 2.5 Flash (vision).
+    Compress PDF trước khi gửi Gemini vision:
+    - Downsample ảnh xuống 72 DPI (đủ để nhận diện heading, không cần hi-res)
+    - Strip metadata thừa
+    Trả về bytes gốc nếu compress thất bại.
+    """
+    try:
+        import fitz  # PyMuPDF
+        src = fitz.open(stream=pdf_bytes, filetype="pdf")
+        dst = fitz.open()
+        for page in src:
+            # Render trang ở 72 DPI rồi embed lại thành ảnh JPEG
+            mat = fitz.Matrix(72 / 72, 72 / 72)  # identity — giữ layout
+            pix = page.get_pixmap(matrix=fitz.Matrix(72 / 96, 72 / 96), alpha=False)
+            img_page = dst.new_page(width=pix.width, height=pix.height)
+            img_page.insert_image(
+                img_page.rect,
+                stream=pix.tobytes(output="jpeg", jpg_quality=60),
+            )
+        compressed = dst.tobytes(deflate=True, garbage=4, clean=True)
+        src.close()
+        dst.close()
+        ratio = len(compressed) / len(pdf_bytes) * 100
+        logger.info(
+            "[gemini_pdf] Compressed PDF: %.1f KB → %.1f KB (%.0f%%)",
+            len(pdf_bytes) / 1024, len(compressed) / 1024, ratio,
+        )
+        return compressed
+    except Exception as e:
+        logger.warning("[gemini_pdf] Compress failed (%s), using original", e)
+        return pdf_bytes
 
-    Advantages over LLM-text approach:
-    - Reads visual structure (font size, bold, layout) of scanned PDFs
-    - Not limited to headings the OCR parser happened to extract
-    - One API call for the whole document
 
-    Prompt rules:
-    - Only chapters with real academic content (theory/concepts)
-    - Skip: bare exercise labels (Bài X.), answer sections, school names
-    - Max 20 chapters, 10 sections each
+def _normalize_gemini_pdf_result(result: dict) -> dict:
+    """Normalize chapter/section IDs từ raw Gemini PDF output."""
+    import json as _json
+    chapters = result.get("chapters", [])
+    for i, ch in enumerate(chapters, 1):
+        if not isinstance(ch, dict):
+            continue
+        ch["chapter_id"] = f"ch{i}"
+        ch.setdefault("title", f"Chapter {i}")
+        ch.setdefault("sections", [])
+        secs = []
+        for j, sec in enumerate(ch.get("sections", []), 1):
+            if isinstance(sec, str):
+                sec = {"title": sec}
+            if isinstance(sec, dict):
+                sec["section_id"] = f"ch{i}_sec{j}"
+                sec.setdefault("title", f"Section {j}")
+                sec.setdefault("subsections", [])
+                secs.append(sec)
+        ch["sections"] = secs
 
-    Falls back to detect_heading_tree_llm on any failure.
+    raw_prereqs = result.get("prerequisites", {})
+    prerequisites: dict = {}
+    for ch_idx_str, dep_list in (raw_prereqs.items() if isinstance(raw_prereqs, dict) else []):
+        try:
+            ch_id = f"ch{int(ch_idx_str)}"
+            dep_ids = []
+            for d in (dep_list if isinstance(dep_list, list) else []):
+                try:
+                    dep_ids.append(f"ch{int(d)}")
+                except (ValueError, TypeError):
+                    pass
+            if dep_ids:
+                prerequisites[ch_id] = dep_ids
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        "chapters": [c for c in chapters if isinstance(c, dict) and c.get("chapter_id")],
+        "prerequisites": prerequisites,
+    }
+
+
+async def _run_gemini_pdf_vision(pdf_bytes: bytes) -> dict | None:
+    """
+    Gửi PDF (đã compress) lên Gemini vision để nhận diện heading.
+    Trả về normalized dict hoặc None nếu fail/timeout.
     """
     try:
         from app.rag.embedder import _get_gemini_client, settings as _emb_settings
         import json as _json
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
 
         keys = _emb_settings.GEMINI_EMBED_KEYS
         if not keys:
-            logger.warning("[gemini_pdf] No GEMINI_KEYS available, falling back")
-            return await detect_heading_tree_llm(markdown)
+            logger.warning("[gemini_pdf] No GEMINI_KEYS available")
+            return None
+
+        compressed = _compress_pdf_for_vision(pdf_bytes)
 
         key = keys[0]
         client = _get_gemini_client(key)
@@ -627,35 +694,36 @@ async def detect_heading_tree_gemini_pdf(
             "MỤC = sub-topic lý thuyết trong chương "
             "(ví dụ: '1. Điện trường', '2.1 Định luật Coulomb')\n\n"
             "Giới hạn: tối đa 20 chương, mỗi chương tối đa 10 mục.\n\n"
+            "NGOÀI RA: Với mỗi chương (đánh số từ 1), xác định các chương KHÁC mà nó PHỤ THUỘC "
+            "kiến thức (cần học trước mới hiểu được chương này). Dùng số thứ tự chương (1-based). "
+            "Chỉ liệt kê phụ thuộc thực sự. Nếu không có phụ thuộc nào thì trả {} cho 'prerequisites'.\n\n"
             "Trả về JSON thuần (KHÔNG markdown, KHÔNG giải thích):\n"
-            '{"chapters": [{"title": "Tên chương", '
-            '"sections": [{"title": "Tên mục"}]}]}'
+            '{"chapters": [{"title": "Tên chương", "sections": [{"title": "Tên mục"}]}], '
+            '"prerequisites": {"4": [1, 2], "3": [1]}}'
         )
 
-        import asyncio
         loop = asyncio.get_running_loop()
-        from concurrent.futures import ThreadPoolExecutor
         _pdf_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gemini_pdf")
 
         def _call_gemini():
             from google.genai import types as _gtypes
+            from app.core.config import get_settings as _get_settings
             return client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=_get_settings().GEMINI_MODEL,
                 contents=[
-                    _gtypes.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+                    _gtypes.Part.from_bytes(data=compressed, mime_type="application/pdf"),
                     prompt,
                 ],
             )
 
-        logger.info("[gemini_pdf] Sending %.1f KB PDF to Gemini 2.5 Flash for heading detection",
-                    len(pdf_bytes) / 1024)
+        logger.info("[gemini_pdf] Sending %.1f KB compressed PDF to Gemini for heading detection",
+                    len(compressed) / 1024)
         response = await asyncio.wait_for(
             loop.run_in_executor(_pdf_executor, _call_gemini),
-            timeout=150,  # 2.5 min max
+            timeout=180,  # 3 min — tăng vì file có thể nhiều trang
         )
 
         text = response.text.strip()
-        # Clean markdown code fences if present
         text = re.sub(r"^```(?:json)?\s*\n?", "", text)
         text = re.sub(r"\n?```\s*$", "", text)
         text = _sanitize_json_backslashes(text.strip())
@@ -670,39 +738,67 @@ async def detect_heading_tree_gemini_pdf(
 
         chapters = result.get("chapters", [])
         if not chapters:
-            logger.warning("[gemini_pdf] Returned empty chapters, falling back to LLM")
-            return await detect_heading_tree_llm(markdown)
+            logger.warning("[gemini_pdf] Returned empty chapters")
+            return None
 
-        # Normalize IDs
-        for i, ch in enumerate(chapters, 1):
-            if not isinstance(ch, dict):
-                continue
-            ch["chapter_id"] = f"ch{i}"
-            ch.setdefault("title", f"Chapter {i}")
-            ch.setdefault("sections", [])
-            secs = []
-            for j, sec in enumerate(ch.get("sections", []), 1):
-                if isinstance(sec, str):
-                    sec = {"title": sec}
-                if isinstance(sec, dict):
-                    sec["section_id"] = f"ch{i}_sec{j}"
-                    sec.setdefault("title", f"Section {j}")
-                    sec.setdefault("subsections", [])
-                    secs.append(sec)
-            ch["sections"] = secs
-
+        normalized = _normalize_gemini_pdf_result(result)
         logger.info(
-            "[gemini_pdf] Detected %d chapters via Gemini PDF vision",
-            len([c for c in chapters if isinstance(c, dict)]),
+            "[gemini_pdf] Detected %d chapters, %d prerequisite relations",
+            len(normalized["chapters"]),
+            sum(len(v) for v in normalized.get("prerequisites", {}).values()),
         )
-        return {"chapters": [c for c in chapters if isinstance(c, dict) and c.get("chapter_id")]}
+        return normalized
 
-    except asyncio.TimeoutError:
-        logger.warning("[gemini_pdf] Timeout (150s), falling back to LLM")
-        return await detect_heading_tree_llm(markdown)
     except Exception as e:
-        logger.warning("[gemini_pdf] Failed: %s — falling back to LLM", e)
-        return await detect_heading_tree_llm(markdown)
+        logger.warning("[gemini_pdf] Failed: %s", e)
+        return None
+
+
+async def detect_heading_tree_gemini_pdf(
+    pdf_bytes: bytes,
+    markdown: str,
+) -> dict:
+    """
+    Heading detector: chạy song song gemini_pdf (vision) và detect_heading_tree_llm (text).
+
+    - Cả 2 chạy đồng thời qua asyncio.gather.
+    - Ưu tiên kết quả gemini_pdf nếu thành công (đọc visual structure tốt hơn).
+    - Nếu gemini_pdf timeout/fail → dùng kết quả LLM đã sẵn sàng, không mất thêm thời gian.
+    """
+    import asyncio
+
+    gemini_task = asyncio.create_task(_run_gemini_pdf_vision(pdf_bytes))
+    llm_task = asyncio.create_task(detect_heading_tree_llm(markdown))
+
+    results = await asyncio.gather(gemini_task, llm_task, return_exceptions=True)
+
+    gemini_result = results[0] if not isinstance(results[0], Exception) else None
+    llm_result = results[1] if not isinstance(results[1], Exception) else None
+
+    # Ưu tiên gemini_pdf nếu có chapters hợp lệ
+    if gemini_result and gemini_result.get("chapters"):
+        logger.info(
+            "[heading_detect] Using gemini_pdf result (%d chapters)",
+            len(gemini_result["chapters"]),
+        )
+        # Infer section-level prerequisites (same step as LLM path via post_process_heading_tree)
+        try:
+            gemini_result = await _infer_section_prerequisites(gemini_result)
+        except Exception as _e:
+            logger.warning("[heading_detect] section prereq inference skipped: %s", _e)
+        return gemini_result
+
+    # Fallback: dùng LLM result
+    if llm_result and llm_result.get("chapters"):
+        logger.info(
+            "[heading_detect] gemini_pdf failed/empty, using LLM result (%d chapters)",
+            len(llm_result["chapters"]),
+        )
+        return llm_result
+
+    # Cả 2 fail → heuristic
+    logger.warning("[heading_detect] Both gemini_pdf and LLM failed, using heuristic")
+    return detect_heading_tree(markdown)
 
 
 async def detect_heading_tree_llm(markdown: str) -> dict:
@@ -742,26 +838,25 @@ async def detect_heading_tree_llm(markdown: str) -> dict:
         f"{heading_text}\n"
         "---\n\n"
         "NHIỆM VỤ: Tổ chức thành CHƯƠNG và MỤC thật sự của tài liệu.\n\n"
-        "⚠️ QUAN TRỌNG: Số [n] và vị trí KHÔNG phản ánh cấp độ. "
-        "Hãy phán đoán DỰA VÀO TIÊU ĐỀ và NỘI DUNG, KHÔNG dựa vào thứ tự.\n\n"
+        "⚠️ QUAN TRỌNG:\n"
+        "- Số [n] và độ sâu '#' KHÔNG phản ánh cấp độ thực tế (do PDF được ghép từ nhiều phần độc lập).\n"
+        "- Phán đoán DỰA VÀO TIÊU ĐỀ và NỘI DUNG, KHÔNG dựa vào số thứ tự hay '#'.\n"
+        "- Tài liệu CÓ THỂ KHÔNG CÓ CHƯƠNG — chỉ có topics/sections. Trong trường hợp đó hãy treat mỗi topic/section như 1 chapter.\n\n"
         "QUY TẮC:\n"
-        "1. CHƯƠNG = có nội dung lý thuyết/công thức/khái niệm ngay sau heading.\n"
-        "2. CONTAINER (PHẦN I., PHẦN II., heading <không có nội dung> mà ngay sau là các heading khác)\n"
-        "   → KHÔNG tạo chapter riêng. Bỏ qua nó, các heading con mới là chapters thật sự.\n"
-        "3. MỤC = bài tập, ví dụ, hướng dẫn, đáp số, tiểu mục trong chương.\n"
-        "4. LOẠI BỎ hoàn toàn: tên trường, mục lục, lời nói đầu, phụ lục, tài liệu tham khảo.\n"
-        "5. BÀI TẬP ÁP DỤNG, HƯỚNG DẪN VÀ ĐÁP SỐ, ĐÁP ÁN → MỤC của chương trước, KHÔNG phải chương.\n"
-        "6. Bài N. (chỉ có số, không có tiêu đề lý thuyết) → BỎ QUA HOÀN TOÀN, không tạo MỤC.\n"
-        "7. Tối đa 15 chương, mỗi chương tối đa 12 mục.\n\n"
+        "1. CHƯƠNG = phần nội dung lớn phân chia tài liệu: có thể là chương lý thuyết, topic, chủ đề, bài học.\n"
+        "   Không bắt buộc phải có từ 'Chương' — heading ngắn + có nội dung liền sau đều có thể là chapter.\n"
+        "2. MỤC = tiểu mục, sub-topic, ví dụ minh họa, bài tập áp dụng BÊN TRONG chương.\n"
+        "3. LOẠI BỎ hoàn toàn: tên trường, mục lục, lời nói đầu, phụ lục, tài liệu tham khảo, đáp án/đáp số standalone.\n"
+        "4. 'Đáp số', 'Hướng dẫn', 'Đáp án' ngay sau nội dung bài → MỤC của chapter hiện tại, không phải chapter mới.\n"
+        "5. Nếu một heading trông như CONTAINER (không có nội dung, ngay sau là nhiều heading con cùng cấp)\n"
+        "   → bỏ qua container, dùng các heading con làm chapters.\n"
+        "6. Tối đa 20 chapters, mỗi chapter tối đa 15 mục.\n\n"
         "VÍ DỤ:\n"
-        "  [1] PHẦN I.\n"
-        "      <không có nội dung>          ← CONTAINER → bỏ qua\n"
-        "  [2] A. BỔ TÚC VÉC TƠ.\n"
-        "      Nội dung: Véc tơ là đại lượng có hướng...  ← CHƯƠNG (có lý thuyết)\n"
-        "  [3] I. Lực xuyên tâm.\n"
-        "      Nội dung: Lực hướng vào tâm...             ← CHƯƠNG hoặc MỤC tùy ngữ cảnh\n"
-        "  [4] HƯỚNG DẪN VÀ ĐÁP SỐ\n"
-        "      Nội dung: Bài 1: 5m/s...                   ← MỤC của chương trước\n\n"
+        "  [1] PHẦN I. <không có nội dung, ngay sau là A, B, C>   ← CONTAINER → bỏ qua\n"
+        "  [2] A. BỔ TÚC VÉC TƠ. Nội dung: Véc tơ là...          ← CHAPTER\n"
+        "  [3] I. Lực xuyên tâm. Nội dung: Lực hướng vào...       ← CHAPTER hoặc MỤC tùy ngữ cảnh\n"
+        "  [4] Điện tích và điện trường. Nội dung: Điện tích...    ← CHAPTER (topic không có Chương N)\n"
+        "  [5] HƯỚNG DẪN VÀ ĐÁP SỐ. Nội dung: Bài 1: 5m/s        ← MỤC của chapter trước\n\n"
         "Trả về JSON thuần (KHÔNG markdown code block):\n"
         '{"chapters": [{"chapter_id": "ch1", "title": "Tên chương", '
         '"sections": [{"section_id": "ch1_sec1", "title": "Tên mục"}]}]}'
@@ -1300,6 +1395,7 @@ async def post_process_heading_tree(
 
     1. Rule-based cleaning (fast, deterministic)
     2. LLM consolidation (only if still > max_chapters)
+    3. Section-level prerequisite inference (LLM, skip on error)
 
     Called once during document upload/processing.
     """
@@ -1313,5 +1409,90 @@ async def post_process_heading_tree(
     if num_chapters > max_chapters:
         cleaned = await llm_consolidate_heading_tree(cleaned, max_chapters)
 
+    # Step 3: Infer section-level prerequisites
+    try:
+        cleaned = await _infer_section_prerequisites(cleaned)
+    except Exception as _e:
+        logger.warning("[post_process_heading_tree] section prereq inference skipped: %s", _e)
+
     return cleaned
+
+
+async def _infer_section_prerequisites(tree: dict) -> dict:
+    """Use LLM to infer section_prerequisites from section titles.
+
+    Builds a flat list of all sections across chapters, asks the LLM which
+    sections depend on which others, then stores the result as:
+        tree["section_prerequisites"] = {"ch1_sec2": ["ch1_sec1"], ...}
+
+    Skips silently if there are no sections or LLM fails.
+    """
+    chapters = tree.get("chapters", [])
+
+    # Collect all sections across all chapters
+    all_sections: list[dict] = []
+    for ch in chapters:
+        for sec in ch.get("sections", []):
+            sec_id = sec.get("section_id", "")
+            sec_title = sec.get("title", "")
+            ch_title = ch.get("title", "")
+            if sec_id and sec_title:
+                all_sections.append({
+                    "id": sec_id,
+                    "label": f"{sec_id} | {ch_title} > {sec_title}",
+                })
+
+    if len(all_sections) < 2:
+        # Nothing to infer dependencies between
+        tree.setdefault("section_prerequisites", {})
+        return tree
+
+    section_list = "\n".join(f"- {s['label']}" for s in all_sections)
+
+    prompt = (
+        "Dưới đây là danh sách các MỤC (section) của một tài liệu học thuật:\n\n"
+        f"{section_list}\n\n"
+        "NHIỆM VỤ: Với mỗi section_id, liệt kê các section_id khác mà nó PHỤ THUỘC "
+        "(cần học trước mới hiểu được). Chỉ liệt kê phụ thuộc trực tiếp, rõ ràng.\n"
+        "Nếu một section không phụ thuộc section nào khác, KHÔNG đưa nó vào JSON.\n\n"
+        "Trả về JSON thuần (không markdown):\n"
+        '{\"ch2_sec2\": [\"ch2_sec1\"], \"ch3_sec1\": [\"ch1_sec2\"]}'
+    )
+
+    try:
+        from app.agents.llm import get_llm_client
+        import json as _json
+
+        llm = get_llm_client()
+        response = await llm.chat(
+            messages=[{"role": "user", "content": prompt}],
+            role="planner",
+            temperature=0.0,
+            max_tokens=1000,
+        )
+        text = response.strip()
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        raw: dict = _json.loads(text.strip())
+
+        # Validate: only keep entries where keys and values are known section_ids
+        known_ids = {s["id"] for s in all_sections}
+        section_prerequisites: dict[str, list[str]] = {}
+        for sec_id, deps in raw.items():
+            if sec_id not in known_ids:
+                continue
+            valid_deps = [d for d in (deps if isinstance(deps, list) else []) if d in known_ids]
+            if valid_deps:
+                section_prerequisites[sec_id] = valid_deps
+
+        tree["section_prerequisites"] = section_prerequisites
+        logger.info(
+            "[_infer_section_prerequisites] %d section dependency relations inferred",
+            sum(len(v) for v in section_prerequisites.values()),
+        )
+    except Exception as exc:
+        logger.warning("[_infer_section_prerequisites] failed: %s — skipping", exc)
+        tree.setdefault("section_prerequisites", {})
+
+    return tree
 

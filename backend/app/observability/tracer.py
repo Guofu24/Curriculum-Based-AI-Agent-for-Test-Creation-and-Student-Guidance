@@ -237,16 +237,16 @@ class CurriculumTracer:
                                 level="ERROR",
                                 status_message=error_msg,
                             )
-                        except Exception:
-                            pass
+                        except Exception as _span_exc:
+                            logger.debug("tracer: span.update(error) failed: %s", _span_exc)
                     raise
 
                 finally:
                     if span is not None:
                         try:
                             span.end()
-                        except Exception:
-                            pass
+                        except Exception as _span_exc:
+                            logger.debug("tracer: span.end() failed: %s", _span_exc)
 
             return wrapper
         return decorator
@@ -308,8 +308,8 @@ class CurriculumTracer:
                     if self.enabled:
                         try:
                             span = common_span_setup()
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            logger.debug("tracer: skill span setup failed: %s", _e)
 
                     try:
                         result = await func(*args, **kwargs)
@@ -317,24 +317,24 @@ class CurriculumTracer:
                         if span is not None:
                             try:
                                 common_span_update(span, result, elapsed_ms, "success")
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.debug("tracer: skill span update failed: %s", _e)
                         return result
 
                     except Exception as exc:
                         if span is not None:
                             try:
                                 common_span_update(span, None, 0, "error", str(exc))
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.debug("tracer: skill span error update failed: %s", _e)
                         raise
 
                     finally:
                         if span is not None:
                             try:
                                 span.end()
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.debug("tracer: skill span.end() failed: %s", _e)
 
                 return wrapper
             else:
@@ -346,8 +346,8 @@ class CurriculumTracer:
                     if self.enabled:
                         try:
                             span = common_span_setup()
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            logger.debug("tracer: skill span setup failed: %s", _e)
 
                     try:
                         result = func(*args, **kwargs)
@@ -355,24 +355,24 @@ class CurriculumTracer:
                         if span is not None:
                             try:
                                 common_span_update(span, result, elapsed_ms, "success")
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.debug("tracer: skill span update failed: %s", _e)
                         return result
 
                     except Exception as exc:
                         if span is not None:
                             try:
                                 common_span_update(span, None, 0, "error", str(exc))
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.debug("tracer: skill span error update failed: %s", _e)
                         raise
 
                     finally:
                         if span is not None:
                             try:
                                 span.end()
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                logger.debug("tracer: skill span.end() failed: %s", _e)
 
                 return wrapper
 

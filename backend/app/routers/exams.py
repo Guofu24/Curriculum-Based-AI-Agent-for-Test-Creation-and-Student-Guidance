@@ -355,14 +355,13 @@ async def generate_exam(
     # G13: Check rate limit before creating exam
     await check_generate_rate_limit(redis, str(current_user.id))
 
-    # Extract section titles from scope strings ("Chương > Phần" → "Phần")
-    scope_sections: list[str] = []
-    if config.scope and isinstance(config.scope, list):
-        for s in config.scope:
-            if isinstance(s, str) and " > " in s:
-                section_part = s.split(" > ", 1)[1].strip()
-                if section_part:
-                    scope_sections.append(section_part)
+    # Extract section titles and resolve canonical section_ids (per-chapter, avoids cross-chapter collisions)
+    from app.routers.generate import _resolve_scope_section_ids
+    scope_sections, scope_section_ids, scope_units = await _resolve_scope_section_ids(
+        scope=list(config.scope) if config.scope else [],
+        document_id=str(config.document_id) if config.document_id else None,
+        db=db,
+    )
 
     # Create exam record
     exam = await service.create_exam(
@@ -378,6 +377,8 @@ async def generate_exam(
             "user_prompt": config.user_prompt,
             "extra_instructions": config.extra_instructions,
             "scope_sections": scope_sections if scope_sections else None,
+            "scope_section_ids": scope_section_ids if scope_section_ids else None,
+            "scope_units": scope_units if scope_units else None,
         },
     )
 
@@ -390,6 +391,7 @@ async def generate_exam(
         exam_config=exam.exam_config,
         user_prompt=config.user_prompt,
         extra_instructions=config.extra_instructions,
+        request_trace_id=job_id,
     )
 
     return ExamGenerateResponse(
@@ -1217,8 +1219,8 @@ async def approve_blueprint(
     key = f"hitl:approved:{exam_id}:1"
     try:
         await redis.set(key, "true", ttl=3600)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to save HITL approval to Redis (key=%s): %s", key, exc)
 
     # Resume the interrupted graph via Command(resume=...)
     # If no interrupt is found (graph already completed), this logs a warning but doesn't fail.
@@ -1318,7 +1320,8 @@ async def reject_blueprint(
             session_key = f"session:{exam_id}:{current_user.id}"
             try:
                 session = await redis.get_json(session_key)
-            except Exception:
+            except Exception as exc:
+                logger.warning("Failed to load session from Redis for exam %s: %s", exam_id, exc)
                 session = None
             generate_exam_task.delay(
                 exam_id=str(exam_id),

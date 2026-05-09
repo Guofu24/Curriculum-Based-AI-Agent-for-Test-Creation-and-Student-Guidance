@@ -25,6 +25,12 @@ from app.agents.graph.nodes.finalize_with_feedback import finalize_with_feedback
 from app.agents.graph.nodes.finalize_output import finalize_output
 from app.agents.graph.nodes.handle_timeout import handle_timeout
 from app.agents.graph.nodes.emit_clarification import emit_clarification
+from app.agents.graph.nodes.merge_plan_retrieval import merge_plan_retrieval
+from app.agents.graph.nodes.dispatch_tasks import dispatch_tasks
+
+# fanout_complex: passthrough node — two outgoing edges trigger parallel execution in LangGraph
+async def fanout_complex(state):
+    return state
 
 ALL_NODES = [
     ("initialize", initialize),
@@ -52,6 +58,9 @@ ALL_NODES = [
     ("finalize_output", finalize_output),
     ("handle_timeout", handle_timeout),
     ("emit_clarification", emit_clarification),
+    ("merge_plan_retrieval", merge_plan_retrieval),
+    ("dispatch_tasks", dispatch_tasks),
+    ("fanout_complex", fanout_complex),
 ]
 
 __all__ = [n[0] for n in ALL_NODES] + ["ALL_NODES"]

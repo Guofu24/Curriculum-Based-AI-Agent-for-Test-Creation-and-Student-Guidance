@@ -131,12 +131,19 @@ chunking_demo/
 kaggle/
 
 # Generated docs and local scratch workspaces
+Linh tinh/
 docs/File markdown/
 docs/chunks.md
 docs/*.md
 docs/plan.todo.md
 docs/*.tex
 docs/*.puml
+graph_pipeline.mmd
+graph_pipeline.png
+
+# Local diagnostic/helper scripts
+backend/export_graph.py
+backend/scan_models.py
 
 # Local reference/source drops (books data)
 Data sách/

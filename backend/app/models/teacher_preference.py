@@ -26,6 +26,10 @@ class TeacherPreference(Base):
     preferred_exam_types: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
     subject_focus: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     style_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Episodic memory: topic strings from past exams (capped at 200 entries)
+    topic_history: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    # Recent rejection feedback texts for learning teacher style (capped at 20)
+    reject_patterns: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

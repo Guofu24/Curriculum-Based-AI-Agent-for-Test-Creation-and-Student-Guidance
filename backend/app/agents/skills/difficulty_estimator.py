@@ -124,5 +124,7 @@ Số bước giải: {solution_steps}"""
         bloom_level: Literal["nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"] = "thong_hieu",
         solution_steps: Optional[int] = None,
     ) -> dict:
-        """Alias for estimate() to match skill interface."""
-        return await self.estimate(question_stem, bloom_level, solution_steps)
+        """Local bloom→score mapping — no LLM call to avoid 429."""
+        if solution_steps is None:
+            solution_steps = BLOOM_SOLUTION_STEPS.get(bloom_level, 2)
+        return self._fallback_estimate(bloom_level, solution_steps)

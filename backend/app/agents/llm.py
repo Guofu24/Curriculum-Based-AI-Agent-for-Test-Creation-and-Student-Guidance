@@ -111,14 +111,22 @@ class OpenAIProvider(BaseLLMProvider):
     async def chat(self, messages: list[dict], model: str, temperature: float = 0.7, max_tokens: int = 4096, **kwargs) -> str:  # noqa: ARG002
         from openai import AsyncOpenAI
 
-        async with AsyncOpenAI(api_key=self._api_key, base_url=self._base_url) as client:
+        async with AsyncOpenAI(api_key=self._api_key, base_url=self._base_url, max_retries=0) as client:
             resp = await client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-        return resp.choices[0].message.content or ""
+        choice = resp.choices[0]
+        content = choice.message.content or ""
+        logger.info(
+            "openai_chat_finish | model=%s finish_reason=%s content_len=%d",
+            model,
+            choice.finish_reason,
+            len(content),
+        )
+        return content
 
     async def chat_structured(
         self,
@@ -165,6 +173,7 @@ class OpenRouterProvider(BaseLLMProvider):
         async with AsyncOpenAI(
             api_key=self._api_key,
             base_url=self.BASE_URL,
+            max_retries=0,
             default_headers={
                 "HTTP-Referer": "https://github.com/curriculum-ai",
                 "X-Title": self._app_name,

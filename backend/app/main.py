@@ -97,6 +97,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Redis connection skipped: {e}")
 
+    # Initialize LangGraph checkpointer (PostgresSaver preferred, MemorySaver fallback)
+    try:
+        from app.agents.graph.builder import init_shared_checkpointer, get_checkpointer_type
+        await init_shared_checkpointer()
+        cp_type = get_checkpointer_type()
+        if cp_type == "MemorySaver":
+            logger.warning(
+                "LangGraph checkpointer: MemorySaver (in-memory) — "
+                "HITL state will be lost on restart. "
+                "Install psycopg + langgraph-checkpoint-postgres for persistence."
+            )
+        else:
+            logger.info("LangGraph checkpointer: %s ✓", cp_type)
+    except Exception as e:
+        logger.error("LangGraph checkpointer init failed: %s — HITL state will NOT persist", e)
+
     # Test Pinecone connection — surface package conflicts early
     try:
         from app.rag.vector_store import get_vector_store
@@ -132,6 +148,12 @@ async def lifespan(app: FastAPI):
     # Close all WebSocket listeners before shutting down Redis
     manager = get_connection_manager()
     await manager.shutdown()
+    # Close LangGraph checkpointer Postgres connection
+    try:
+        from app.agents.graph.builder import close_shared_checkpointer
+        await close_shared_checkpointer()
+    except Exception:
+        pass
     await close_db()
     await close_redis()
     logger.info("Cleanup complete")

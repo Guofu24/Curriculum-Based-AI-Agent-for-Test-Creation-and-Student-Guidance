@@ -102,6 +102,11 @@ class ExamGraphState(TypedDict, total=False):
     retry_issues: list[dict]
     topics_used: list[str]
 
+    # ── Dynamic task queue (Fix 3) ────────────────────────────────────────
+    # Agents enqueue tasks at runtime; dispatch_tasks node executes them.
+    # Schema: [{"type": "focused_retrieval", "chapters": [...], ...}]
+    task_queue: list[dict]
+
     # ── Memory / context ─────────────────────────────────────────────────
     retrieved_context: list[dict]  # retrieved chunks
     allowed_concepts: list[str]  # for ScopeGuard
