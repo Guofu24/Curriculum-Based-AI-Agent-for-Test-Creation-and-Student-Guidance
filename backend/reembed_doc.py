@@ -25,6 +25,7 @@ async def reembed_document(doc_id: uuid.UUID, dry_run: bool = False) -> bool:
     from app.core.database import async_session_maker
     from app.rag.vector_store import VectorStore
     from app.rag.parser import parse_document
+    from app.rag.cleaner import clean_markdown
     from app.rag.structure import detect_heading_tree_llm
     from app.rag.chunker import semantic_chunk
     from app.rag.embedder import embed_chunks
@@ -61,6 +62,14 @@ async def reembed_document(doc_id: uuid.UUID, dry_run: bool = False) -> bool:
             print(f"[ERROR] Parse failed: {e}")
             return False
         print(f"Parsed: {len(md):,} chars")
+
+        # Clean the raw markdown (strip boilerplate noise, normalise whitespace)
+        try:
+            clean_result = clean_markdown(md)
+            md = clean_result.cleaned
+            print(f"Cleaned: {len(md):,} chars")
+        except Exception as e:
+            print(f"[WARN] clean_markdown failed ({e}) — using raw parse output")
 
         # Prefer the heading_tree already stored in Postgres — it was produced by the
         # full detect_heading_tree_gemini_pdf + LLM pipeline during upload and is
@@ -101,11 +110,37 @@ async def reembed_document(doc_id: uuid.UUID, dry_run: bool = False) -> bool:
 
         if dry_run:
             print("\n[DRY RUN] Skipping embed + upsert.")
-            # Print sample of section_id assignments
+
+            # chapter_confidence distribution
+            from collections import Counter
+            ch_conf = Counter(c.get("chapter_confidence", "unknown") for c in chunks)
+            print(f"\n  chapter_confidence distribution: {dict(ch_conf)}")
+
+            # per-chapter breakdown
+            ch_breakdown: dict = {}
+            for c in chunks:
+                ch_id = c.get("chapter_id", "(none)")
+                cc = c.get("chapter_confidence", "unknown")
+                bd = ch_breakdown.setdefault(ch_id, Counter())
+                bd[cc] += 1
+            print("  per-chapter breakdown:")
+            for ch_id, bd in sorted(ch_breakdown.items()):
+                print(f"    {ch_id:20s}  " + "  ".join(f"{k}={v}" for k, v in sorted(bd.items())))
+
+            # sample inferred chunks
+            inferred = [c for c in chunks if c.get("chapter_confidence") == "inferred"]
+            if inferred:
+                print(f"\n  Sample inferred chunks ({len(inferred)} total):")
+                for c in inferred[:5]:
+                    print(f"    chunk={c['chunk_id']:30s} | candidate={c.get('candidate_chapter_ids')} "
+                          f"| content_start={c.get('content','')[:50]!r}")
+
+            # sample of first 5 chunks
+            print("\n  First 5 chunks:")
             for c in chunks[:5]:
-                print(f"  chunk={c['chunk_id']} | chapter_id={c['chapter_id']} | "
-                      f"section_id={c.get('section_id','(empty)')} | "
-                      f"section={c.get('section','(empty)')[:40]}")
+                print(f"    chunk={c['chunk_id']} | chapter_id={c['chapter_id']} | "
+                      f"ch_conf={c.get('chapter_confidence','?')} | "
+                      f"section_id={c.get('section_id','(empty)')}")
             return True
 
         print("\nEmbedding (this may take a while)...")
@@ -119,6 +154,15 @@ async def reembed_document(doc_id: uuid.UUID, dry_run: bool = False) -> bool:
 
         print("Upserting to Pinecone...")
         vs = VectorStore()
+
+        # Delete ALL old vectors for this document first, so no stale metadata
+        # from previous runs survives in Pinecone.
+        print("  Deleting old vectors...")
+        try:
+            await vs.delete_all_document_vectors(str(doc_id))
+        except Exception as e:
+            print(f"  [WARN] Delete old vectors failed: {e} — continuing anyway")
+
         by_ch: dict = {}
         for c in chunks:
             by_ch.setdefault(c.get("chapter_id", "ch_unknown"), []).append(c)

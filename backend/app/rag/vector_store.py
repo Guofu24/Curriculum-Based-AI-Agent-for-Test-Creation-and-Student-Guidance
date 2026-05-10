@@ -115,8 +115,11 @@ class VectorStore:
                     "chunk_id": chunk.get("chunk_id", ""),
                     "chapter": chunk.get("chapter", ""),
                     "chapter_id": chapter_id,  # Explicit chapter_id for metadata filtering
+                    "chapter_confidence": chunk.get("chapter_confidence", "unknown"),
+                    "candidate_chapter_ids": chunk.get("candidate_chapter_ids", []),
                     "section": chunk.get("section", ""),
                     "section_id": chunk.get("section_id", ""),
+                    "section_confidence": chunk.get("section_confidence", "unknown"),
                     "content_type": chunk.get("content_type", "text"),
                     "content": chunk.get("content", "")[:2000],
                     "latex_repr": chunk.get("latex_repr", "") or "",

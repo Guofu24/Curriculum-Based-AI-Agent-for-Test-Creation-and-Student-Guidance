@@ -184,14 +184,56 @@ def _build_canonical_lookup(
     return lookup
 
 
+# Keywords whose normalized form signals an exercise/solution block.
+# When an UNMATCHED heading matches one of these, we reset section_id → ""
+# so subsequent chunks are not falsely attributed to the last theory section.
+_EXERCISE_RESET_NORMS: frozenset[str] = frozenset({
+    "bai tap", "bai giai", "dap so", "dap an",
+    "huong dan", "huong dan giai", "loi giai",
+    "ket qua", "giai", "hd",
+    "phan bai tap", "phan huong dan", "phan dap so",
+    "solution", "answer", "exercise", "exercises",
+})
+
+# Regex patterns that also trigger section reset (matched against normalized title).
+# Covers: "Bài 1", "Bài 2.", "Bài 1.a", "Bài số 3", etc.
+_EXERCISE_RESET_RE = re.compile(
+    r"^bai\s+\d"           # bài 1, bài 2, bài 12
+    r"|^bai\s+so\s+\d"     # bài số 1
+    r"|^\d+[\.\)]\s*$"     # bare number: "1.", "2)", etc. (single number heading)
+)
+
+
+def _is_exercise_reset_heading(title: str) -> bool:
+    """Return True if *title* clearly marks an exercise / answer-key block.
+
+    Only called on lines that did NOT match the canonical heading_tree, so we
+    will never accidentally reset a theory section heading.
+    """
+    norm = _normalize_title(title)
+    if not norm:
+        return False
+    # Exact match
+    if norm in _EXERCISE_RESET_NORMS:
+        return True
+    # Regex patterns (numbered exercises: "Bài 1", "Bài 2.", ...)
+    if _EXERCISE_RESET_RE.search(norm):
+        return True
+    # Starts-with match (e.g. "huong dan phan v" starts with "huong dan")
+    return any(norm.startswith(kw) for kw in _EXERCISE_RESET_NORMS if len(kw) >= 3)
+
+
 def _audit_chunks(chunks: list[dict], heading_tree: dict) -> None:
     """Log warnings when chunk distribution looks wrong.
 
     Checks:
     - Any canonical chapter in heading_tree with 0 chunks
     - Any single chapter holding >80% of all chunks
+    - Any single section holding >50% of its chapter's chunks (possible bloat)
     - All chunks missing section_id
     - More than 10% of chunks missing chapter_id
+    - More than 60% of chunks with section_confidence=unknown
+    - More than 60% of chunks with chapter_confidence=unknown
     """
     if not chunks:
         return
@@ -200,6 +242,8 @@ def _audit_chunks(chunks: list[dict], heading_tree: dict) -> None:
     ch_counts: dict[str, int] = {}
     no_section = 0
     no_chapter = 0
+    unknown_sec_conf = 0
+    unknown_ch_conf = 0
 
     for c in chunks:
         ch_id = c.get("chapter_id", "")
@@ -208,6 +252,10 @@ def _audit_chunks(chunks: list[dict], heading_tree: dict) -> None:
             no_section += 1
         if not ch_id:
             no_chapter += 1
+        if c.get("section_confidence", "unknown") == "unknown":
+            unknown_sec_conf += 1
+        if c.get("chapter_confidence", "unknown") == "unknown":
+            unknown_ch_conf += 1
 
     for ch in heading_tree.get("chapters", []):
         ch_id = ch.get("chapter_id", "")
@@ -218,13 +266,27 @@ def _audit_chunks(chunks: list[dict], heading_tree: dict) -> None:
                 ch_id,
             )
 
-    for ch_id, count in ch_counts.items():
-        ratio = count / total
+    for ch_id, ch_count in ch_counts.items():
+        ratio = ch_count / total
         if ratio > 0.80 and len(ch_counts) > 1:
             logger.warning(
                 "[chunker audit] chapter %r holds %.0f%% of all %d chunks — other chapters may be missing",
                 ch_id, ratio * 100, total,
             )
+
+        # Per-section bloat check within this chapter
+        sec_counts: dict[str, int] = {}
+        for c in chunks:
+            if c.get("chapter_id") == ch_id:
+                sid = c.get("section_id", "")
+                if sid:
+                    sec_counts[sid] = sec_counts.get(sid, 0) + 1
+        for sec_id, sec_count in sec_counts.items():
+            if ch_count > 0 and sec_count / ch_count > 0.50:
+                logger.warning(
+                    "[chunker audit] section %r holds %d/%d (%.0f%%) of chapter %r chunks — possible bloat",
+                    sec_id, sec_count, ch_count, sec_count / ch_count * 100, ch_id,
+                )
 
     if no_section == total:
         logger.warning("[chunker audit] ALL %d chunks are missing section_id", total)
@@ -235,11 +297,192 @@ def _audit_chunks(chunks: list[dict], heading_tree: dict) -> None:
             no_chapter, total,
         )
 
+    if unknown_sec_conf > total * 0.60:
+        logger.warning(
+            "[chunker audit] %.0f%% of chunks have section_confidence=unknown — "
+            "section headings may not have been detected",
+            unknown_sec_conf / total * 100,
+        )
+
+    if unknown_ch_conf > total * 0.60:
+        logger.warning(
+            "[chunker audit] %.0f%% of chunks have chapter_confidence=unknown — "
+            "likely exercise/solution content without chapter anchor",
+            unknown_ch_conf / total * 100,
+        )
+
+    # Per-chapter confidence breakdown
+    ch_conf_breakdown: dict[str, dict] = {}
+    for c in chunks:
+        ch_id = c.get("chapter_id", "") or "(no_chapter)"
+        bd = ch_conf_breakdown.setdefault(ch_id, {"total": 0, "ch_high": 0, "ch_unknown": 0, "inferred": 0, "multi": 0})
+        bd["total"] += 1
+        cc = c.get("chapter_confidence", "unknown")
+        if cc == "high":
+            bd["ch_high"] += 1
+        elif cc == "inferred":
+            bd["inferred"] += 1
+        elif cc == "multi":
+            bd["multi"] += 1
+        else:
+            bd["ch_unknown"] += 1
+
     logger.info(
-        "[chunker audit] %d chunks | chapters: %s",
-        total,
-        {k: v for k, v in sorted(ch_counts.items())},
+        "[chunker audit] %d chunks | sec_conf_unknown: %d | ch_conf_unknown: %d",
+        total, unknown_sec_conf, unknown_ch_conf,
     )
+    for ch_id, bd in sorted(ch_conf_breakdown.items()):
+        logger.info(
+            "[chunker audit]   %-20s total=%-4d  ch_high=%-4d  inferred=%-4d  multi=%-4d  unknown=%d",
+            ch_id, bd["total"], bd["ch_high"], bd["inferred"], bd["multi"], bd["ch_unknown"],
+        )
+
+
+# ─── BM25 exercise-block classifier (Tầng 2) ──────────────────────────────────
+
+_BM25_MIN_SCORE = 1.0      # minimum top1 score to assign any chapter
+_BM25_INFER_RATIO = 1.5    # top1/top2 >= ratio → "inferred"; else "multi"
+
+
+def _bm25_tokenize(text: str) -> list[str]:
+    """Strip diacritics, lowercase, split; filter tokens < 2 chars or pure digits."""
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", text)
+    stripped = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+    no_punct = re.sub(r"[^\w\s]", " ", stripped.lower())
+    return [t for t in no_punct.split() if len(t) >= 2 and not t.isdigit()]
+
+
+def _bm25_score(
+    query_tokens: list[str],
+    doc_tokens: list[str],
+    corpus_df: dict[str, int],
+    corpus_size: int,
+    avgdl: float,
+    k1: float = 1.5,
+    b: float = 0.75,
+) -> float:
+    """BM25 score for one (query, document) pair given pre-computed corpus stats."""
+    import math
+    from collections import Counter
+    tf = Counter(doc_tokens)
+    doc_len = max(len(doc_tokens), 1)
+    score = 0.0
+    for t in set(query_tokens):
+        if t not in tf:
+            continue
+        df = corpus_df.get(t, 0)
+        if df == 0:
+            continue
+        idf = math.log((corpus_size - df + 0.5) / (df + 0.5) + 1.0)
+        tf_t = tf[t]
+        score += idf * (tf_t * (k1 + 1)) / (
+            tf_t + k1 * (1 - b + b * doc_len / max(avgdl, 1))
+        )
+    return score
+
+
+def _classify_exercise_chunks(chunks: list[dict]) -> list[dict]:
+    """Post-chunking BM25 classifier for exercise blocks.
+
+    For every chunk whose chapter_confidence="unknown", compute BM25 similarity
+    against chapter profiles built from high-confidence theory chunks (full
+    content + chapter/section title).  Assigns:
+
+      chapter_confidence = "inferred"  — clear winner (top1/top2 >= 1.5)
+      chapter_confidence = "multi"     — two chapters compete closely
+      chapter_confidence = "unknown"   — no good match (score < MIN_SCORE)
+
+      candidate_chapter_ids = [ch1]           # "inferred"
+      candidate_chapter_ids = [ch1, ch2]      # "multi"
+      candidate_chapter_ids = []              # "unknown"
+
+    chapter_id is NEVER modified — kept as the last-seen canonical chapter so
+    retrieval still works without immediate builder changes.
+    """
+    high_chunks = [c for c in chunks if c.get("chapter_confidence") == "high"]
+    unknown_chunks = [c for c in chunks if c.get("chapter_confidence") == "unknown"]
+
+    if not high_chunks or not unknown_chunks:
+        return chunks
+
+    # Build chapter profiles: chapter_id → flat token list
+    profiles: dict[str, list[str]] = {}
+    for c in high_chunks:
+        ch_id = c.get("chapter_id", "")
+        if not ch_id:
+            continue
+        text = " ".join([
+            c.get("chapter", ""),
+            c.get("section", ""),
+            c.get("content", ""),
+        ])
+        profiles.setdefault(ch_id, []).extend(_bm25_tokenize(text))
+
+    if not profiles:
+        return chunks
+
+    chapter_ids = sorted(profiles.keys())
+    corpus_size = len(chapter_ids)
+
+    # Document-frequency across chapter profiles (each chapter = one "document")
+    corpus_df: dict[str, int] = {}
+    for tokens in profiles.values():
+        for t in set(tokens):
+            corpus_df[t] = corpus_df.get(t, 0) + 1
+
+    avgdl = sum(len(t) for t in profiles.values()) / len(profiles)
+
+    n_inferred = n_multi = 0
+    result: list[dict] = []
+
+    for c in chunks:
+        if c.get("chapter_confidence") != "unknown":
+            result.append(c)
+            continue
+
+        query_tokens = _bm25_tokenize(c.get("content", ""))
+        if not query_tokens:
+            result.append({**c, "candidate_chapter_ids": []})
+            continue
+
+        scores = {
+            ch_id: _bm25_score(
+                query_tokens, profiles[ch_id], corpus_df, corpus_size, avgdl
+            )
+            for ch_id in chapter_ids
+        }
+        sorted_chs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        top1_ch, top1_score = sorted_chs[0]
+
+        if top1_score < _BM25_MIN_SCORE:
+            result.append({**c, "candidate_chapter_ids": []})
+            continue
+
+        if len(sorted_chs) > 1:
+            top2_ch, top2_score = sorted_chs[1]
+            if top2_score > 0 and top1_score / top2_score < _BM25_INFER_RATIO:
+                result.append({
+                    **c,
+                    "chapter_confidence": "multi",
+                    "candidate_chapter_ids": [top1_ch, top2_ch],
+                })
+                n_multi += 1
+                continue
+
+        result.append({
+            **c,
+            "chapter_confidence": "inferred",
+            "candidate_chapter_ids": [top1_ch],
+        })
+        n_inferred += 1
+
+    logger.info(
+        "[chunker classify] %d unknown chunks → inferred=%d  multi=%d  still_unknown=%d",
+        len(unknown_chunks), n_inferred, n_multi,
+        len(unknown_chunks) - n_inferred - n_multi,
+    )
+    return result
 
 
 def _simple_chunk(
@@ -276,11 +519,17 @@ def _simple_chunk(
     in_preamble = True          # discard content until first canonical heading
     current_chapter = ""
     current_chapter_id = ""
+    current_chapter_confidence: str = "unknown"  # "high" | "unknown"
     current_section = ""
     current_section_id = ""
+    current_section_confidence: str = "unknown"  # "high" | "unknown"
     current_lines: list[str] = []
     current_size = 0
     chunk_index = 0
+    # content lines seen since the last CHAPTER switch.
+    # Used to suppress rapid plain-text chapter switches (TOC false-positives).
+    # Markdown # headings bypass this guard.
+    content_lines_since_ch_switch: int = 0
     # --------------------------------------------------------------------
 
     def flush() -> None:
@@ -297,8 +546,10 @@ def _simple_chunk(
             "document_id": "",
             "chapter": current_chapter,
             "chapter_id": current_chapter_id,
+            "chapter_confidence": current_chapter_confidence,
             "section": current_section,
             "section_id": current_section_id,
+            "section_confidence": current_section_confidence,
             "content_type": _detect_content_type(content),
             "page_number": _extract_page_number(content),
             "latex_repr": _extract_latex_from_content(content),
@@ -313,32 +564,44 @@ def _simple_chunk(
         for key in (title.lower(), _normalize_title(title)):
             if key and key in canonical_lookup:
                 return canonical_lookup[key]
-        # Prefix containment: canonical is an unambiguous prefix of the parsed title
         norm = _normalize_title(title)
         if norm and len(norm) >= 4:
             for canon_key, entry in canonical_lookup.items():
-                if len(canon_key) >= 4 and norm.startswith(canon_key):
-                    return entry
+                if len(canon_key) >= 4:
+                    # Line starts with canonical (e.g. long line whose prefix is canonical)
+                    if norm.startswith(canon_key):
+                        return entry
+                    # Canonical starts with line (e.g. short heading that is prefix
+                    # of a longer canonical title: "Bản mặt song song" vs
+                    # "2. Bản mặt song song.Công thức...")
+                    if len(norm) >= 8 and canon_key.startswith(norm):
+                        return entry
         return None
 
-    def _apply_match(match: tuple[str, str, str, str]) -> None:
+    def _apply_match(match: tuple[str, str, str, str], is_markdown: bool = False) -> None:
         """Switch chapter/section state to the matched canonical entry."""
         nonlocal in_preamble
-        nonlocal current_chapter, current_chapter_id
-        nonlocal current_section, current_section_id
+        nonlocal current_chapter, current_chapter_id, current_chapter_confidence
+        nonlocal current_section, current_section_id, current_section_confidence
+        nonlocal content_lines_since_ch_switch
         ch_id, ch_raw_title, sec_id, sec_raw_title = match
         ch_node = ch_lookup.get(ch_id, {})
         ch_title = ch_node.get("title", ch_raw_title)
         flush()
         in_preamble = False
+        if ch_id != current_chapter_id:
+            content_lines_since_ch_switch = 0  # reset on chapter switch
         current_chapter_id = ch_id
         current_chapter = ch_title
+        current_chapter_confidence = "high"  # canonical match → always high
         if sec_id:
             current_section_id = sec_id
             current_section = sec_raw_title
+            current_section_confidence = "high"
         else:
             current_section_id = ""
             current_section = ""
+            current_section_confidence = "unknown"
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -348,6 +611,7 @@ def _simple_chunk(
         # ---- try to extract a heading title ----------------------------
         title: str | None = None
         md_match = re.match(r"^(#{1,3})\s+(.+)$", line)
+        is_markdown_heading = md_match is not None
         if md_match:
             title = md_match.group(2).strip()
         elif len(line) <= 120:
@@ -357,19 +621,61 @@ def _simple_chunk(
         if title is not None:
             entry = _match(title)
             if entry is not None:
-                _apply_match(entry)
+                # TOC guard: suppress rapid plain-text chapter switches.
+                # If we just switched chapter and have seen < 3 real content
+                # lines since, a plain-text heading switching to a DIFFERENT
+                # chapter is almost certainly a TOC line, not an anchor.
+                new_ch_id = entry[0]
+                is_ch_switch = (new_ch_id != current_chapter_id)
+                if (
+                    not is_markdown_heading      # plain-text heading
+                    and not in_preamble          # preamble anchor is always accepted
+                    and is_ch_switch             # would change chapter
+                    and content_lines_since_ch_switch < 3  # too few content lines
+                ):
+                    logger.debug(
+                        "[chunker] TOC guard: suppressed rapid plain-text chapter switch "
+                        "%r→%r (%d content lines since last switch)",
+                        current_chapter_id, new_ch_id, content_lines_since_ch_switch,
+                    )
+                    # treat as unmatched — fall through to content handling
+                    entry = None
+
+            if entry is not None:
+                _apply_match(entry, is_markdown=is_markdown_heading)
                 continue   # heading line itself is not content
             else:
-                logger.debug(
-                    "[chunker] unmatched heading-like line %r — kept as content",
-                    line[:80],
-                )
+                # Check if unmatched heading is an exercise/solution block marker.
+                # If so, flush current chunk and reset section_id to avoid falsely
+                # attributing exercise content to the preceding theory section.
+                if _is_exercise_reset_heading(title):
+                    flush()
+                    current_section_id = ""
+                    current_section = ""
+                    current_section_confidence = "unknown"
+                    # Downgrade chapter confidence — we're in exercise territory,
+                    # no longer certain the last canonical chapter is still correct.
+                    # chapter_id is KEPT (not cleared) so retrieval still finds these
+                    # chunks; chapter_confidence=unknown signals the uncertainty.
+                    current_chapter_confidence = "unknown"
+                    logger.debug(
+                        "[chunker] exercise-reset heading %r — "
+                        "section cleared, chapter_id=%r kept, chapter_confidence→unknown",
+                        line[:80], current_chapter_id,
+                    )
+                else:
+                    logger.debug(
+                        "[chunker] unmatched heading-like line %r — kept as content",
+                        line[:80],
+                    )
                 # Fall through to content handling below
 
         # ---- content line ----------------------------------------------
         if in_preamble:
             logger.debug("[chunker] preamble discard: %r", line[:60])
             continue
+
+        content_lines_since_ch_switch += 1
 
         if current_size + len(line) > chunk_size and current_lines:
             flush()
@@ -381,6 +687,7 @@ def _simple_chunk(
             current_size += len(line)
 
     flush()
+    chunks = _classify_exercise_chunks(chunks)
     _audit_chunks(chunks, heading_tree)
     return chunks
 
