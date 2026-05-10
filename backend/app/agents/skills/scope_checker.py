@@ -1,33 +1,52 @@
 """Scope checker skill - verifies questions are within the selected scope."""
 
-import json
-from typing import Literal
-from app.agents.llm import get_llm_client
+import re
+import unicodedata
 from app.observability.tracer import get_tracer
+
+# Vietnamese + English stop words for meaningful-word filtering
+_STOP_WORDS = frozenset({
+    "mot", "la", "cua", "co", "va", "voi", "cac", "duoc", "trong", "de",
+    "khong", "cho", "nay", "do", "khi", "tu", "nhu", "theo", "hay", "hoac",
+    "thi", "ma", "ve", "ra", "da", "se", "bi", "con", "den", "boi",
+    "nao", "day", "len", "xuong", "vao", "tai", "tren", "duoi", "nen",
+    "the", "a", "an", "is", "are", "was", "were", "be", "been",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "of", "in", "to", "for",
+    "on", "at", "by", "with", "from", "as", "or", "and", "but", "not",
+    "that", "this", "it", "its",
+})
+
+
+def _normalize(text: str) -> str:
+    """NFD-strip diacritics and lowercase."""
+    nfd = unicodedata.normalize("NFD", text.lower())
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+
+def _meaningful_words(text: str) -> set[str]:
+    """Extract non-stop words (length >= 2) from text."""
+    words = set(re.findall(r'\b[a-z0-9]{2,}\b', _normalize(text)))
+    return words - _STOP_WORDS
+
+
+def _word_trigrams(text: str) -> set[tuple]:
+    """Word-level trigrams for verbatim-copy detection."""
+    words = re.findall(r'\b[a-z0-9]+\b', _normalize(text))
+    if len(words) < 3:
+        return set()
+    return {(words[i], words[i + 1], words[i + 2]) for i in range(len(words) - 2)}
 
 
 class ScopeCheckerSkill:
     """
-    Verifies that a question is within the allowed scope.
-    Compares question content against retrieved knowledge chunks.
+    Deterministic local scope checker — no LLM calls (quota-safe).
+
+    Returns a result dict with 'is_hard_fail' so ValidatorAgent can apply
+    the two-tier policy:
+      - is_hard_fail=True  → add to all_issues → trigger retry
+      - is_hard_fail=False → needs_review only, no retry
     """
-
-    SCOPE_CHECK_PROMPT = """Bạn là chuyên gia kiểm tra câu hỏi có nằm trong phạm vi kiến thức cho phép hay không.
-
-Nhiệm vụ:
-1. Đọc câu hỏi
-2. Đọc các chunk kiến thức được phép (allowed content)
-3. Kiểm tra xem câu hỏi có sử dụng kiến thức ngoài phạm vi không
-4. Kiểm tra xem câu hỏi có bị hallucination (kiến thức không có trong tài liệu) không
-
-Trả về JSON:
-{
-  "in_scope": true/false,
-  "violation_type": null/"out_of_scope"|"hallucination",
-  "evidence_chunk_ids": ["list of chunk IDs that support this question"],
-  "confidence": 0.0-1.0,
-  "reasoning": "Giải thích ngắn"
-}"""
 
     @get_tracer().skill_span("scope_checker")
     async def check(
@@ -36,85 +55,82 @@ Trả về JSON:
         allowed_content: list[dict],
         scope_chapters: list[str],
     ) -> dict:
-        """Check if a question is within scope."""
-        if not allowed_content:
+        """Legacy interface — delegates to _local_check."""
+        return self._local_check(question_text=question_stem, primary_chunks=allowed_content)
+
+    def _local_check(
+        self,
+        question_text: str,
+        primary_chunks: list[dict],
+    ) -> dict:
+        """
+        Deterministic scope check using word overlap against primary chunks only.
+
+        Thresholds:
+          overlap >= 4 meaningful words  → in_scope (matched)
+          overlap 2-3                    → uncertain (soft flag)
+          overlap < 2                    → no_primary_evidence (hard fail)
+          no primary_chunks              → no_grounding_context (hard fail)
+        """
+        if not primary_chunks:
+            return {
+                "in_scope": False,
+                "confidence": 0.9,
+                "violation_type": "no_grounding_context",
+                "evidence_chunk_ids": [],
+                "reasoning": "Không có primary chunks — không thể xác minh phạm vi kiến thức.",
+                "is_hard_fail": True,
+            }
+
+        if not question_text.strip():
             return {
                 "in_scope": True,
+                "confidence": 0.3,
                 "violation_type": None,
                 "evidence_chunk_ids": [],
-                "confidence": 0.0,
-                "reasoning": "No content available to check",
+                "reasoning": "Câu hỏi rỗng — bỏ qua kiểm tra scope.",
+                "is_hard_fail": False,
             }
 
-        client = get_llm_client()
+        q_words = _meaningful_words(question_text)
+        best_overlap = 0
+        matching_ids: list[str] = []
 
-        content_summary = "\n\n".join([
-            f"[Chunk {chunk.get('chunk_id', 'unknown')}]: {chunk.get('content', '')[:300]}"
-            for chunk in allowed_content[:10]
-        ])
+        for chunk in primary_chunks[:20]:  # cap to avoid O(n²)
+            chunk_words = _meaningful_words(chunk.get("content", ""))
+            overlap = len(q_words & chunk_words)
+            if overlap > best_overlap:
+                best_overlap = overlap
+            if overlap >= 4:
+                matching_ids.append(chunk.get("chunk_id", "unknown"))
 
-        scope_str = ", ".join(scope_chapters)
-
-        user_content = f"""Câu hỏi cần kiểm tra:
-{question_stem}
-
-Phạm vi cho phép (chapters): {scope_str}
-
-Kiến thức có sẵn (các chunk):
-{content_summary}"""
-
-        messages = [
-            {"role": "system", "content": self.SCOPE_CHECK_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
-
-        try:
-            response = await client.chat(
-                messages=messages,
-                role="skills",
-                max_tokens=300,
-                temperature=0.1,
-            )
-
-            result = json.loads(response)
-
-            return {
-                "in_scope": result.get("in_scope", True),
-                "violation_type": result.get("violation_type"),
-                "evidence_chunk_ids": result.get("evidence_chunk_ids", []),
-                "confidence": float(result.get("confidence", 0.5)),
-                "reasoning": result.get("reasoning", ""),
-            }
-
-        except Exception as e:
-            return self._fallback_check(question_stem, allowed_content)
-
-    def _fallback_check(self, question_stem: str, allowed_content: list[dict]) -> dict:
-        """Fallback basic check - look for keyword matches."""
-        stem_lower = question_stem.lower()
-
-        matching_chunks = []
-        for chunk in allowed_content:
-            content_lower = chunk.get("content", "").lower()
-            words = set(stem_lower.split()) & set(content_lower.split())
-            if len(words) >= 3:
-                matching_chunks.append(chunk.get("chunk_id", "unknown"))
-
-        if matching_chunks:
+        if matching_ids:
             return {
                 "in_scope": True,
+                "confidence": min(0.5 + best_overlap * 0.05, 0.9),
                 "violation_type": None,
-                "evidence_chunk_ids": matching_chunks[:3],
-                "confidence": 0.4,
-                "reasoning": "Basic keyword overlap found",
+                "evidence_chunk_ids": matching_ids[:3],
+                "reasoning": f"{len(matching_ids)} chunk có overlap ≥ 4 từ có nghĩa.",
+                "is_hard_fail": False,
+            }
+
+        if best_overlap >= 2:
+            return {
+                "in_scope": True,  # benefit of the doubt
+                "confidence": 0.35,
+                "violation_type": None,
+                "evidence_chunk_ids": [],
+                "reasoning": f"Overlap yếu ({best_overlap} từ) — không đủ để xác nhận hoặc từ chối.",
+                "is_hard_fail": False,
             }
 
         return {
             "in_scope": False,
-            "violation_type": "hallucination",
+            "confidence": 0.7,
+            "violation_type": "no_primary_evidence",
             "evidence_chunk_ids": [],
-            "confidence": 0.3,
-            "reasoning": "No matching content found (fallback)",
+            "reasoning": f"Không tìm thấy primary chunk có overlap đủ mạnh (best={best_overlap} từ).",
+            "is_hard_fail": True,
         }
 
     async def run(

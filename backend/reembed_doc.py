@@ -62,12 +62,22 @@ async def reembed_document(doc_id: uuid.UUID, dry_run: bool = False) -> bool:
             return False
         print(f"Parsed: {len(md):,} chars")
 
-        print("Detecting heading structure (LLM)...")
-        try:
-            tree = await detect_heading_tree_llm(md)
-        except Exception as e:
-            print(f"[WARN] LLM heading detection failed ({e}), using existing heading_tree from DB")
-            tree = doc.heading_tree or {"chapters": []}
+        # Prefer the heading_tree already stored in Postgres — it was produced by the
+        # full detect_heading_tree_gemini_pdf + LLM pipeline during upload and is
+        # already canonical (ch1/ch2/ch3).  Only re-detect when the stored tree is
+        # missing or empty, to avoid overwriting a clean tree with a potentially
+        # different LLM run.
+        stored_tree = doc.heading_tree if isinstance(doc.heading_tree, dict) else {}
+        if stored_tree.get("chapters"):
+            print(f"Using heading_tree from DB ({len(stored_tree['chapters'])} chapters).")
+            tree = stored_tree
+        else:
+            print("heading_tree missing in DB — re-detecting via LLM...")
+            try:
+                tree = await detect_heading_tree_llm(md)
+            except Exception as e:
+                print(f"[WARN] LLM heading detection failed ({e}), proceeding with empty tree")
+                tree = {"chapters": []}
 
         chapters = tree.get("chapters", [])
         print(f"Chapters ({len(chapters)}):")

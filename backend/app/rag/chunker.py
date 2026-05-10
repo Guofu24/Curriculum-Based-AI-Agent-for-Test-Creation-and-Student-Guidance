@@ -1,9 +1,12 @@
 """Semantic chunking using LlamaIndex."""
 
+import logging
 import re
 from typing import Any
 
 from app.rag.structure import _is_heading_chapter_level
+
+logger = logging.getLogger("app.rag.chunker")
 
 
 def semantic_chunk(
@@ -122,121 +125,265 @@ def _build_heading_tree_lookup(
     return title_to_chapter_id, ch_sec_lookup
 
 
+def _normalize_title(s: str) -> str:
+    """Normalize a heading title for canonical matching.
+
+    Steps (order matters):
+    1. Strip leading/trailing whitespace
+    2. NFD decompose + drop combining marks (strips Vietnamese diacritics)
+    3. Lowercase
+    4. Remove leading numbering prefix:
+       - Roman numerals:  I., II., III., ... (up to 8 chars)
+       - Single letter:   A., B., C., ...
+       - Decimal number:  1., 2., 1.1., 2.3.4., ...
+       Each must be followed by a space or end of string.
+    5. Strip trailing punctuation / parentheses
+    6. Collapse internal whitespace
+    """
+    import unicodedata
+    s = s.strip()
+    nfd = unicodedata.normalize("NFD", s)
+    s = "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+    s = s.lower()
+    # Remove leading numbering: roman (i–viii), letter (a–z), decimal (1.2.3)
+    s = re.sub(r"^(?:[ivxlcdm]{1,8}|[a-z]|\d+(?:\.\d+)*)[\.\):]\s*", "", s)
+    # Strip trailing punctuation
+    s = s.rstrip(".,;:!?()-\u2019 ")
+    # Collapse whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _build_canonical_lookup(
+    heading_tree: dict,
+) -> dict[str, tuple[str, str, str, str]]:
+    """Build a flat normalized-title → (chapter_id, chapter_title, section_id, section_title) map.
+
+    chapter-level entries have section_id = section_title = "".
+    Both the raw-lower and the fully normalized form of each title are stored,
+    so a single lookup call finds either form.
+    """
+    lookup: dict[str, tuple[str, str, str, str]] = {}
+
+    for ch in heading_tree.get("chapters", []):
+        ch_id = ch.get("chapter_id", "")
+        ch_title = ch.get("title", "").strip()
+        if ch_id and ch_title:
+            for key in (ch_title.lower(), _normalize_title(ch_title)):
+                if key:
+                    lookup[key] = (ch_id, ch_title, "", "")
+
+        for sec in ch.get("sections", []):
+            sec_id = sec.get("section_id", "")
+            sec_title = sec.get("title", "").strip()
+            if ch_id and sec_id and sec_title:
+                for key in (sec_title.lower(), _normalize_title(sec_title)):
+                    if key:
+                        lookup[key] = (ch_id, ch_title, sec_id, sec_title)
+
+    return lookup
+
+
+def _audit_chunks(chunks: list[dict], heading_tree: dict) -> None:
+    """Log warnings when chunk distribution looks wrong.
+
+    Checks:
+    - Any canonical chapter in heading_tree with 0 chunks
+    - Any single chapter holding >80% of all chunks
+    - All chunks missing section_id
+    - More than 10% of chunks missing chapter_id
+    """
+    if not chunks:
+        return
+
+    total = len(chunks)
+    ch_counts: dict[str, int] = {}
+    no_section = 0
+    no_chapter = 0
+
+    for c in chunks:
+        ch_id = c.get("chapter_id", "")
+        ch_counts[ch_id] = ch_counts.get(ch_id, 0) + 1
+        if not c.get("section_id"):
+            no_section += 1
+        if not ch_id:
+            no_chapter += 1
+
+    for ch in heading_tree.get("chapters", []):
+        ch_id = ch.get("chapter_id", "")
+        count = ch_counts.get(ch_id, 0)
+        if count == 0:
+            logger.warning(
+                "[chunker audit] chapter %r has 0 chunks — heading may not have been detected in markdown",
+                ch_id,
+            )
+
+    for ch_id, count in ch_counts.items():
+        ratio = count / total
+        if ratio > 0.80 and len(ch_counts) > 1:
+            logger.warning(
+                "[chunker audit] chapter %r holds %.0f%% of all %d chunks — other chapters may be missing",
+                ch_id, ratio * 100, total,
+            )
+
+    if no_section == total:
+        logger.warning("[chunker audit] ALL %d chunks are missing section_id", total)
+
+    if no_chapter > total * 0.10:
+        logger.warning(
+            "[chunker audit] %d/%d chunks are missing chapter_id",
+            no_chapter, total,
+        )
+
+    logger.info(
+        "[chunker audit] %d chunks | chapters: %s",
+        total,
+        {k: v for k, v in sorted(ch_counts.items())},
+    )
+
+
 def _simple_chunk(
     markdown: str,
     heading_tree: dict,
     chunk_size: int = 1200,
     chunk_overlap: int = 200,
 ) -> list[dict]:
+    """Fallback chunker when LlamaIndex is unavailable.
+
+    Design invariants enforced:
+    - chunk["chapter_id"] ∈ {canonical chapter_ids from heading_tree} always
+    - chunk["section_id"] ∈ {canonical section_ids from heading_tree} always
+    - Content before the first canonical heading is discarded (preamble)
+    - Unrecognized headings NEVER change chapter_id or section_id
+    - No slug IDs are ever generated from raw heading text
+
+    Heading detection (in priority order for each line):
+    1. Markdown heading (# / ## / ###) whose stripped title matches canonical
+    2. Plain-text line (≤120 chars) whose normalized form matches canonical
+    3. Everything else → content (or preamble discard if no chapter anchored yet)
     """
-    Fallback simple chunking when LlamaIndex is not available.
-    Splits by paragraphs while preserving heading context.
-    Uses heading_tree to get canonical chapter_id and section_id for each heading.
-    """
-    import unicodedata
-
-    def _norm(s: str) -> str:
-        nfd = unicodedata.normalize("NFD", s.strip().lower())
-        return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
-
-    # Build canonical lookups from heading_tree (per-chapter for sections)
-    title_to_chapter_id, ch_sec_lookup = _build_heading_tree_lookup(heading_tree)
-
-    # Legacy compat: title_to_chapter_id already contains lowercase chapter titles
-    title_to_canonical_id_compat = title_to_chapter_id
+    canonical_lookup = _build_canonical_lookup(heading_tree)
+    ch_lookup: dict[str, dict] = {
+        ch["chapter_id"]: ch
+        for ch in heading_tree.get("chapters", [])
+        if ch.get("chapter_id")
+    }
 
     lines = markdown.split("\n")
     chunks: list[dict] = []
-    current_chunks: list[str] = []
-    current_size = 0
+
+    # ---- mutable state -------------------------------------------------
+    in_preamble = True          # discard content until first canonical heading
     current_chapter = ""
     current_chapter_id = ""
     current_section = ""
     current_section_id = ""
+    current_lines: list[str] = []
+    current_size = 0
     chunk_index = 0
+    # --------------------------------------------------------------------
 
-    def flush() -> dict:
-        nonlocal current_chunks, current_size, chunk_index, current_chapter_id
-        content = "\n".join(current_chunks)
-        chunk_id = f"chunk_{current_chapter_id}_{chunk_index:04d}" if current_chapter_id else f"chunk_{chunk_index:04d}"
-        # Guarantee chapter_id is never empty string
-        safe_chapter_id = current_chapter_id or "ch_unknown"
-        chunk = {
-            "chunk_id": chunk_id,
+    def flush() -> None:
+        nonlocal current_lines, current_size, chunk_index
+        if not current_lines:
+            return
+        content = "\n".join(current_lines).strip()
+        if not content:
+            current_lines = []
+            current_size = 0
+            return
+        chunks.append({
+            "chunk_id": f"chunk_{current_chapter_id}_{chunk_index:04d}",
             "document_id": "",
             "chapter": current_chapter,
-            "chapter_id": safe_chapter_id,
+            "chapter_id": current_chapter_id,
             "section": current_section,
             "section_id": current_section_id,
             "content_type": _detect_content_type(content),
             "page_number": _extract_page_number(content),
             "latex_repr": _extract_latex_from_content(content),
             "content": content,
-        }
+        })
         chunk_index += 1
-        return chunk
+        current_lines = []
+        current_size = 0
 
-    for line in lines:
-        line = line.strip()
+    def _match(title: str) -> tuple[str, str, str, str] | None:
+        """Return (ch_id, ch_title, sec_id, sec_title) or None."""
+        for key in (title.lower(), _normalize_title(title)):
+            if key and key in canonical_lookup:
+                return canonical_lookup[key]
+        # Prefix containment: canonical is an unambiguous prefix of the parsed title
+        norm = _normalize_title(title)
+        if norm and len(norm) >= 4:
+            for canon_key, entry in canonical_lookup.items():
+                if len(canon_key) >= 4 and norm.startswith(canon_key):
+                    return entry
+        return None
+
+    def _apply_match(match: tuple[str, str, str, str]) -> None:
+        """Switch chapter/section state to the matched canonical entry."""
+        nonlocal in_preamble
+        nonlocal current_chapter, current_chapter_id
+        nonlocal current_section, current_section_id
+        ch_id, ch_raw_title, sec_id, sec_raw_title = match
+        ch_node = ch_lookup.get(ch_id, {})
+        ch_title = ch_node.get("title", ch_raw_title)
+        flush()
+        in_preamble = False
+        current_chapter_id = ch_id
+        current_chapter = ch_title
+        if sec_id:
+            current_section_id = sec_id
+            current_section = sec_raw_title
+        else:
+            current_section_id = ""
+            current_section = ""
+
+    for raw_line in lines:
+        line = raw_line.strip()
         if not line:
             continue
 
-        heading_match = re.match(r"^(#{1,3})\s+(.+)$", line)
-        if heading_match:
-            level = len(heading_match.group(1))
-            title = heading_match.group(2).strip()
+        # ---- try to extract a heading title ----------------------------
+        title: str | None = None
+        md_match = re.match(r"^(#{1,3})\s+(.+)$", line)
+        if md_match:
+            title = md_match.group(2).strip()
+        elif len(line) <= 120:
+            title = line
 
-            # Roman numeral or letter-prefixed headings are chapter-level regardless of # depth
-            if level >= 2 and _is_heading_chapter_level(title):
-                level = 1
+        # ---- canonical match? ------------------------------------------
+        if title is not None:
+            entry = _match(title)
+            if entry is not None:
+                _apply_match(entry)
+                continue   # heading line itself is not content
+            else:
+                logger.debug(
+                    "[chunker] unmatched heading-like line %r — kept as content",
+                    line[:80],
+                )
+                # Fall through to content handling below
 
-            if level == 1:
-                if current_chunks:
-                    chunks.append(flush())
-                    current_chunks = []
-                    current_size = 0
-                current_chapter = title
-                # Use canonical chapter_id from heading_tree if available
-                canonical = title_to_canonical_id_compat.get(title.lower())
-                if canonical:
-                    current_chapter_id = canonical
-                else:
-                    current_chapter_id = _title_to_chapter_id(title)
-                current_section = ""
-                current_section_id = ""
+        # ---- content line ----------------------------------------------
+        if in_preamble:
+            logger.debug("[chunker] preamble discard: %r", line[:60])
+            continue
 
-            elif level == 2:
-                if current_chunks:
-                    chunks.append(flush())
-                    overlap_lines = current_chunks[-3:] if len(current_chunks) >= 3 else current_chunks
-                    current_chunks = overlap_lines + [line]
-                    current_size = sum(len(l) for l in current_chunks)
-                else:
-                    current_chunks = [line]
-                    current_size = len(line)
-                current_section = title
-                # Lookup canonical section_id per current chapter (avoids cross-chapter collisions)
-                _ch_sec_map = ch_sec_lookup.get(current_chapter_id, {})
-                _sec_id = _ch_sec_map.get(title.lower()) or _ch_sec_map.get(_norm(title))
-                current_section_id = _sec_id or f"{current_chapter_id}_sec{_count_sections(chunks, current_chapter_id) + 1}"
-
-            elif level == 3:
-                current_chunks.append(line)
-                current_size += len(line)
-
-        elif current_size + len(line) > chunk_size and current_chunks:
-            chunks.append(flush())
-            overlap_lines = current_chunks[-3:] if len(current_chunks) >= 3 else current_chunks
-            current_chunks = overlap_lines + [line]
-            current_size = sum(len(l) for l in current_chunks)
+        if current_size + len(line) > chunk_size and current_lines:
+            flush()
+            overlap = current_lines[-3:] if len(current_lines) >= 3 else current_lines[:]
+            current_lines = overlap + [line]
+            current_size = sum(len(l) for l in current_lines)
         else:
-            current_chunks.append(line)
+            current_lines.append(line)
             current_size += len(line)
 
-    if current_chunks:
-        chunks.append(flush())
-
+    flush()
+    _audit_chunks(chunks, heading_tree)
     return chunks
+
 
 
 def _get_heading_context(metadata: dict, heading_tree: dict) -> tuple[str, str, str, str]:
@@ -282,7 +429,9 @@ def _get_heading_context(metadata: dict, heading_tree: dict) -> tuple[str, str, 
                 chapter_id = (
                     title_to_ch_id.get(title.lower())
                     or title_to_ch_id.get(_norm(title))
-                    or _title_to_id(title)
+                    # No _title_to_id fallback — unrecognized level-1 headings must not
+                    # produce dirty slugs. Fall through to the canonical-first-chapter
+                    # fallback below instead.
                 )
             elif level == 2:
                 section = title
@@ -292,7 +441,8 @@ def _get_heading_context(metadata: dict, heading_tree: dict) -> tuple[str, str, 
                 section_id = (
                     _ch_sec_map.get(title.lower())
                     or _ch_sec_map.get(_norm(title))
-                    or _title_to_id(title)
+                    # No _title_to_id fallback for section either — unrecognized
+                    # section headings leave section_id as empty string.
                 )
 
     # Fallback: ensure chapter_id is NEVER empty

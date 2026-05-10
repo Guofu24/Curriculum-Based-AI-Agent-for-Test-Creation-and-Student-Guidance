@@ -210,6 +210,20 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
             stem = q.get("stem", "")
             q_type = q.get("type", "mcq")
 
+            # Hard block: demo fallback questions must never pass silently
+            if q.get("is_demo_question"):
+                all_issues.append({
+                    "question_id": q_id,
+                    "issue_type": "demo_fallback",
+                    "detail": "Câu hỏi là demo fallback do LLM không sinh được — phải sinh lại.",
+                    "suggestion": "Chạy lại BuilderAgent để sinh câu hỏi thực sự cho slot này.",
+                    "correction_strategy": (
+                        "Câu hỏi này là demo placeholder. Hãy sinh câu hỏi thực từ "
+                        "KIẾN THỨC CỐT LÕI trong primary chunks của chapter/section đã chọn."
+                    ),
+                })
+                continue
+
             # Detect markdown heading in stem
             if stem.strip().startswith(("# ", "## ", "### ")):
                 all_issues.append({
@@ -269,6 +283,138 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
                     "suggestion": "Bổ sung ngữ cảnh và câu hỏi cụ thể.",
                 })
 
+        # ── Local scope check + trigram copy check (deterministic, no LLM) ──────────
+        primary_chunks = [c for c in (retrieved_context or []) if c.get("role") != "background"]
+        for q in questions:
+            q_id = q.get("question_id", "?")
+            if q.get("is_demo_question"):
+                continue  # already blocked above
+            full_text = self._build_question_full_text(q)
+
+            # Scope grounding check
+            scope_result = self.scope_skill._local_check(
+                question_text=full_text,
+                primary_chunks=primary_chunks,
+            )
+            if not scope_result["in_scope"]:
+                if scope_result.get("is_hard_fail"):
+                    all_issues.append({
+                        "question_id": q_id,
+                        "issue_type": "scope_violation",
+                        "detail": scope_result["reasoning"],
+                        "suggestion": "Sinh lại câu hỏi từ primary chunks của chapter/section đã chọn.",
+                        "correction_strategy": (
+                            "Câu hỏi hiện không có evidence trong primary chunks của section/chapter được chọn. "
+                            "Hãy sinh lại câu hỏi chỉ từ KIẾN THỨC CỐT LÕI trong primary chunks, "
+                            "không dùng background/prereq làm nguồn chính, không copy nguyên văn context."
+                        ),
+                    })
+                else:
+                    q["needs_review"] = True
+                    q["quality_warning"] = f"grounding_uncertain: {scope_result['reasoning']}"
+            elif scope_result.get("confidence", 1.0) < 0.5:
+                # in_scope=True but weak evidence — uncertain, soft flag only
+                q["needs_review"] = True
+                q["quality_warning"] = f"grounding_uncertain: {scope_result['reasoning']}"
+
+            # ── Chapter-level metadata scope check (deterministic, no LLM) ─────────────
+            q_chapter = (q.get("chapter") or "").strip()
+            scope_chapters_cfg: list[str] = exam_config.get("scope", [])
+            if q_chapter and scope_chapters_cfg:
+                import re as _re
+                import unicodedata as _ud
+
+                def _norm_ch(s: str) -> str:
+                    nfd = _ud.normalize("NFD", s.strip().lower())
+                    return "".join(c for c in nfd if _ud.category(c) != "Mn")
+
+                def _extract_ch_num(s: str) -> str:
+                    """Extract the chapter identifier token (number/roman/letter).
+
+                    Uses word-boundary match to prevent '1' matching '10'.
+                    Examples: 'chuong 1' -> '1', 'chuong 10' -> '10', 'chapter iv' -> 'iv'
+                    """
+                    # Match standalone number or roman numeral or single letter after 'chuong'/'chapter'
+                    m = _re.search(r'(?:chuong|chapter|phan|part)\s+([\divxlcdm]+|[a-z])\b', _norm_ch(s))
+                    if m:
+                        return m.group(1)
+                    # Fallback: first standalone number
+                    m2 = _re.search(r'\b(\d+)\b', _norm_ch(s))
+                    return m2.group(1) if m2 else _norm_ch(s)
+
+                q_ch_num = _extract_ch_num(q_chapter)
+                chapter_in_scope = any(
+                    _extract_ch_num(sc) == q_ch_num
+                    for sc in scope_chapters_cfg
+                )
+                if not chapter_in_scope:
+                    all_issues.append({
+                        "question_id": q_id,
+                        "issue_type": "scope_violation",
+                        "detail": f"Câu hỏi thuộc chapter '{q_chapter}' không nằm trong phạm vi đã chọn.",
+                        "suggestion": "Sinh lại câu hỏi thuộc đúng chapter trong phạm vi.",
+                        "correction_strategy": (
+                            f"Chapter '{q_chapter}' không thuộc phạm vi đề thi. "
+                            "Hãy sinh lại câu hỏi thuộc đúng chapter đã chọn trong exam_config."
+                        ),
+                    })
+
+            # ── Section-level metadata scope check ────────────────────────────────
+            # Check primary_section_id / primary_section_title against
+            # exam_config scope_section_ids and scope_sections if available.
+            q_sec_id = (q.get("primary_section_id") or q.get("section_id") or "").strip()
+            q_sec_title = (q.get("primary_section_title") or q.get("section") or "").strip()
+            scope_sec_ids: list[str] = exam_config.get("scope_section_ids", [])
+            scope_sec_titles: list[str] = exam_config.get("scope_sections", [])
+
+            if scope_sec_ids and q_sec_id:
+                # Exact section_id match required
+                if q_sec_id not in scope_sec_ids:
+                    all_issues.append({
+                        "question_id": q_id,
+                        "issue_type": "scope_violation",
+                        "detail": f"primary_section_id '{q_sec_id}' không nằm trong scope_section_ids đã chọn.",
+                        "suggestion": "Sinh lại câu hỏi từ section đúng phạm vi.",
+                        "correction_strategy": (
+                            f"Section '{q_sec_id}' không thuộc phạm vi đề thi. "
+                            "Hãy sinh lại câu hỏi chỉ từ section trong scope_section_ids đã chọn."
+                        ),
+                    })
+            elif scope_sec_titles and q_sec_title:
+                # Title-based fallback (diacritic-stripped contains match)
+                import unicodedata as _ud2
+                def _strip(s: str) -> str:
+                    nfd = _ud2.normalize("NFD", s.strip().lower())
+                    return "".join(c for c in nfd if _ud2.category(c) != "Mn")
+                q_sec_norm = _strip(q_sec_title)
+                sec_in_scope = any(q_sec_norm == _strip(ss) for ss in scope_sec_titles)
+                if not sec_in_scope:
+                    # Soft flag only — title matching is imprecise
+                    q["needs_review"] = True
+                    q["quality_warning"] = (
+                        f"section_uncertain: primary_section_title '{q_sec_title}' "
+                        "không khớp chính xác với bất kỳ section nào trong phạm vi."
+                    )
+
+            # Trigram copy check — stem + options + propositions only (NOT solution/explanation)
+            copy_text = self._build_question_stem_text(q)
+            copy_result = self._trigram_copy_check(copy_text, primary_chunks)
+            if copy_result["is_copy"]:
+                if copy_result["is_hard_fail"]:
+                    all_issues.append({
+                        "question_id": q_id,
+                        "issue_type": "copied_from_context",
+                        "detail": copy_result["detail"],
+                        "suggestion": "Rút ra khái niệm/công thức cốt lõi rồi tạo tình huống mới.",
+                        "correction_strategy": (
+                            "Stem/options đang trùng nguyên văn với tài liệu. Hãy rút ra khái niệm/công thức "
+                            "cốt lõi rồi tạo tình huống mới, không dùng lại câu văn hoặc cấu trúc ví dụ trong context."
+                        ),
+                    })
+                else:
+                    q["needs_review"] = True
+                    q["quality_warning"] = f"possible_copy: {copy_result['detail']}"
+
         # Batch questions into groups of BATCH_SIZE
         total_batches = (len(questions) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
 
@@ -320,9 +466,26 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
                     warnings.append(f"Batch {batch_num}/{total_batches} validated")
 
             except json.JSONDecodeError as e:
-                warnings.append(f"Batch {batch_num} parse failed: {e}")
+                warn_msg = f"Batch {batch_num} parse failed: {e}"
+                warnings.append(warn_msg)
+                # Hard fail: validator didn't run → cannot trust any question in this batch
+                for _bq in batch:
+                    all_issues.append({
+                        "question_id": _bq.get("question_id", "?"),
+                        "issue_type": "validator_parse_failed",
+                        "detail": f"Batch {batch_num} response không parse được: {str(e)[:120]}",
+                        "suggestion": "Validator không chạy được — cần sinh lại để re-validate.",
+                    })
             except Exception as e:
-                warnings.append(f"Batch {batch_num} failed: {e}")
+                warn_msg = f"Batch {batch_num} failed: {e}"
+                warnings.append(warn_msg)
+                for _bq in batch:
+                    all_issues.append({
+                        "question_id": _bq.get("question_id", "?"),
+                        "issue_type": "validator_parse_failed",
+                        "detail": f"Batch {batch_num} exception: {str(e)[:120]}",
+                        "suggestion": "Validator không chạy được — cần sinh lại để re-validate.",
+                    })
 
         # G9: Save current issues to Redis
         if self.short_term and all_issues:
@@ -335,9 +498,16 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
         validation_passed = len(all_issues) == 0
 
         # approved_for_publish: only if no critical issues
+        _CRITICAL_TYPES = {
+            "wrong_answer",
+            "scope_violation",
+            "demo_fallback",
+            "copied_from_context",
+            "validator_parse_failed",
+        }
         critical_issues = [
             i for i in all_issues
-            if i.get("issue_type") in ("wrong_answer", "scope_violation")
+            if i.get("issue_type") in _CRITICAL_TYPES
         ]
         approved_for_publish = len(critical_issues) == 0
 
@@ -436,6 +606,97 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
 
 Thực hiện kiểm tra cho TỪNG CÂU:"""
         return prompt
+
+    @staticmethod
+    def _build_question_full_text(q: dict) -> str:
+        """Combine ALL question text fields for scope checking (stem + options + propositions + solution + explanation)."""
+        parts: list[str] = [q.get("stem", "") or ""]
+        opts = q.get("options", {})
+        if isinstance(opts, dict):
+            parts.extend(v for v in opts.values() if v)
+        for prop in (q.get("propositions") or []):
+            if isinstance(prop, dict):
+                parts.append(prop.get("text", "") or "")
+        parts.append(q.get("solution", "") or "")
+        parts.append(q.get("explanation", "") or "")
+        return " ".join(p for p in parts if p)
+
+    @staticmethod
+    def _build_question_stem_text(q: dict) -> str:
+        """Combine only stem + options + propositions for copy detection.
+
+        Deliberately excludes solution/explanation: physics solutions legitimately
+        repeat definitions and formulas from source material, which would cause
+        false-positive copy alerts.
+        """
+        parts: list[str] = [q.get("stem", "") or ""]
+        opts = q.get("options", {})
+        if isinstance(opts, dict):
+            parts.extend(v for v in opts.values() if v)
+        for prop in (q.get("propositions") or []):
+            if isinstance(prop, dict):
+                parts.append(prop.get("text", "") or "")
+        return " ".join(p for p in parts if p)
+
+    @staticmethod
+    def _trigram_copy_check(question_text: str, primary_chunks: list[dict]) -> dict:
+        """Detect verbatim copy from context using normalized substring span matching.
+
+        Policy (from design doc):
+          - verbatim span >= 55 chars (normalized)  → hard fail
+          - verbatim span >= 40 chars (normalized)  → soft flag (needs_review)
+          - below 40 chars                          → clean
+
+        Uses substring matching on normalized text (diacritics stripped, lowercased)
+        instead of any-trigram set intersection, which was causing false positives
+        from shared physics terminology appearing non-consecutively.
+        """
+        import unicodedata
+
+        def _norm(text: str) -> str:
+            nfd = unicodedata.normalize("NFD", text.lower())
+            return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+        norm_q = _norm(question_text)
+        if len(norm_q) < 40:
+            return {"is_copy": False, "is_hard_fail": False, "span_len": 0, "detail": ""}
+
+        HARD_SPAN = 55
+        SOFT_SPAN = 40
+        max_span = 0
+
+        for chunk in primary_chunks[:20]:
+            norm_ch = _norm(chunk.get("content", ""))
+            if not norm_ch:
+                continue
+            # Sliding window: check every substring of question text of length >= SOFT_SPAN
+            # against the chunk. Start from longest spans for early exit.
+            for span_len in range(min(len(norm_q), 120), SOFT_SPAN - 1, -5):
+                found = False
+                for start in range(0, len(norm_q) - span_len + 1, 5):  # step=5 for speed
+                    if norm_q[start:start + span_len] in norm_ch:
+                        found = True
+                        break
+                if found:
+                    if span_len > max_span:
+                        max_span = span_len
+                    break  # no need to check shorter spans for this chunk
+
+        if max_span >= HARD_SPAN:
+            return {
+                "is_copy": True,
+                "is_hard_fail": True,
+                "span_len": max_span,
+                "detail": f"Stem/options có đoạn {max_span} ký tự trùng nguyên văn context — nghi ngờ copy.",
+            }
+        if max_span >= SOFT_SPAN:
+            return {
+                "is_copy": True,
+                "is_hard_fail": False,
+                "span_len": max_span,
+                "detail": f"Stem/options có đoạn {max_span} ký tự trùng context — cần xem lại.",
+            }
+        return {"is_copy": False, "is_hard_fail": False, "span_len": max_span, "detail": ""}
 
 
 # ─── Unit test (runnable with: python -m pytest backend/app/agents/validator.py -v -k test_scope_violation) ───

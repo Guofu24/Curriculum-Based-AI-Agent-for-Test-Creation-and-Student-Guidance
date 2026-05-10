@@ -385,10 +385,14 @@ Trả lời ngắn Format (THPT 2025 — điền kết quả số):
 - KHÔNG dùng "\\\\" để xuống dòng trong văn bản thường; nếu cần tách ý, dùng câu văn hoặc newline thật trong string
 
 ## QUY TẮC PHẠM VI KIẾN THỨC (CỰC KỲ QUAN TRỌNG):
-- Phần ngữ cảnh được cung cấp CÓ THỂ gồm hai loại:
-  - **KIẾN THỨC TRỌNG TÂM**: Nội dung người dùng đã chọn — sinh câu hỏi TỪ PHẦN NÀY
-  - **KIẾN THỨC NỀN (TIÊN QUYẾT)**: Nội dung hỗ trợ, tiên quyết — CHỈ đọc để hiểu context, TUYỆT ĐỐI KHÔNG sinh câu hỏi từ phần này
-- Câu hỏi phải kiểm tra kiến thức trong phạm vi TRỌNG TÂM; background chỉ được dùng để viết distractors hoặc giải thích rõ hơn
+- Phần ngữ cảnh được cung cấp gồm BA loại:
+  - **KIẾN THỨC CỐT LÕI**: định nghĩa, công thức, định luật, định lý — đây là nguồn chính để sinh câu hỏi
+  - **VÍ DỤ / BÀI TẬP THAM KHẢO**: ví dụ minh họa, bài tập mẫu, lời giải — CHỈ dùng để hiểu cách áp dụng kiến thức
+  - **KIẾN THỨC NỀN (TIÊN QUYẾT)**: nội dung tiên quyết — CHỈ đọc để hiểu ngữ cảnh, TUYỆT ĐỐI KHÔNG sinh câu hỏi từ phần này
+- **QUY TRÌNH BẮT BUỘC trước khi sinh câu hỏi**: Đọc context → Rút ra khái niệm, công thức, định luật và quan hệ cốt lõi → Sinh câu hỏi kiểm tra sự hiểu biết về những kiến thức đó
+- **NGHIÊM CẤM**: copy, paraphrase, hoặc chỉ đổi số liệu từ ví dụ/bài tập mẫu trong context để tạo câu hỏi
+- Ví dụ và bài tập mẫu KHÔNG được dùng làm stem trực tiếp, KHÔNG giữ nguyên cấu trúc bài, KHÔNG chỉ thay số liệu
+- Câu hỏi phải bắt nguồn từ kiến thức cốt lõi; background chỉ được dùng để viết distractors hoặc giải thích rõ hơn
 
 Trả về JSON array (không có key bọc ngoài):
 [câu_hỏi_1]
@@ -532,7 +536,13 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
             logger.warning("build_single_question: question_id %r not found", question_id)
             return None
 
-        # Reconstruct a blueprint slot from the existing question
+        # Reconstruct a blueprint slot from the existing question.
+        # Section metadata fields must be carried forward so the validator's
+        # section-scope check works correctly in partial-regenerate paths.
+        _SECTION_META_FIELDS = (
+            "primary_section_id", "primary_section_title", "primary_scope_unit_key",
+            "secondary_section_ids", "secondary_section_titles", "secondary_scope_unit_keys",
+        )
         slot: dict = {
             "question_id": question_id,
             "type": existing_q.get("type", "mcq"),
@@ -543,6 +553,10 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
             "estimated_difficulty": existing_q.get("estimated_difficulty", 0.5),
             "content_type": existing_q.get("content_type", "text"),
         }
+        for _f in _SECTION_META_FIELDS:
+            _v = existing_q.get(_f)
+            if _v is not None:
+                slot[_f] = _v
 
         # Build chapter-filtered context
         context_all = self._build_context_for_llm(retrieved_context)
@@ -583,6 +597,14 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 "build_single_question %r warnings: %s",
                 question_id, "; ".join(warnings),
             )
+
+        # Mirror full-build path: copy section metadata from slot → question
+        # so validator's section-scope check has the correct fields.
+        if question:
+            for _f in _SECTION_META_FIELDS:
+                _v = slot.get(_f)
+                if _v is not None:
+                    question[_f] = _v
 
         return question
 
@@ -1614,15 +1636,73 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         prefix = bloom_prefixes.get(bloom, "")
         return f"{prefix} {content}" if prefix else content
 
+    # Keywords used to classify chunks into core-knowledge vs example/exercise
+    _EXERCISE_KEYWORDS = (
+        "ví dụ", "vi du", "bài tập", "bai tap", "lời giải", "loi giai",
+        "bài giải", "bai giai", "hướng dẫn giải", "huong dan giai",
+        "đáp số", "dap so", "kết quả:", "ket qua:", "giải:", "giai:",
+        "solution", "example", "exercise",
+    )
+    _THEORY_KEYWORDS = (
+        "định nghĩa", "dinh nghia", "định luật", "dinh luat",
+        "định lý", "dinh ly", "nguyên lý", "nguyen ly",
+        "công thức", "cong thuc", "khái niệm", "khai niem",
+        "tính chất", "tinh chat", "hệ quả", "he qua",
+        "phát biểu", "phat bieu", "theorem", "definition", "law",
+    )
+
+    @classmethod
+    def _classify_chunk(cls, chunk: dict) -> str:
+        """Classify a chunk as 'theory', 'exercise', or 'background'.
+
+        Returns one of: 'theory' | 'exercise' | 'background'
+        Priority: background role > exercise keywords > formula/theory markers.
+
+        Exercise keywords are checked BEFORE content_type == 'formula' because
+        physics worked examples almost always contain LaTeX formulas — checking
+        formula first would wrongly classify them as theory.
+        """
+        if chunk.get("role") == "background":
+            return "background"
+        content_lower = (chunk.get("content") or "").lower()
+        # Exercise keywords take highest priority — must check before formula tag
+        # because worked examples in physics routinely contain LaTeX formulas.
+        for kw in cls._EXERCISE_KEYWORDS:
+            if kw in content_lower:
+                return "exercise"
+        # Chunks whose content_type is 'formula' are core knowledge (standalone formulas)
+        if chunk.get("content_type") == "formula" or chunk.get("latex_repr"):
+            return "theory"
+        # Check theory keywords
+        for kw in cls._THEORY_KEYWORDS:
+            if kw in content_lower:
+                return "theory"
+        # Default: treat as theory (safer — LLM is already instructed not to paraphrase)
+        return "theory"
+
     def _build_context_for_llm(self, retrieved_context: list[dict]) -> str:
         """Build a context string for the LLM prompt.
 
-        Chunks tagged with role='primary' are the main generation source.
-        Chunks tagged with role='background' are prerequisite knowledge — included
-        for context only; the LLM must NOT generate questions from them.
+        Chunks are split into three clearly-labelled sections:
+          1. KIẾN THỨC CỐT LÕI — definitions, formulas, laws (primary generation source)
+          2. VÍ DỤ / BÀI TẬP THAM KHẢO — examples, worked solutions (reference only)
+          3. KIẾN THỨC NỀN (TIÊN QUYẾT) — background/prereq chunks (context only)
+
+        The LLM is instructed in BUILDER_SYSTEM_PROMPT to extract core concepts from
+        section 1 first, and NOT to paraphrase section 2 directly into question stems.
         """
-        primary_chunks = [c for c in retrieved_context if c.get("role") != "background"]
-        background_chunks = [c for c in retrieved_context if c.get("role") == "background"]
+        theory_chunks: list[dict] = []
+        exercise_chunks: list[dict] = []
+        background_chunks: list[dict] = []
+
+        for chunk in retrieved_context:
+            label = self._classify_chunk(chunk)
+            if label == "background":
+                background_chunks.append(chunk)
+            elif label == "exercise":
+                exercise_chunks.append(chunk)
+            else:
+                theory_chunks.append(chunk)
 
         def _format_by_chapter(chunks: list[dict], max_per_chapter: int = 5) -> str:
             by_chapter: dict[str, list[str]] = {}
@@ -1648,17 +1728,42 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
 
         sections: list[str] = []
 
-        if primary_chunks:
+        if theory_chunks:
             sections.append(
-                "## KIẾN THỨC TRỌNG TÂM\n"
-                "*(Sinh câu hỏi TRỰC TIẾP từ phần này — đây là nội dung người dùng đã chọn)*\n"
+                "## KIẾN THỨC CỐT LÕI\n"
+                "*(Dùng phần này làm nguồn kiến thức chính. Trước khi sinh câu hỏi, "
+                "hãy rút ra khái niệm, công thức, định luật và quan hệ cốt lõi. "
+                "Sinh câu hỏi kiểm tra sự hiểu biết về những kiến thức này — "
+                "KHÔNG copy, KHÔNG paraphrase, KHÔNG chỉ đổi số liệu.)*\n"
             )
-            sections.append(_format_by_chapter(primary_chunks))
+            sections.append(_format_by_chapter(theory_chunks))
+
+        if exercise_chunks:
+            # Fallback: if no theory chunks found, instruct LLM to extract implicit
+            # core knowledge from the examples rather than copying their structure.
+            if not theory_chunks:
+                ex_header = (
+                    "## VÍ DỤ / BÀI TẬP (nguồn kiến thức duy nhất — dùng thận trọng)\n"
+                    "*(Không có chunk lý thuyết thuần tuý trong context này. "
+                    "Hãy rút ra kiến thức cốt lõi ẩn trong các ví dụ (công thức, định luật, quan hệ vật lý) "
+                    "rồi sinh câu hỏi kiểm tra kiến thức đó — KHÔNG sao chép cấu trúc bài, "
+                    "KHÔNG chỉ thay số liệu.)*\n"
+                )
+            else:
+                ex_header = (
+                    "## VÍ DỤ / BÀI TẬP THAM KHẢO\n"
+                    "*(Chỉ dùng để hiểu cách áp dụng kiến thức. "
+                    "TUYỆT ĐỐI KHÔNG dùng làm stem trực tiếp, "
+                    "KHÔNG giữ nguyên cấu trúc bài, KHÔNG chỉ thay số liệu.)*\n"
+                )
+            sections.append(ex_header)
+            sections.append(_format_by_chapter(exercise_chunks, max_per_chapter=3))
 
         if background_chunks:
             sections.append(
                 "## KIẾN THỨC NỀN (TIÊN QUYẾT)\n"
-                "*(KHÔNG sinh câu hỏi từ phần này — chỉ dùng để hiểu ngữ cảnh và giải thích khái niệm)*\n"
+                "*(KHÔNG sinh câu hỏi từ phần này — chỉ dùng để hiểu ngữ cảnh "
+                "và giải thích khái niệm tiên quyết.)*\n"
             )
             sections.append(_format_by_chapter(background_chunks, max_per_chapter=3))
 
