@@ -86,6 +86,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     GEMINI_API_KEYS: str = ""   # comma-separated, overrides GEMINI_API_KEY when set
     GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_ALIGNMENT_MODEL: str = ""  # exercise-group -> section router; blank falls back to GEMINI_MODEL
 
     # Computed: load keys from .gemini_keys file (one key per line)
     # Falls back to GEMINI_API_KEYS / GEMINI_API_KEY env vars

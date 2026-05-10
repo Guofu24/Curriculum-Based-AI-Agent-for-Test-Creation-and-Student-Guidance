@@ -823,7 +823,7 @@ Trả về JSON:
                     {"role": "user", "content": edit_prompt},
                 ],
                 role="builder",
-                max_tokens=2000,
+                max_tokens=4000,
                 temperature=0.3,
             )
             edit_plan = json.loads(response)

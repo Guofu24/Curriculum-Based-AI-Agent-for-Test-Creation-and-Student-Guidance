@@ -1129,7 +1129,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         {"role": "user", "content": user_prompt + vdc_correction},
                     ],
                     role="builder",
-                    max_tokens=8000,
+                    max_tokens=16000,
                     temperature=0.7,
                 )
 

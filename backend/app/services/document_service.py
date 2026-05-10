@@ -17,6 +17,9 @@ from app.rag.chunker import semantic_chunk
 from app.rag.embedder import embed_chunks
 from app.rag.vector_store import get_vector_store
 from app.rag.cleaner import clean_markdown
+from app.rag.exercise_grouper import build_exercise_groups
+from app.rag.alignment import align_exercise_groups
+from app.rag.gemini_key_pool import GeminiKeyPool
 
 
 class DocumentServiceError(Exception):
@@ -349,6 +352,61 @@ class DocumentService:
                 chunk["document_id"] = doc_id_str
             _log.info("Chunked %s: %d chunks, %d chapters", document_id, len(chunks), total_chapters)
 
+            try:
+                mgr = get_document_upload_manager()
+                await mgr.broadcast(doc_id_str, {
+                    "type": "processing_step",
+                    "document_id": doc_id_str,
+                    "step": "align",
+                    "message": "Đang căn chỉnh bài tập vào đúng section...",
+                    "percent": 82,
+                })
+            except Exception:
+                pass
+
+            try:
+                from app.core.redis_client import get_redis_client
+                redis = self.redis or get_redis_client()
+                unknown_chunks = [
+                    c for c in chunks
+                    if c.get("section_confidence", "unknown") == "unknown"
+                ]
+                groups = build_exercise_groups(unknown_chunks, doc_id_str)
+                if groups:
+                    chunks, align_report = await align_exercise_groups(
+                        chunks=chunks,
+                        groups=groups,
+                        heading_tree=heading_tree,
+                        pool=GeminiKeyPool(redis),
+                        redis=redis,
+                    )
+                    _log.info(
+                        "Aligned %s: groups=%d llm_aligned=%d unknown=%d "
+                        "cache_hits=%d batches=%d invalid_ids=%d skipped_no_key=%d",
+                        document_id,
+                        align_report.groups_detected,
+                        align_report.llm_aligned,
+                        align_report.unknown,
+                        align_report.cache_hits,
+                        align_report.batches_called,
+                        align_report.invalid_ids,
+                        align_report.skipped_no_key,
+                    )
+                    if align_report.errors:
+                        _log.warning(
+                            "Alignment warnings for %s: %s",
+                            document_id,
+                            " | ".join(align_report.errors[:5]),
+                        )
+                else:
+                    _log.info("Aligned %s: no exercise groups detected", document_id)
+            except Exception as align_err:
+                _log.warning(
+                    "Exercise alignment failed for %s: %s - keeping unknown metadata",
+                    document_id,
+                    align_err,
+                )
+
             # Save parse results immediately — visible even if embed step fails
             await self.update_processing_result(
                 document_id=document_id,
@@ -635,4 +693,3 @@ class DocumentService:
                 })
 
         return {"chapters": chapters}
-

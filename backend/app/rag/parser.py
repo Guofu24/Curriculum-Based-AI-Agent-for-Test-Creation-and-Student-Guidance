@@ -302,6 +302,20 @@ def _thread_worker(
     role = "FALLBACK" if is_fallback else "PRIMARY"
     time.sleep(random.uniform(0.5, 5.0))  # Stagger startup
 
+    def _mark_used() -> None:
+        try:
+            from app.rag.gemini_key_pool import mark_gemini_key_used_sync
+            mark_gemini_key_used_sync(api_key)
+        except Exception:
+            pass
+
+    def _mark_error(error: BaseException | str) -> None:
+        try:
+            from app.rag.gemini_key_pool import mark_gemini_key_error_sync
+            mark_gemini_key_error_sync(api_key, error)
+        except Exception:
+            pass
+
     while not coordinator.is_done():
         task = coordinator.get_task(is_fallback_key=is_fallback)
 
@@ -318,6 +332,7 @@ def _thread_worker(
             process_end = time.time()
             elapsed_time = process_end - process_start
             coordinator.report_success(task, content, elapsed_time)
+            _mark_used()
 
             # Broadcast live progress % sau mỗi chunk thành công
             if progress_callback:
@@ -329,6 +344,7 @@ def _thread_worker(
         except KeyUnavailable as e:
             _log.warning("[%s KEY %s] ❌ Chunk %d: DEAD key — %s",
                          role, worker_id, task.index, str(e)[:80])
+            _mark_error(e)
             coordinator.report_fail(task)
             time.sleep(15)
 
@@ -336,6 +352,7 @@ def _thread_worker(
             cooldown_time = 45 + (task.llm_retries * 15)
             _log.warning("[%s KEY %s] ❌ Chunk %d: Quota — nghỉ %.0fs",
                          role, worker_id, task.index, cooldown_time)
+            _mark_error(e)
             coordinator.report_fail(task)
             time.sleep(cooldown_time)
 
@@ -343,6 +360,7 @@ def _thread_worker(
             err_msg = str(e)[:80]
             _log.warning("[%s KEY %s] ❌ Chunk %d lỗi: %s",
                          role, worker_id, task.index, err_msg)
+            _mark_error(e)
             coordinator.report_fail(task)
 
             if "429" in err_msg or "quota" in err_msg.lower():

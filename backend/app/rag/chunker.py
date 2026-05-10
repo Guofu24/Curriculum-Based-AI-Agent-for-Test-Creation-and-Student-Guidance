@@ -340,8 +340,8 @@ def _audit_chunks(chunks: list[dict], heading_tree: dict) -> None:
 
 # ─── BM25 exercise-block classifier (Tầng 2) ──────────────────────────────────
 
-_BM25_MIN_SCORE = 1.0      # minimum top1 score to assign any chapter
-_BM25_INFER_RATIO = 1.5    # top1/top2 >= ratio → "inferred"; else "multi"
+_BM25_MIN_SCORE = 2.0      # minimum top1 score to assign any chapter (raised from 1.0)
+_BM25_INFER_RATIO = 2.5    # top1/top2 >= ratio → "inferred"; else unknown (raised from 1.5)
 
 
 def _bm25_tokenize(text: str) -> list[str]:
@@ -383,22 +383,22 @@ def _bm25_score(
 
 
 def _classify_exercise_chunks(chunks: list[dict]) -> list[dict]:
-    """Post-chunking BM25 classifier for exercise blocks.
+    """Post-chunking BM25 classifier for exercise blocks (conservative mode).
 
     For every chunk whose chapter_confidence="unknown", compute BM25 similarity
     against chapter profiles built from high-confidence theory chunks (full
     content + chapter/section title).  Assigns:
 
-      chapter_confidence = "inferred"  — clear winner (top1/top2 >= 1.5)
-      chapter_confidence = "multi"     — two chapters compete closely
-      chapter_confidence = "unknown"   — no good match (score < MIN_SCORE)
+      chapter_confidence = "inferred"  — clear winner (top1/top2 >= 2.5 AND score >= 2.0)
+      chapter_confidence = "unknown"   — ambiguous or weak match
 
-      candidate_chapter_ids = [ch1]           # "inferred"
-      candidate_chapter_ids = [ch1, ch2]      # "multi"
-      candidate_chapter_ids = []              # "unknown"
+      candidate_chapter_ids = [ch1]        # "inferred" — active
+      candidate_chapter_ids = [ch1, ch2]   # "unknown" but debug hint available
+      candidate_chapter_ids = []           # no useful signal
 
-    chapter_id is NEVER modified — kept as the last-seen canonical chapter so
-    retrieval still works without immediate builder changes.
+    NOTE: "multi" is NOT a valid active confidence — ambiguous matches are
+    collapsed to "unknown" so retrieval never acts on noisy signal.
+    chapter_id is NEVER modified — kept as the last-seen canonical chapter.
     """
     high_chunks = [c for c in chunks if c.get("chapter_confidence") == "high"]
     unknown_chunks = [c for c in chunks if c.get("chapter_confidence") == "unknown"]
@@ -433,7 +433,7 @@ def _classify_exercise_chunks(chunks: list[dict]) -> list[dict]:
 
     avgdl = sum(len(t) for t in profiles.values()) / len(profiles)
 
-    n_inferred = n_multi = 0
+    n_inferred = n_ambiguous = 0
     result: list[dict] = []
 
     for c in chunks:
@@ -456,20 +456,23 @@ def _classify_exercise_chunks(chunks: list[dict]) -> list[dict]:
         top1_ch, top1_score = sorted_chs[0]
 
         if top1_score < _BM25_MIN_SCORE:
+            # Score too weak — no useful signal
             result.append({**c, "candidate_chapter_ids": []})
             continue
 
         if len(sorted_chs) > 1:
             top2_ch, top2_score = sorted_chs[1]
             if top2_score > 0 and top1_score / top2_score < _BM25_INFER_RATIO:
+                # Ambiguous — collapse to unknown but keep debug hint
                 result.append({
                     **c,
-                    "chapter_confidence": "multi",
-                    "candidate_chapter_ids": [top1_ch, top2_ch],
+                    "chapter_confidence": "unknown",
+                    "candidate_chapter_ids": [top1_ch, top2_ch],  # debug only
                 })
-                n_multi += 1
+                n_ambiguous += 1
                 continue
 
+        # Clear winner — inferred
         result.append({
             **c,
             "chapter_confidence": "inferred",
@@ -477,11 +480,19 @@ def _classify_exercise_chunks(chunks: list[dict]) -> list[dict]:
         })
         n_inferred += 1
 
+    # Log sample inferred mappings for audit
+    inferred_sample = [
+        (c.get("chunk_id", ""), c.get("candidate_chapter_ids", []))
+        for c in result
+        if c.get("chapter_confidence") == "inferred"
+    ][:10]
     logger.info(
-        "[chunker classify] %d unknown chunks → inferred=%d  multi=%d  still_unknown=%d",
-        len(unknown_chunks), n_inferred, n_multi,
-        len(unknown_chunks) - n_inferred - n_multi,
+        "[chunker classify] %d unknown → inferred=%d  ambiguous(→unknown)=%d  still_unknown=%d",
+        len(unknown_chunks), n_inferred, n_ambiguous,
+        len(unknown_chunks) - n_inferred - n_ambiguous,
     )
+    if inferred_sample:
+        logger.info("[chunker classify] sample inferred: %s", inferred_sample)
     return result
 
 

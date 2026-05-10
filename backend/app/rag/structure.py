@@ -1323,7 +1323,7 @@ CHỈ trả JSON, không giải thích."""
                 {"role": "user", "content": prompt},
             ],
             role="outline",
-            max_tokens=2000,
+            max_tokens=4000,
             temperature=0.1,
         )
 
@@ -1468,7 +1468,7 @@ async def _infer_section_prerequisites(tree: dict) -> dict:
             messages=[{"role": "user", "content": prompt}],
             role="planner",
             temperature=0.0,
-            max_tokens=1000,
+            max_tokens=4000,
         )
         text = response.strip()
         text = re.sub(r"^```(?:json)?\s*\n?", "", text)

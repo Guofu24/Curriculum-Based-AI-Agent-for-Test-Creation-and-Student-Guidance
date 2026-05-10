@@ -432,7 +432,7 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
                         {"role": "user", "content": prompt},
                     ],
                     role="validator",
-                    max_tokens=8000,
+                    max_tokens=16000,
                     temperature=0.1,
                 )
 

@@ -152,7 +152,7 @@ Tạo execution plan:"""
                     {"role": "user", "content": user_prompt},
                 ],
                 role="planner",
-                max_tokens=2000,
+                max_tokens=4000,
                 temperature=0.2,
             )
 
