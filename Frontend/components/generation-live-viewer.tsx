@@ -74,6 +74,17 @@ interface QuestionGeneratedEvent {
   }
 }
 
+interface QuestionValidatingEvent {
+  type: "question_validating"
+  question_id: string
+}
+
+interface QuestionValidatedEvent {
+  type: "question_validated"
+  question_id: string
+  passed: boolean
+}
+
 interface QuestionStartedEvent {
   type: "question_started"
   question_id: string
@@ -134,6 +145,8 @@ type WsMessage =
   | PlanStepEvent
   | QuestionGeneratedEvent
   | QuestionStartedEvent
+  | QuestionValidatingEvent
+  | QuestionValidatedEvent
   | HitlCheckpointEvent
   | ValidationResultEvent
   | CompletedEvent
@@ -435,6 +448,10 @@ export function GenerationLiveViewer({
 
   // Validation
   const [validationIssues, setValidationIssues] = useState<ValidationIssue[]>([])
+  // Per-question validation state: undefined = not started, 'validating', 'passed', 'failed'
+  const [questionValidation, setQuestionValidation] = useState<Record<string, 'validating' | 'passed' | 'failed'>>({})
+  const questionValidationRef = useRef<Record<string, 'validating' | 'passed' | 'failed'>>({})
+  questionValidationRef.current = questionValidation
 
   // Completion
   const [completed, setCompleted] = useState(false)
@@ -570,6 +587,18 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
           break
         }
 
+        case "question_validating": {
+          const qId = (msg as QuestionValidatingEvent).question_id
+          setQuestionValidation(prev => ({ ...prev, [qId]: 'validating' }))
+          break
+        }
+
+        case "question_validated": {
+          const e = msg as QuestionValidatedEvent
+          setQuestionValidation(prev => ({ ...prev, [e.question_id]: e.passed ? 'passed' : 'failed' }))
+          break
+        }
+
         case "question_generated": {
           const e = msg as QuestionGeneratedEvent
           const q = e.question
@@ -591,6 +620,8 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
               )
               return replaceQuestionFeedItems(withoutPlaceholder, next)
             })
+            // Reset validation badge for rebuilt questions
+            if (qId) setQuestionValidation(prev => { const n = { ...prev }; delete n[qId]; return n })
             return next
           })
           break
@@ -1223,9 +1254,25 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
               const qId = item.question.question_id
               const isSelected = selectedQuestionId === qId
               const isRegenerating = questionRegenerating === qId
+              const valState = qId ? questionValidation[qId] : undefined
               return (
                 <div key={item.id} className="mb-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                  <QuestionCard question={item.question} index={item.index} />
+                  <div className="relative">
+                    <QuestionCard question={item.question} index={item.index} />
+                    {valState && (
+                      <div className={cn(
+                        "absolute top-2.5 right-2.5 flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium border",
+                        valState === 'validating' && "bg-amber-50 border-amber-200 text-amber-700",
+                        valState === 'passed'    && "bg-emerald-50 border-emerald-200 text-emerald-700",
+                        valState === 'failed'    && "bg-red-50 border-red-200 text-red-600",
+                      )}>
+                        {valState === 'validating' && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
+                        {valState === 'passed'    && <Check className="h-2.5 w-2.5" />}
+                        {valState === 'failed'    && <AlertCircle className="h-2.5 w-2.5" />}
+                        {valState === 'validating' ? 'Đang kiểm tra' : valState === 'passed' ? 'Đạt' : 'Cần sửa'}
+                      </div>
+                    )}
+                  </div>
                   {activeCheckpoint === 2 && (
                     <div className="mt-1.5 pl-1">
                       {!isSelected ? (
@@ -1239,7 +1286,7 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
                       ) : (
                         <div className="rounded-lg border border-violet-200 bg-violet-50/50 p-2.5 space-y-2">
                           <textarea
-                            className="w-full text-xs rounded border border-violet-200 bg-white/80 px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-violet-300"
+                            className="w-full text-xs text-foreground rounded border border-violet-200 bg-white/80 px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-violet-300"
                             rows={2}
                             placeholder="Nhập yêu cầu chỉnh sửa... (để trống để tạo lại ngẫu nhiên)"
                             value={questionEditPrompt}
@@ -1283,6 +1330,7 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
             }
 
             // ─── Validation ───────────────────────────────────────────────
+
             if (item.kind === 'validation') {
               return (
                 <div key={item.id} className="mb-4 animate-in fade-in duration-300">

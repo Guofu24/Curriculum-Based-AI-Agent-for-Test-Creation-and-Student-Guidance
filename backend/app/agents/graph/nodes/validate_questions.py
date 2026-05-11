@@ -42,11 +42,15 @@ async def validate_questions(state: ExamGraphState) -> ExamGraphState:
 
     validator_agent = ValidatorAgent(redis=redis_client)
 
+    def _validator_emit(event: dict) -> None:
+        _emit(state, event)
+
     validation_result = await validator_agent.validate(
         questions=questions,
         exam_config=exam_config,
         retrieved_context=retrieved_context,
         trace_id=exam_id,
+        emit_fn=_validator_emit,
     )
 
     # Bug-008 fix: deduplicate issues by (question_id, issue_type)

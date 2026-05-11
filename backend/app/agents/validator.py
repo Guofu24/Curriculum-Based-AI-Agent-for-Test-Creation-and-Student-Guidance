@@ -421,6 +421,7 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
         exam_config: dict,
         retrieved_context: list[dict] | None = None,
         trace_id: str = "",
+        emit_fn=None,
     ) -> ValidatorOutput:
         """
         Validate all questions using batch LLM calls (Domain 5B).
@@ -661,9 +662,28 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
         # Batch questions into groups of BATCH_SIZE
         total_batches = (len(questions) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
 
+        def _safe_emit(event: dict) -> None:
+            if emit_fn:
+                try:
+                    emit_fn(event)
+                except Exception:
+                    pass
+
+        # Build set of question_ids that already have issues from pre-checks
+        _pre_check_failed: set[str] = {i.get("question_id", "") for i in all_issues}
+
         for batch_start in range(0, len(questions), self.BATCH_SIZE):
             batch = questions[batch_start:batch_start + self.BATCH_SIZE]
             batch_num = batch_start // self.BATCH_SIZE + 1
+
+            # Emit validating for each question in this batch (before LLM call)
+            for _q in batch:
+                _qid = _q.get("question_id", "")
+                if _qid in _pre_check_failed:
+                    # Already flagged by pre-check — emit failed immediately
+                    _safe_emit({"type": "question_validated", "question_id": _qid, "passed": False})
+                else:
+                    _safe_emit({"type": "question_validating", "question_id": _qid})
 
             # Build batch-specific prompt
             prompt = self._build_batch_prompt(batch, context_str, exam_config)
@@ -683,6 +703,7 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
 
                 # Collect per-question issues from this batch
                 batch_questions = result.get("questions", [])
+                _batch_failed_ids: set[str] = set()
                 for q_result in batch_questions:
                     question_id = q_result.get("question_id", "")
                     # Extract issues from each question result
@@ -711,8 +732,18 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
                                         or "validation_warning"
                                     )
                                     break
+                        else:
+                            _batch_failed_ids.add(question_id)
                         all_issues.append(issue)
                     all_llm_results.append(q_result)
+
+                # Emit per-question validated result
+                for _q in batch:
+                    _qid = _q.get("question_id", "")
+                    if _qid in _pre_check_failed or _qid in _batch_failed_ids:
+                        _safe_emit({"type": "question_validated", "question_id": _qid, "passed": False})
+                    else:
+                        _safe_emit({"type": "question_validated", "question_id": _qid, "passed": True})
 
                 # Merge bloom compliance summary
                 batch_bloom = result.get("bloom_compliance_summary", {})
