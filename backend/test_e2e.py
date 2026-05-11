@@ -16,7 +16,7 @@ Tests cover:
     ✅ HITL Checkpoint 1: blueprint approval flow
     ✅ HITL Checkpoint 2: review-data + submit-review (approve)
     ✅ HITL Checkpoint 3: export preview
-    ✅ HITL reject flow: reject-blueprint → new blueprint emitted
+    ✅ HITL reject flow: reject-blueprint → proposal/clarification before apply
     ✅ Export PDF: 2 versions (student vs teacher)
     ✅ Rate limit: >10 generations/day → 429
     ✅ WebSocket reconnect: miss events → replay on reconnect
@@ -510,9 +510,9 @@ async def test_hitl_reject_flow(
     doc_id: str,
 ) -> None:
     """
-    HITL reject flow: reject-blueprint → new blueprint emitted.
+    HITL reject flow: reject-blueprint returns proposal/clarification first.
     """
-    print("\n[TEST] HITL Reject Flow: reject-blueprint → new blueprint")
+    print("\n[TEST] HITL Reject Flow: reject-blueprint → proposal/clarification")
 
     # Start a new exam
     print("    [1/3] POST /exams/generate (new exam for reject test)")
@@ -564,8 +564,13 @@ async def test_hitl_reject_flow(
                         )
                         assert_eq(r.status_code, 200, "reject-blueprint should return 200")
                         reject_data = r.json()
-                        assert_eq(reject_data.get("status"), "rejected_with_feedback")
-                        print(f"    ✅ Blueprint rejected: {reject_data.get('message')}")
+                        assert reject_data.get("status") in {
+                            "proposal_required",
+                            "clarification_required",
+                            "unsupported_feedback",
+                        }, f"reject-blueprint should not apply immediately: {reject_data}"
+                        assert reject_data.get("requires_confirmation") or reject_data.get("requires_clarification")
+                        print(f"    ✅ Blueprint feedback paused safely: {reject_data.get('message')}")
                         break
                 except asyncio.TimeoutError:
                     pass
@@ -576,8 +581,8 @@ async def test_hitl_reject_flow(
         print(f"    [!] Checkpoint 1 not received within timeout — skipping reject test")
         return
 
-    # Verify rejection_history stored in review-data
-    print("    [3/3] GET /exams/{id}/review-data → verify rejection_history")
+    # Verify the raw feedback did not create rejection history before confirmation.
+    print("    [3/3] GET /exams/{id}/review-data → verify no auto-apply")
     r = await client.get(
         f"{API_PREFIX}/exams/{exam_id}/review-data",
         headers={"Authorization": f"Bearer {token}"},
@@ -585,7 +590,8 @@ async def test_hitl_reject_flow(
     if r.status_code == 200:
         data = r.json()
         history = data.get("rejection_history", [])
-        print(f"    ✅ rejection_history = {history}")
+        assert_eq(len(history), 0, "rejection_history should stay empty before operation confirmation")
+        print(f"    ✅ rejection_history stayed empty before confirmation")
 
 
 async def test_export_pdf(

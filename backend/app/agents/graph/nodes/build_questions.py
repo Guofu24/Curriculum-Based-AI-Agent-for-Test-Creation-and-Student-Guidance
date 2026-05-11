@@ -30,7 +30,21 @@ async def build_questions(state: ExamGraphState) -> ExamGraphState:
 
     from app.core.redis_client import get_redis_client
     redis_client = get_redis_client()
-    blueprint = state.get("blueprint", [])
+    def _safe_index(value, fallback: int) -> int:
+        try:
+            return int(value or fallback)
+        except (TypeError, ValueError):
+            return fallback
+
+    blueprint = [
+        {**slot, "blueprint_index": _safe_index(slot.get("blueprint_index"), idx)}
+        for idx, slot in enumerate(state.get("blueprint", []), start=1)
+    ]
+    blueprint_order = {
+        slot.get("question_id"): int(slot.get("blueprint_index") or idx)
+        for idx, slot in enumerate(blueprint, start=1)
+        if slot.get("question_id")
+    }
     retrieved_context = state.get("retrieved_context", [])
     topics_used = list(state.get("topics_used", []))
     allowed_concepts = state.get("allowed_concepts", [])
@@ -107,6 +121,10 @@ async def build_questions(state: ExamGraphState) -> ExamGraphState:
     )
 
     new_questions = list(getattr(builder_result, "questions", []))
+    for q in new_questions:
+        qid = q.get("question_id")
+        if qid in blueprint_order:
+            q["blueprint_index"] = blueprint_order[qid]
 
     # If retry, merge new questions with existing questions
     if retry_issues and questions:
@@ -121,6 +139,19 @@ async def build_questions(state: ExamGraphState) -> ExamGraphState:
         questions = merged
     elif not retry_issues:
         questions = new_questions
+
+    for q in questions:
+        qid = q.get("question_id")
+        if qid in blueprint_order:
+            q["blueprint_index"] = blueprint_order[qid]
+
+    def _question_order(q: dict) -> int:
+        try:
+            return int(q.get("blueprint_index") or blueprint_order.get(q.get("question_id"), 10**9))
+        except (TypeError, ValueError):
+            return 10**9
+
+    questions.sort(key=_question_order)
 
     # Update topics
     new_topics = [q.get("topic_hint", "") for q in questions if q.get("topic_hint")]
@@ -143,6 +174,7 @@ async def build_questions(state: ExamGraphState) -> ExamGraphState:
 
     return {
         **state,
+        "blueprint": blueprint,
         "builder_result": {
             "status": builder_result.status.value,
             "questions": questions,

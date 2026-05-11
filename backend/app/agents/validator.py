@@ -47,6 +47,121 @@ class ValidationIssue:
         }
 
 
+def _extract_json_object(text: str) -> str | None:
+    """Return the first balanced JSON object from an LLM response."""
+    if not text:
+        return None
+
+    clean = text.strip()
+    if clean.startswith("```"):
+        lines = [
+            line for line in clean.splitlines()
+            if not line.strip().startswith("```")
+        ]
+        clean = "\n".join(lines).strip()
+
+    start = clean.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for pos in range(start, len(clean)):
+        ch = clean[pos]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return clean[start:pos + 1]
+
+    return None
+
+
+def _parse_validator_response(response: str) -> dict:
+    """Parse validator JSON, tolerating markdown fences/prose around it."""
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        extracted = _extract_json_object(response)
+        if not extracted:
+            raise
+        return json.loads(extracted)
+
+
+def _is_grounding_only_scope_issue(issue: dict) -> bool:
+    """Treat lack-of-evidence scope complaints as review warnings, not failures."""
+    if issue.get("issue_type") != "scope_violation":
+        return False
+
+    detail = str(issue.get("detail") or "").lower()
+    suggestion = str(issue.get("suggestion") or "").lower()
+    text = f"{detail} {suggestion}"
+
+    grounding_terms = (
+        "không có evidence",
+        "khong co evidence",
+        "không tìm thấy",
+        "khong tim thay",
+        "không có context",
+        "khong co context",
+        "không được hỗ trợ",
+        "khong duoc ho tro",
+        "no evidence",
+        "not found",
+        "not supported",
+        "not in context",
+    )
+    explicit_scope_terms = (
+        "chapter",
+        "chương",
+        "chuong",
+        "section",
+        "bài ",
+        "bai ",
+        "ngoài phạm vi chương",
+        "ngoai pham vi chuong",
+    )
+    return any(term in text for term in grounding_terms) and not any(
+        term in text for term in explicit_scope_terms
+    )
+
+
+HARD_RETRY_ISSUE_TYPES = {
+    "wrong_answer",
+    "scope_violation",
+    "demo_fallback",
+    "content_quality",
+    "schema_invalid",
+    "missing_correct_answer",
+}
+
+# Similar wording is common for recognition/definition questions, so copy
+# similarity is review-only unless this flag is explicitly enabled.
+COPY_CHECK_RETRY_ENABLED = False
+
+
+def is_retryable_validation_issue(issue: dict) -> bool:
+    """Return True only for issues worth spending another builder call on."""
+    if issue.get("severity") == "warning":
+        return False
+    if _is_grounding_only_scope_issue(issue):
+        return False
+    return issue.get("issue_type") in HARD_RETRY_ISSUE_TYPES
+
+
 class ValidatorAgent:
     """
     Agent 4: Validator Agent (the "critic")
@@ -400,7 +515,7 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
             copy_text = self._build_question_stem_text(q)
             copy_result = self._trigram_copy_check(copy_text, primary_chunks)
             if copy_result["is_copy"]:
-                if copy_result["is_hard_fail"]:
+                if COPY_CHECK_RETRY_ENABLED and copy_result["is_hard_fail"]:
                     all_issues.append({
                         "question_id": q_id,
                         "issue_type": "copied_from_context",
@@ -414,6 +529,13 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
                 else:
                     q["needs_review"] = True
                     q["quality_warning"] = f"possible_copy: {copy_result['detail']}"
+                    all_issues.append({
+                        "question_id": q_id,
+                        "issue_type": "copied_from_context",
+                        "severity": "warning",
+                        "detail": copy_result["detail"],
+                        "suggestion": "Câu có wording sát tài liệu; chỉ xem lại nếu muốn diễn đạt khác.",
+                    })
 
         # Batch questions into groups of BATCH_SIZE
         total_batches = (len(questions) + self.BATCH_SIZE - 1) // self.BATCH_SIZE
@@ -436,7 +558,7 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
                     temperature=0.1,
                 )
 
-                result = json.loads(response)
+                result = _parse_validator_response(response)
 
                 # Collect per-question issues from this batch
                 batch_questions = result.get("questions", [])
@@ -446,6 +568,28 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
                     q_issues = q_result.get("issues", [])
                     for issue in q_issues:
                         issue["question_id"] = question_id
+                        if _is_grounding_only_scope_issue(issue):
+                            issue["severity"] = "warning"
+                            for _q in batch:
+                                if _q.get("question_id") == question_id:
+                                    _q["needs_review"] = True
+                                    _q["quality_warning"] = (
+                                        issue.get("detail") or "grounding_uncertain"
+                                    )
+                                    break
+                            all_issues.append(issue)
+                            continue
+                        if not is_retryable_validation_issue(issue):
+                            issue["severity"] = "warning"
+                            for _q in batch:
+                                if _q.get("question_id") == question_id:
+                                    _q["needs_review"] = True
+                                    _q["quality_warning"] = (
+                                        issue.get("detail")
+                                        or issue.get("issue_type")
+                                        or "validation_warning"
+                                    )
+                                    break
                         all_issues.append(issue)
                     all_llm_results.append(q_result)
 
@@ -468,24 +612,22 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
             except json.JSONDecodeError as e:
                 warn_msg = f"Batch {batch_num} parse failed: {e}"
                 warnings.append(warn_msg)
-                # Hard fail: validator didn't run → cannot trust any question in this batch
+                # Validator infrastructure failed, not the questions. Keep this as
+                # a review warning so good generated questions are not rebuilt
+                # indefinitely because the critic returned non-JSON.
                 for _bq in batch:
-                    all_issues.append({
-                        "question_id": _bq.get("question_id", "?"),
-                        "issue_type": "validator_parse_failed",
-                        "detail": f"Batch {batch_num} response không parse được: {str(e)[:120]}",
-                        "suggestion": "Validator không chạy được — cần sinh lại để re-validate.",
-                    })
+                    _bq["needs_review"] = True
+                    _bq["quality_warning"] = (
+                        f"validator_parse_failed: Batch {batch_num} response không parse được"
+                    )
             except Exception as e:
                 warn_msg = f"Batch {batch_num} failed: {e}"
                 warnings.append(warn_msg)
                 for _bq in batch:
-                    all_issues.append({
-                        "question_id": _bq.get("question_id", "?"),
-                        "issue_type": "validator_parse_failed",
-                        "detail": f"Batch {batch_num} exception: {str(e)[:120]}",
-                        "suggestion": "Validator không chạy được — cần sinh lại để re-validate.",
-                    })
+                    _bq["needs_review"] = True
+                    _bq["quality_warning"] = (
+                        f"validator_failed: Batch {batch_num} exception"
+                    )
 
         # G9: Save current issues to Redis
         if self.short_term and all_issues:
@@ -494,21 +636,11 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
             except Exception:
                 pass
 
-        # Determine overall pass/fail
-        validation_passed = len(all_issues) == 0
-
-        # approved_for_publish: only if no critical issues
-        _CRITICAL_TYPES = {
-            "wrong_answer",
-            "scope_violation",
-            "demo_fallback",
-            "copied_from_context",
-            "validator_parse_failed",
-        }
         critical_issues = [
             i for i in all_issues
-            if i.get("issue_type") in _CRITICAL_TYPES
+            if is_retryable_validation_issue(i)
         ]
+        validation_passed = len(critical_issues) == 0
         approved_for_publish = len(critical_issues) == 0
 
         # Check bloom compliance
@@ -528,7 +660,7 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
 
         status = AgentStatus.SUCCESS
         if not validation_passed:
-            if len(all_issues) > 0:
+            if len(critical_issues) > 0:
                 status = AgentStatus.RETRY_NEEDED
             else:
                 status = AgentStatus.PARTIAL

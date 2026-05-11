@@ -37,6 +37,13 @@ def _norm_text(s: str) -> str:
     return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
 
 
+def _assign_blueprint_indices(blueprint: list[dict]) -> list[dict]:
+    """Store the approved slot order explicitly for builder/retry/export."""
+    for idx, slot in enumerate(blueprint, start=1):
+        slot["blueprint_index"] = idx
+    return blueprint
+
+
 def _normalize_section_fields(
     blueprint: list[dict],
     scope_units: list[dict],
@@ -122,6 +129,303 @@ def _normalize_section_fields(
         slot["secondary_section_titles"] = [u["section_title"] for u in sec_resolved if u.get("section_title")]
 
     return blueprint
+
+
+SECTION_METADATA_FIELDS = (
+    "section",
+    "primary_section_id",
+    "primary_section_title",
+    "primary_scope_unit_key",
+    "secondary_section_ids",
+    "secondary_section_titles",
+    "secondary_scope_unit_keys",
+)
+
+
+def _has_value(value: Any) -> bool:
+    return value is not None and value != "" and value != []
+
+
+def _restore_modification_slot_metadata(
+    blueprint: list[dict],
+    current_blueprint: list[dict],
+) -> dict[str, int]:
+    """Restore locked and section metadata after LLM blueprint modification.
+
+    The modification prompt lets the LLM change chapter/section/topic_hint, but
+    it must not lose type/Bloom or silently drop section metadata. Section fields
+    are restored only when the slot stays in the same chapter to avoid carrying a
+    section from the wrong chapter after a deliberate redistribution.
+    """
+    orig_map: dict[str, dict] = {
+        str(s.get("question_id") or ""): s
+        for s in current_blueprint
+        if s.get("question_id")
+    }
+    restored = {"bloom": 0, "type": 0, "section": 0}
+
+    for slot in blueprint:
+        qid = str(slot.get("question_id") or "")
+        orig = orig_map.get(qid)
+        if not orig:
+            continue
+
+        if slot.get("bloom_level") != orig.get("bloom_level"):
+            slot["bloom_level"] = orig.get("bloom_level")
+            restored["bloom"] += 1
+        if slot.get("type") != orig.get("type"):
+            slot["type"] = orig.get("type")
+            restored["type"] += 1
+
+        if not _has_value(slot.get("section")) and _has_value(slot.get("primary_section_title")):
+            slot["section"] = slot["primary_section_title"]
+            restored["section"] += 1
+
+        slot_chapter = str(slot.get("chapter") or "")
+        orig_chapter = str(orig.get("chapter") or "")
+        same_chapter = (
+            not slot_chapter
+            or not orig_chapter
+            or _norm_text(slot_chapter) == _norm_text(orig_chapter)
+        )
+        if not same_chapter:
+            continue
+
+        for field in SECTION_METADATA_FIELDS:
+            if _has_value(slot.get(field)):
+                continue
+            orig_value = orig.get(field)
+            if _has_value(orig_value):
+                slot[field] = orig_value
+                restored["section"] += 1
+
+        if not _has_value(slot.get("section")) and _has_value(slot.get("primary_section_title")):
+            slot["section"] = slot["primary_section_title"]
+            restored["section"] += 1
+
+    return restored
+
+
+def _section_scope_key(chapter: str, section: str, section_id: str | None = None) -> str:
+    if section_id:
+        return section_id
+    return f"__sec__{_norm_text(chapter)}>{_norm_text(section)}"
+
+
+def _chapter_compatible(slot_chapter: str, unit: dict) -> bool:
+    """Return True when a section unit belongs to the slot chapter."""
+    if not slot_chapter:
+        return True
+    slot_norm = _norm_text(slot_chapter)
+    candidates = [
+        str(unit.get("chapter_title") or ""),
+        str(unit.get("chapter_id") or ""),
+    ]
+    for candidate in candidates:
+        cand_norm = _norm_text(candidate)
+        if not cand_norm:
+            continue
+        if slot_norm == cand_norm or slot_norm in cand_norm or cand_norm in slot_norm:
+            return True
+
+    import re as _re
+    slot_nums = _re.findall(r"\d+", slot_norm)
+    if not slot_nums:
+        return False
+    for candidate in candidates:
+        cand_nums = _re.findall(r"\d+", _norm_text(candidate))
+        if cand_nums and cand_nums[0] == slot_nums[0]:
+            return True
+    return False
+
+
+def _build_section_registry(
+    scope_units: list[dict] | None,
+    retrieved_context: list[dict] | None = None,
+) -> list[dict]:
+    """Build canonical section units from scope metadata and retrieved chunks."""
+    registry: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def _add(
+        *,
+        chapter_title: str,
+        section_title: str,
+        chapter_id: str | None = None,
+        section_id: str | None = None,
+        scope_unit_key: str | None = None,
+        source: str,
+    ) -> None:
+        chapter_title = (chapter_title or "").strip()
+        section_title = (section_title or "").strip()
+        chapter_id = (chapter_id or "").strip() or None
+        section_id = (section_id or "").strip() or None
+        if not chapter_title or not section_title:
+            return
+        key = scope_unit_key or _section_scope_key(chapter_title, section_title, section_id)
+        dedupe_key = (
+            section_id or "",
+            _norm_text(chapter_title),
+            _norm_text(section_title),
+        )
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        registry.append({
+            "chapter_id": chapter_id,
+            "chapter_title": chapter_title,
+            "section_id": section_id,
+            "section_title": section_title,
+            "scope_unit_key": key,
+            "source": source,
+        })
+
+    for unit in scope_units or []:
+        section_title = unit.get("section_title") or unit.get("section") or ""
+        if not section_title:
+            continue
+        key = unit.get("scope_unit_key") or unit.get("section_id")
+        _add(
+            chapter_title=unit.get("chapter_title") or unit.get("chapter") or unit.get("chapter_id") or "",
+            chapter_id=unit.get("chapter_id"),
+            section_title=section_title,
+            section_id=unit.get("section_id"),
+            scope_unit_key=key,
+            source="scope_units",
+        )
+
+    for chunk in retrieved_context or []:
+        meta = chunk.get("metadata") or {}
+        chapter_title = chunk.get("chapter") or meta.get("chapter") or ""
+        section_title = (
+            chunk.get("section")
+            or meta.get("section")
+            or meta.get("title")
+            or ""
+        )
+        _add(
+            chapter_title=chapter_title,
+            chapter_id=chunk.get("chapter_id") or meta.get("chapter_id") or chapter_title,
+            section_title=section_title,
+            section_id=chunk.get("section_id") or meta.get("section_id"),
+            source="retrieved_context",
+        )
+
+    return registry
+
+
+def _canonicalize_section_metadata(
+    blueprint: list[dict],
+    exam_config: dict,
+    retrieved_context: list[dict] | None = None,
+) -> tuple[list[dict], dict[str, int]]:
+    """Resolve section metadata after LLM edits.
+
+    The LLM chooses chapter/section. This function canonicalizes that choice to
+    the exact metadata BuilderAgent uses for section-level retrieval.
+    """
+    registry = _build_section_registry(
+        list(exam_config.get("scope_units") or []) + list(exam_config.get("section_registry") or []),
+        retrieved_context,
+    )
+    if not registry:
+        return _normalize_section_fields(blueprint, exam_config.get("scope_units") or []), {
+            "resolved": 0,
+            "fallback": 0,
+            "unresolved": len(blueprint),
+        }
+
+    key_lookup = {u["scope_unit_key"]: u for u in registry if u.get("scope_unit_key")}
+    id_lookup = {u["section_id"]: u for u in registry if u.get("section_id")}
+    counts = {"resolved": 0, "fallback": 0, "unresolved": 0}
+    rr_counter: dict[str, int] = {}
+
+    def _title_match(section_text: str, unit: dict) -> bool:
+        if not section_text:
+            return False
+        want = _norm_text(section_text)
+        got = _norm_text(str(unit.get("section_title") or ""))
+        return bool(want and got and (want == got or want in got or got in want))
+
+    def _chapter_units(chapter: str) -> list[dict]:
+        return [u for u in registry if _chapter_compatible(chapter, u)]
+
+    def _pick_unit(slot: dict) -> tuple[dict | None, bool]:
+        chapter = str(slot.get("chapter") or "")
+
+        key = slot.get("primary_scope_unit_key") or ""
+        unit = key_lookup.get(key)
+        if unit and _chapter_compatible(chapter, unit):
+            return unit, False
+
+        sec_id = slot.get("primary_section_id") or slot.get("section_id") or ""
+        unit = id_lookup.get(sec_id)
+        if unit and _chapter_compatible(chapter, unit):
+            return unit, False
+
+        section_text = (
+            slot.get("primary_section_title")
+            or slot.get("section")
+            or ""
+        )
+        units_in_chapter = _chapter_units(chapter)
+        search_space = units_in_chapter or registry
+        for candidate in search_space:
+            if _title_match(section_text, candidate):
+                return candidate, False
+
+        if units_in_chapter:
+            ch_key = _norm_text(chapter) or "__global__"
+            idx = rr_counter.get(ch_key, 0)
+            rr_counter[ch_key] = idx + 1
+            return units_in_chapter[idx % len(units_in_chapter)], True
+
+        return None, False
+
+    def _apply_unit(slot: dict, unit: dict) -> None:
+        slot["chapter"] = unit.get("chapter_title") or slot.get("chapter", "")
+        slot["section"] = unit.get("section_title", "")
+        slot["primary_section_title"] = unit.get("section_title", "")
+        slot["primary_scope_unit_key"] = unit.get("scope_unit_key", "")
+        slot["primary_section_id"] = unit.get("section_id") or None
+
+        primary_key = slot.get("primary_scope_unit_key")
+        secondary_keys = []
+        for raw_key in slot.get("secondary_scope_unit_keys") or []:
+            if raw_key in key_lookup and raw_key != primary_key:
+                secondary_keys.append(raw_key)
+        for raw_id in slot.get("secondary_section_ids") or []:
+            sec_unit = id_lookup.get(raw_id)
+            if sec_unit and sec_unit.get("scope_unit_key") != primary_key:
+                secondary_keys.append(sec_unit["scope_unit_key"])
+        secondary_keys = list(dict.fromkeys(secondary_keys))
+        secondary_units = [key_lookup[k] for k in secondary_keys if k in key_lookup]
+        slot["secondary_scope_unit_keys"] = [u["scope_unit_key"] for u in secondary_units]
+        slot["secondary_section_ids"] = [
+            u["section_id"] for u in secondary_units if u.get("section_id")
+        ]
+        slot["secondary_section_titles"] = [
+            u["section_title"] for u in secondary_units if u.get("section_title")
+        ]
+
+    for slot in blueprint:
+        unit, fallback = _pick_unit(slot)
+        if unit:
+            _apply_unit(slot, unit)
+            counts["fallback" if fallback else "resolved"] += 1
+        else:
+            counts["unresolved"] += 1
+
+    if counts["fallback"] or counts["unresolved"]:
+        logger.warning(
+            "[OutlineAgent] section metadata canonicalization: resolved=%d fallback=%d unresolved=%d",
+            counts["resolved"],
+            counts["fallback"],
+            counts["unresolved"],
+        )
+
+    return blueprint, counts
+
 
 class OutlineAgent:
     """
@@ -217,6 +521,7 @@ Mày là chuyên gia chỉnh sửa đề kiểm tra. Nhiệm vụ DUY NHẤT là
 ## Nguyên tắc chỉnh sửa
 - Giữ nguyên tổng số slot và phân bổ Bloom chính xác
 - Điều chỉnh field "chapter", "section", "topic_hint" theo phản hồi giáo viên
+- Không được làm mất section metadata đã có: "section", "primary_section_id", "primary_section_title", "primary_scope_unit_key", "secondary_section_ids", "secondary_section_titles", "secondary_scope_unit_keys"
 - Giữ nguyên "type", "bloom_level", "content_type", "estimated_difficulty" của từng slot
 - Mỗi chương phải có ít nhất 1 slot
 
@@ -271,6 +576,16 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
         try:
             # Build context summary for LLM
             context_summary = self._build_context_summary(retrieved_context)
+            section_registry = _build_section_registry(
+                exam_config.get("scope_units") or [],
+                retrieved_context,
+            )
+            if section_registry:
+                exam_config["section_registry"] = section_registry
+                logger.info(
+                    "[OutlineAgent] section registry built: %d units",
+                    len(section_registry),
+                )
 
             # Build user prompt
             user_prompt = self._build_outline_prompt(retrieved_context, exam_config)
@@ -328,23 +643,17 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
             # The LLM is only allowed to change chapter/section/topic_hint.
             # Bloom and type must stay exactly as in the original blueprint.
             if is_modification:
-                _orig_map: dict[str, dict] = {
-                    s.get("question_id", ""): s
-                    for s in (exam_config.get("current_blueprint") or [])
-                    if s.get("question_id")
-                }
-                _bloom_reverted = 0
-                for slot in blueprint:
-                    qid = slot.get("question_id", "")
-                    orig = _orig_map.get(qid)
-                    if orig:
-                        if slot.get("bloom_level") != orig.get("bloom_level"):
-                            slot["bloom_level"] = orig["bloom_level"]
-                            _bloom_reverted += 1
-                        if slot.get("type") != orig.get("type"):
-                            slot["type"] = orig["type"]
-                if _bloom_reverted:
-                    print(f"[OutlineAgent] BLOOM LOCK: reverted bloom_level for {_bloom_reverted} slots", flush=True)
+                _restore_counts = _restore_modification_slot_metadata(
+                    blueprint,
+                    exam_config.get("current_blueprint") or [],
+                )
+                if _restore_counts["bloom"]:
+                    print(f"[OutlineAgent] BLOOM LOCK: reverted bloom_level for {_restore_counts['bloom']} slots", flush=True)
+                if _restore_counts["section"]:
+                    logger.info(
+                        "[OutlineAgent] SECTION LOCK: restored %d missing section metadata fields",
+                        _restore_counts["section"],
+                    )
 
             # ── Hard type-count enforcement BEFORE Bloom check ──────────────
             mcq_target    = int(exam_config.get("mcq_count", 40) or 0)
@@ -527,7 +836,16 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
             elapsed_ms = int((time.time() - start_time) * 1000)
             usage = metrics.prompt_tokens + metrics.completion_tokens
 
-            blueprint = _normalize_section_fields(blueprint, exam_config.get("scope_units") or [])
+            blueprint, section_counts = _canonicalize_section_metadata(
+                blueprint,
+                exam_config,
+                retrieved_context,
+            )
+            if section_counts["unresolved"]:
+                warnings.append(
+                    f"Section metadata unresolved for {section_counts['unresolved']} blueprint slots"
+                )
+            blueprint = _assign_blueprint_indices(blueprint)
             return OutlineOutput(
                 status=AgentStatus.SUCCESS,
                 agent_name="outline",
@@ -556,7 +874,6 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
                     warnings.append(f"Partial JSON recovery: salvaged {len(_recovered)} slots")
                     # Merge recovered slots with original blueprint
                     _orig_bp = list(exam_config.get("current_blueprint", []))
-                    _orig_map_ids = {s.get("question_id"): s for s in _orig_bp}
                     _recovered_ids = {s.get("question_id") for s in _recovered}
                     # Keep recovered slots, fill missing from orig (updated chapter = orig chapter for non-recovered)
                     merged_slots = list(_recovered)
@@ -568,13 +885,8 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
                         _clean_merged = json.dumps({"blueprint": merged_slots, "distribution_summary": {}})
                         result_merged = json.loads(_clean_merged)
                         blueprint = result_merged.get("blueprint", [])
-                        # Restore bloom/type locks
-                        for slot in blueprint:
-                            qid = slot.get("question_id", "")
-                            orig = _orig_map_ids.get(qid)
-                            if orig:
-                                slot["bloom_level"] = orig.get("bloom_level", slot.get("bloom_level"))
-                                slot["type"] = orig.get("type", slot.get("type"))
+                        # Restore locked fields and any section metadata omitted by partial JSON.
+                        _restore_modification_slot_metadata(blueprint, _orig_bp)
                         # Continue with this blueprint (fall through to enforcement)
                         is_partial_recovery = True
                         distribution_summary = {}
@@ -661,7 +973,16 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
                         "by_chapter": {ch: sum(1 for s in blueprint if s.get("chapter") == ch) for ch in scope_chapters_r},
                     }
                     elapsed_ms = int((time.time() - start_time) * 1000)
-                    blueprint = _normalize_section_fields(blueprint, exam_config.get("scope_units") or [])
+                    blueprint, section_counts = _canonicalize_section_metadata(
+                        blueprint,
+                        exam_config,
+                        retrieved_context,
+                    )
+                    if section_counts["unresolved"]:
+                        warnings.append(
+                            f"Section metadata unresolved for {section_counts['unresolved']} blueprint slots"
+                        )
+                    blueprint = _assign_blueprint_indices(blueprint)
                     return OutlineOutput(
                         status=AgentStatus.PARTIAL,
                         agent_name="outline",
@@ -835,7 +1156,16 @@ KIỂM TRA LẠI trước khi output.
         }
 
         elapsed_ms = int((time.time() - start_time) * 1000)
-        blueprint = _normalize_section_fields(blueprint, exam_config.get("scope_units") or [])
+        blueprint, section_counts = _canonicalize_section_metadata(
+            blueprint,
+            exam_config,
+            retrieved_context,
+        )
+        if section_counts["unresolved"]:
+            warnings.append(
+                f"Section metadata unresolved for {section_counts['unresolved']} blueprint slots"
+            )
+        blueprint = _assign_blueprint_indices(blueprint)
         return OutlineOutput(
             status=AgentStatus.SUCCESS,
             agent_name="outline",
@@ -1092,7 +1422,12 @@ KIỂM TRA LẠI trước khi output.
         }
 
         elapsed_ms = int((time.time() - start_time) * 1000)
-        blueprint = _normalize_section_fields(blueprint, exam_config.get("scope_units") or [])
+        blueprint, section_counts = _canonicalize_section_metadata(blueprint, exam_config)
+        if section_counts["unresolved"]:
+            warnings.append(
+                f"Section metadata unresolved for {section_counts['unresolved']} blueprint slots"
+            )
+        blueprint = _assign_blueprint_indices(blueprint)
         return OutlineOutput(
             status=AgentStatus.PARTIAL,
             agent_name="outline",
@@ -1337,8 +1672,10 @@ KIỂM TRA LẠI trước khi output.
         bloom_counts = self._bloom_pct_to_counts(bloom_dist, total_questions)
         blueprint_history: list[dict] = exam_config.get("blueprint_history") or []
 
-        # Build section list for section-aware prompt (only section-level units, not __ch__)
-        scope_units: list[dict] = exam_config.get("scope_units") or []
+        # Build section list for section-aware prompt. For textbook namespaces,
+        # section_registry is built from retrieved chunks because no document
+        # heading_tree exists.
+        scope_units: list[dict] = exam_config.get("section_registry") or exam_config.get("scope_units") or []
         _sec_units_for_prompt = [
             u for u in scope_units
             if u.get("section_title") and not u.get("scope_unit_key", "").startswith("__ch__")
@@ -1403,17 +1740,22 @@ KIỂM TRA LẠI trước khi output.
             print(f"[OutlineAgent] MODIFICATION MODE: feedback='{outline_feedback[:80]}', "
                   f"blueprint_len={len(current_blueprint)}", flush=True)
 
-            # Compact current blueprint for LLM (only fields that matter)
-            compact_bp = [
-                {
+            # Compact current blueprint for LLM, while preserving section
+            # metadata needed by BuilderAgent for section-level retrieval.
+            compact_bp = []
+            for s in current_blueprint:
+                item = {
                     "question_id": s.get("question_id"),
                     "type": s.get("type", "mcq"),
                     "bloom_level": s.get("bloom_level"),
                     "chapter": s.get("chapter"),
                     "topic_hint": s.get("topic_hint", ""),
                 }
-                for s in current_blueprint
-            ]
+                for field in SECTION_METADATA_FIELDS:
+                    value = s.get(field)
+                    if _has_value(value):
+                        item[field] = value
+                compact_bp.append(item)
             current_dist = {}
             for s in current_blueprint:
                 ch = s.get("chapter", "?")
@@ -1485,13 +1827,15 @@ Tổng {total_questions} câu. Quy đổi phần trăm: {pct_helper}
 
 Bước 1: Xác định chương nào tăng/giảm theo phản hồi.
 Bước 2: Tính số câu cụ thể mỗi chương (tổng phải bằng {total_questions}).
-Bước 3: Gán lại field "chapter" và "topic_hint" cho từng slot. Tuyệt đối KHÔNG thêm/xóa slot, KHÔNG thay đổi bloom_level, KHÔNG thay đổi type.
+Bước 3: Gán lại field "chapter", "section" và "topic_hint" cho từng slot. Tuyệt đối KHÔNG thêm/xóa slot, KHÔNG thay đổi bloom_level, KHÔNG thay đổi type.
+Nếu BLUEPRINT CŨ có các field section metadata ("section", "primary_section_id", "primary_section_title", "primary_scope_unit_key", "secondary_section_ids", "secondary_section_titles", "secondary_scope_unit_keys") thì output mới PHẢI giữ lại các field đó, trừ khi feedback yêu cầu đổi section/chapter cụ thể.
+Nếu chỉ đổi thứ tự/random/phân bố đều hơn thì KHÔNG được xóa section metadata.
 Bước 4: Kiểm tra: tổng slot = {total_questions}? bloom counts khớp ma trận? mỗi chương trong scope có ít nhất 1 slot?
 
 Phạm vi (scope): {json.dumps(scope, ensure_ascii=False)}{section_list_str}
 
 Output chỉ JSON thuần (không markdown, không giải thích):
-{{"blueprint": [<TOAN BO {total_questions} slot da chinh sua>], "distribution_summary": {{"by_bloom": {bloom_counts}, "by_chapter": {{}}}}}}"""
+{{"blueprint": [<TOAN BO {total_questions} slot da chinh sua, gom day du section metadata neu co>], "distribution_summary": {{"by_bloom": {bloom_counts}, "by_chapter": {{}}}}}}"""
 
         # CREATION MODE — build with constraints + history
         print(f"[OutlineAgent] CREATION MODE: outline_feedback={bool(outline_feedback)}, "
@@ -1766,7 +2110,12 @@ Tạo blueprint chi tiết (JSON thuần):"""
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 
-        blueprint = _normalize_section_fields(blueprint, exam_config.get("scope_units") or [])
+        blueprint, section_counts = _canonicalize_section_metadata(blueprint, exam_config)
+        if section_counts["unresolved"]:
+            warnings.append(
+                f"Section metadata unresolved for {section_counts['unresolved']} blueprint slots"
+            )
+        blueprint = _assign_blueprint_indices(blueprint)
         return OutlineOutput(
             status=AgentStatus.PARTIAL,
             agent_name="outline",

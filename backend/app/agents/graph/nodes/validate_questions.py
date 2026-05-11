@@ -29,7 +29,7 @@ async def validate_questions(state: ExamGraphState) -> ExamGraphState:
     Returns:
         Updated ExamGraphState with validation_result, retry_issues.
     """
-    from app.agents.validator import ValidatorAgent
+    from app.agents.validator import ValidatorAgent, is_retryable_validation_issue
 
     from app.core.redis_client import get_redis_client
     redis_client = get_redis_client()
@@ -57,6 +57,10 @@ async def validate_questions(state: ExamGraphState) -> ExamGraphState:
         if key not in seen:
             seen[key] = issue
     deduplicated_issues = list(seen.values())
+    retryable_issues = [
+        issue for issue in deduplicated_issues
+        if is_retryable_validation_issue(issue)
+    ]
 
     cost_report["validator"] = validation_result.token_usage.model_dump()
 
@@ -68,7 +72,7 @@ async def validate_questions(state: ExamGraphState) -> ExamGraphState:
     })
 
     # Publish targeted rebuild instructions directly to BuilderAgent (peer-to-peer)
-    if deduplicated_issues:
+    if retryable_issues:
         try:
             from app.agents.messaging import AgentMessageBus
             bus = AgentMessageBus(redis_client)
@@ -78,11 +82,11 @@ async def validate_questions(state: ExamGraphState) -> ExamGraphState:
                 recipient="builder",
                 message_type="targeted_rebuild",
                 payload={
-                    "issues": deduplicated_issues,
-                    "failed_question_ids": list({i.get("question_id") for i in deduplicated_issues}),
+                    "issues": retryable_issues,
+                    "failed_question_ids": list({i.get("question_id") for i in retryable_issues}),
                     "correction_strategies": {
                         i.get("question_id"): i.get("correction_strategy", "")
-                        for i in deduplicated_issues
+                        for i in retryable_issues
                         if i.get("correction_strategy")
                     },
                 },
@@ -100,7 +104,7 @@ async def validate_questions(state: ExamGraphState) -> ExamGraphState:
             "scope_violations": getattr(validation_result, "scope_violations", []),
             "warnings": validation_result.warnings or [],
         },
-        "retry_issues": deduplicated_issues,
+        "retry_issues": retryable_issues,
         "cost_report": cost_report,
         "current_agent": AgentRole.VALIDATOR,
         "warnings": warnings + (validation_result.warnings or []),

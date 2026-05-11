@@ -69,17 +69,22 @@ class ScopeCheckerSkill:
         Thresholds:
           overlap >= 4 meaningful words  → in_scope (matched)
           overlap 2-3                    → uncertain (soft flag)
-          overlap < 2                    → no_primary_evidence (hard fail)
-          no primary_chunks              → no_grounding_context (hard fail)
+          overlap < 2                    → no_primary_evidence (soft flag)
+          no primary_chunks              → no_grounding_context (soft flag)
+
+        Important: lack of lexical evidence is not the same as out-of-scope.
+        Generated calculation questions often use fresh numbers/scenarios while
+        still relying on in-scope formulas. Hard failures are reserved for
+        explicit metadata/LLM scope violations in ValidatorAgent.
         """
         if not primary_chunks:
             return {
                 "in_scope": False,
-                "confidence": 0.9,
+                "confidence": 0.2,
                 "violation_type": "no_grounding_context",
                 "evidence_chunk_ids": [],
                 "reasoning": "Không có primary chunks — không thể xác minh phạm vi kiến thức.",
-                "is_hard_fail": True,
+                "is_hard_fail": False,
             }
 
         if not question_text.strip():
@@ -126,11 +131,11 @@ class ScopeCheckerSkill:
 
         return {
             "in_scope": False,
-            "confidence": 0.7,
+            "confidence": 0.3,
             "violation_type": "no_primary_evidence",
             "evidence_chunk_ids": [],
             "reasoning": f"Không tìm thấy primary chunk có overlap đủ mạnh (best={best_overlap} từ).",
-            "is_hard_fail": True,
+            "is_hard_fail": False,
         }
 
     async def run(

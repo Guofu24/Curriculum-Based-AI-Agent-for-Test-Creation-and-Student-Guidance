@@ -76,6 +76,11 @@ def _build_chapter_id_variants(ch_id: str, position: int) -> list[str]:
     return variants
 
 
+def _metadata_chapter_value(metadata: dict) -> str:
+    """Return the canonical chapter metadata value used for scope matching."""
+    return (metadata.get("chapter_id") or metadata.get("chapter") or "").strip()
+
+
 
 class RetrievalAgent:
     """
@@ -221,7 +226,7 @@ class RetrievalAgent:
             non_scope_seen: set[str] = set()
 
             for chunk in all_chunks:
-                ch_raw = chunk.get("metadata", {}).get("chapter", "")
+                ch_raw = _metadata_chapter_value(chunk.get("metadata", {}))
                 ch_id = normalize_chapter_id(ch_raw)
                 # Also check raw chapter string directly
                 is_scope = ch_id in scope_ch_ids or ch_raw in scope_ch_ids
@@ -248,7 +253,7 @@ class RetrievalAgent:
             # Group scope chunks by normalized chapter_id
             scope_by_ch: dict[str, list[dict]] = {}
             for chunk in scope_chunks:
-                ch_id = normalize_chapter_id(chunk.get("metadata", {}).get("chapter", ""))
+                ch_id = normalize_chapter_id(_metadata_chapter_value(chunk.get("metadata", {})))
                 if ch_id not in scope_by_ch:
                     scope_by_ch[ch_id] = []
                 scope_by_ch[ch_id].append(chunk)
@@ -285,6 +290,25 @@ class RetrievalAgent:
             if token_warning:
                 warnings.append(token_warning)
 
+            # Ensure explicitly selected sections survive semantic top-k/rerank.
+            if scope_section_ids and document_id:
+                section_chunks, section_warnings = await self._supplement_prereq_sections(
+                    document_id=document_id,
+                    prereq_section_ids=list(scope_section_ids),
+                    existing_chunks=all_chunks,
+                    expanded_queries=expanded_queries,
+                    min_per_section=1,
+                )
+                if section_chunks:
+                    existing_ids_post = {c["chunk_id"] for c in all_chunks}
+                    injected = [c for c in section_chunks if c["chunk_id"] not in existing_ids_post]
+                    all_chunks.extend(injected)
+                    logger.info(
+                        "[scope_section_protect] injected %d chunks for selected section_ids",
+                        len(injected),
+                    )
+                warnings.extend(section_warnings)
+
             # ── Section filter: prefer canonical section_id filter; fallback to title filter ──
             # Prerequisite chunks (prereq_ch_set) always bypass — they provide background context.
             if scope_section_ids or scope_sections:
@@ -304,7 +328,7 @@ class RetrievalAgent:
                     sec_id_set = set(scope_section_ids)
                     filtered_chunks_id: list[dict] = []
                     for chunk in all_chunks:
-                        ch_raw = chunk.get("metadata", {}).get("chapter", "")
+                        ch_raw = _metadata_chapter_value(chunk.get("metadata", {}))
                         ch_norm = normalize_chapter_id(ch_raw)
                         chunk_sec_id = (chunk.get("metadata", {}).get("section_id") or "").strip()
                         # Bypass: prereq chapter OR prereq section → always keep (will be tagged background)
@@ -337,7 +361,7 @@ class RetrievalAgent:
                         filtered_chunks: list[dict] = []
                         all_section_titles: set[str] = set()
                         for chunk in all_chunks:
-                            ch_raw = chunk.get("metadata", {}).get("chapter", "")
+                            ch_raw = _metadata_chapter_value(chunk.get("metadata", {}))
                             ch_norm = normalize_chapter_id(ch_raw)
                             chunk_sec_id_fb = (chunk.get("metadata", {}).get("section_id") or "").strip()
                             # Bypass: prereq chapter OR prereq section → always keep (will be tagged background)

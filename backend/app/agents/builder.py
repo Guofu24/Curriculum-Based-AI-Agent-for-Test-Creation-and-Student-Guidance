@@ -505,6 +505,43 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         self.latex_skill = LatexRendererSkill()
         self.redis = redis_client
 
+    @staticmethod
+    def _enforce_slot_metadata(q: dict, slot: dict, slot_number: int = 0) -> dict:
+        """Make the blueprint slot the source of truth for question metadata."""
+        q["question_id"] = slot.get("question_id") or q.get("question_id") or f"Q_{slot_number}"
+        q["type"] = slot.get("type") or q.get("type") or "mcq"
+        q["bloom_level"] = slot.get("bloom_level") or q.get("bloom_level") or "thong_hieu"
+        q["chapter"] = slot.get("chapter") or q.get("chapter") or ""
+        try:
+            q["blueprint_index"] = int(slot.get("blueprint_index") or slot_number or 0)
+        except (TypeError, ValueError):
+            q["blueprint_index"] = slot_number or 0
+
+        for field in (
+            "section",
+            "topic_hint",
+            "content_type",
+            "estimated_difficulty",
+            "primary_section_id",
+            "primary_section_title",
+            "primary_scope_unit_key",
+            "secondary_section_ids",
+            "secondary_section_titles",
+            "secondary_scope_unit_keys",
+            "blueprint_index",
+        ):
+            if field in slot:
+                q[field] = slot[field]
+
+        try:
+            q["blueprint_index"] = int(q.get("blueprint_index") or slot_number or 0)
+        except (TypeError, ValueError):
+            q["blueprint_index"] = slot_number or 0
+
+        if "estimated_difficulty" not in q:
+            q["estimated_difficulty"] = 0.5
+        return q
+
     @tracer.agent_span("builder_single")
     async def build_single_question(
         self,
@@ -777,6 +814,14 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                 warnings.append("Builder produced 0 questions from a non-empty blueprint.")
                 status = AgentStatus.PARTIAL
 
+            def _question_order(q: dict) -> int:
+                try:
+                    return int(q.get("blueprint_index") or 10**9)
+                except (TypeError, ValueError):
+                    return 10**9
+
+            all_questions.sort(key=_question_order)
+
             _real_count = sum(1 for q in all_questions if not q.get("is_demo_question"))
             _demo_count = sum(1 for q in all_questions if q.get("is_demo_question"))
             _review_count = sum(1 for q in all_questions if q.get("needs_review"))
@@ -815,6 +860,14 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     warnings.append(
                         f"Slot {_slot.get('question_id', '?')} used demo fallback due to builder exception"
                     )
+
+            def _fallback_question_order(q: dict) -> int:
+                try:
+                    return int(q.get("blueprint_index") or 10**9)
+                except (TypeError, ValueError):
+                    return 10**9
+
+            all_questions.sort(key=_fallback_question_order)
 
             logger.info(
                 "Builder finished (partial): %d questions from %d slots",
@@ -1196,16 +1249,12 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     continue
 
                 q = questions_raw[0]
-                # Normalize field names for consistency
-                if "question_id" not in q:
-                    q["question_id"] = q_id
-                if "type" not in q:
-                    q["type"] = q_type
-                if "bloom_level" not in q:
-                    q["bloom_level"] = bloom
-                if "chapter" not in q:
-                    q["chapter"] = chapter
-                q["estimated_difficulty"] = difficulty
+                if not isinstance(q, dict):
+                    msg = f"Slot {slot_number}: primary builder returned non-object question (attempt {attempt + 1})"
+                    warnings.append(msg)
+                    logger.warning(msg)
+                    continue
+                q = self._enforce_slot_metadata(q, slot, slot_number)
 
                 # Build options for MCQ
                 if q_type == "mcq" and "options" not in q:
@@ -1339,11 +1388,9 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                     if not _graw:
                         continue
                     q = _graw[0]
-                    if "question_id" not in q: q["question_id"] = q_id
-                    if "type" not in q: q["type"] = q_type
-                    if "bloom_level" not in q: q["bloom_level"] = bloom
-                    if "chapter" not in q: q["chapter"] = chapter
-                    q["estimated_difficulty"] = difficulty
+                    if not isinstance(q, dict):
+                        continue
+                    q = self._enforce_slot_metadata(q, slot, slot_number)
                     if q_type == "mcq" and "options" not in q:
                         q["options"] = {"A": "Đáp án A", "B": "Đáp án B", "C": "Đáp án C", "D": "Đáp án D"}
                         q["correct_answer"] = "A"; q["explanation"] = "Đáp án đúng là A."
@@ -1499,6 +1546,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
             "type": q_type,
             "bloom_level": bloom,
             "chapter": chapter,
+            "blueprint_index": slot.get("blueprint_index"),
             "topic_hint": slot.get("topic_hint", ""),
             "content_type": content_type,
             "estimated_difficulty": slot.get("estimated_difficulty", 0.5),
