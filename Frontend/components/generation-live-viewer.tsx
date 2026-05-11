@@ -263,6 +263,19 @@ const PIPELINE_STEPS = [
   { id: 5, label: "Hoàn tất", icon: FileCheck },
 ]
 
+const FAKE_OUTLINE_LOGS = [
+  "[outline] Phân tích phạm vi kiến thức...",
+  "[outline] Xây dựng phân phối Bloom...",
+  "[outline] Phân bổ câu hỏi theo chương...",
+  "[outline] Kiểm tra ràng buộc coverage...",
+  "[outline] Gán mức độ khó phù hợp...",
+  "[outline] Resolve section metadata...",
+  "[outline] Kiểm tra tỷ lệ phân bố...",
+  "[outline] Tối ưu hoá cấu trúc đề...",
+  "[outline] Cross-check scope units...",
+  "[outline] Hoàn thiện blueprint slots...",
+]
+
 // ─── Bloom level config ───────────────────────────────────────────────────────
 
 const BLOOM_CONFIG: Record<
@@ -1026,7 +1039,13 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
                     <div className="px-4 py-3 border-b bg-muted/20 space-y-2">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-2 min-w-0">
-                          <Database className="h-4 w-4 text-primary shrink-0" />
+                          {hitlRejecting ? (
+                            <Loader2 className="h-4 w-4 text-amber-500 shrink-0 animate-spin" />
+                          ) : (
+                            <div className="h-4 w-4 rounded-full bg-emerald-500 flex items-center justify-center shrink-0">
+                              <Check className="h-2.5 w-2.5 text-white" />
+                            </div>
+                          )}
                           <span className="text-sm font-semibold truncate">Sườn đề · {item.slots.length} câu hỏi</span>
                         </div>
                         <button
@@ -1205,6 +1224,11 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
 
             return null
           })}
+
+          {/* Blueprint thinking placeholder — shown while LLM is building blueprint */}
+          {isGenerating && feedItems.length > 0 && !feedItems.some(f => f.kind === 'blueprint') && (
+            <BlueprintThinkingPlaceholder />
+          )}
 
           {/* Typing indicator while generating */}
           {isGenerating && feedItems.length > 0 && feedItems[feedItems.length - 1]?.kind === 'reasoning' && (
@@ -1392,6 +1416,46 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ─── BlueprintThinkingPlaceholder sub-component ──────────────────────────────
+
+function BlueprintThinkingPlaceholder() {
+  const [visibleLines, setVisibleLines] = useState<string[]>([])
+  const idxRef = useRef(0)
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const line = FAKE_OUTLINE_LOGS[idxRef.current % FAKE_OUTLINE_LOGS.length]
+      idxRef.current += 1
+      setVisibleLines(prev => [...prev, line].slice(-5))
+    }, 750)
+    return () => clearInterval(interval)
+  }, [])
+
+  return (
+    <div className="mb-5 rounded-xl border border-border/40 bg-muted/20 overflow-hidden animate-in fade-in duration-500">
+      <div className="px-4 py-2.5 border-b border-border/30 flex items-center gap-2">
+        <Loader2 className="h-3.5 w-3.5 text-muted-foreground/40 animate-spin" />
+        <span className="text-xs font-medium text-muted-foreground/50">Đang xây dựng sườn đề...</span>
+      </div>
+      <div className="px-4 py-3 font-mono text-[11px] space-y-0.5 min-h-[72px]">
+        {visibleLines.map((line, i) => (
+          <p
+            key={`${i}-${line}`}
+            className={cn(
+              "transition-opacity duration-500",
+              i === visibleLines.length - 1
+                ? "text-muted-foreground/55 opacity-100"
+                : "text-muted-foreground/30 opacity-60"
+            )}
+          >
+            {line}
+          </p>
+        ))}
+      </div>
     </div>
   )
 }
