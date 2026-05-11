@@ -25,9 +25,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 MAX_PDF_SIZE_MB = 10
 MAX_DOCX_SIZE_MB = 10
 VIETNAMESE_FONT_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;700&display=swap');
 body {
-    font-family: 'Noto Sans', 'DejaVu Sans', 'Arial Unicode MS', sans-serif;
+    font-family: 'Noto Sans', 'DejaVu Sans', 'Liberation Sans', Arial, sans-serif;
     font-size: 12pt;
     line-height: 1.7;
 }
@@ -404,6 +403,30 @@ class ExamExporter:
         font-weight: bold;
     }}
 
+    /* Dung-Sai table */
+    .dung-sai-table {{
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0.6em 0;
+    }}
+    .dung-sai-table th, .dung-sai-table td {{
+        border: 1px solid #bbb;
+        padding: 0.35em 0.6em;
+        vertical-align: middle;
+    }}
+    .dung-sai-table thead th {{
+        background-color: #f0f4f8;
+        font-weight: bold;
+        text-align: center;
+    }}
+    .dung-sai-table .tick-col {{
+        width: 56px;
+        text-align: center;
+        font-size: 13pt;
+    }}
+    .tick-correct {{ color: #1a7f1a; font-weight: bold; }}
+    .tick-wrong   {{ color: #a31d1d; font-weight: bold; }}
+
     /* Math rendering */
     .math-inline {{
         font-family: 'DejaVu Sans', 'Noto Sans', serif;
@@ -479,30 +502,46 @@ class ExamExporter:
         return "\n".join(parts)
 
     def _render_dung_sai_html(self, q: dict, index: int, include_answers: bool) -> str:
-        """Render THPT true/false question from propositions."""
+        """Render THPT true/false question as a Đúng/Sai tick table."""
         raw_stem = q.get("stem") or q.get("content") or ""
         stem = self._render_latex(html.escape(raw_stem))
         propositions = self._normalize_propositions(q.get("propositions", []))
         explanation = html.escape(q.get("explanation", ""))
 
         parts = [
-            f"<div class='question'>",
-            f"<div class='question-stem'>CÃ¢u {index}. {stem}</div>",
-            "<div class='options'>",
+            "<div class='question'>",
+            f"<div class='question-stem'>Câu {index}. {stem}</div>",
+            "<table class='dung-sai-table'>",
+            "<thead><tr>"
+            "<th>Mệnh đề</th>"
+            "<th class='tick-col'>Đúng</th>"
+            "<th class='tick-col'>Sai</th>"
+            "</tr></thead>",
+            "<tbody>",
         ]
 
         for label, text, is_correct in propositions:
             escaped_text = self._render_latex(html.escape(str(text)))
             if include_answers:
-                mark = "ÄÃºng" if is_correct else "Sai"
-                parts.append(f"<div class='option option-correct'>â—‹ {label}) {escaped_text} <strong>[{mark}]</strong></div>")
+                dung = "<span class='tick-correct'>✓</span>" if is_correct else "□"
+                sai  = "□" if is_correct else "<span class='tick-wrong'>✗</span>"
             else:
-                parts.append(f"<div class='option'>â—‹ {label}) {escaped_text}</div>")
+                dung = "□"
+                sai  = "□"
+            parts.append(
+                f"<tr>"
+                f"<td><strong>{label})</strong> {escaped_text}</td>"
+                f"<td class='tick-col'>{dung}</td>"
+                f"<td class='tick-col'>{sai}</td>"
+                f"</tr>"
+            )
+
+        parts.append("</tbody></table>")
 
         if include_answers and explanation:
-            parts.append(f"<div class='answer-block'>Giáº£i thÃ­ch: <span class='explanation'>{explanation}</span></div>")
+            parts.append(f"<div class='answer-block'>Giải thích: <span class='explanation'>{explanation}</span></div>")
 
-        parts.append("</div></div>")
+        parts.append("</div>")
         return "\n".join(parts)
 
     def _render_essay_html(self, q: dict, index: int, include_answers: bool) -> str:
@@ -704,14 +743,16 @@ class ExamExporter:
 
     def _docx_set_default_style(self, doc: Document) -> None:
         """Set document-wide defaults for Vietnamese text."""
+        from docx.oxml.ns import qn as _qn
         style = doc.styles["Normal"]
-        style.font.name = "Noto Sans"
+        style.font.name = "Times New Roman"
         style.font.size = Pt(12)
         try:
-            style.element.rPr.rFonts.set(
-                doc.styles.element.nsmap["w"],
-                "Noto Sans"
-            )
+            rPr = style.element.get_or_add_rPr()
+            rFonts = rPr.get_or_add_rFonts()
+            rFonts.set(_qn("w:ascii"), "Times New Roman")
+            rFonts.set(_qn("w:hAnsi"), "Times New Roman")
+            rFonts.set(_qn("w:cs"),    "Times New Roman")
         except Exception:
             pass
 
@@ -753,28 +794,45 @@ class ExamExporter:
     def _docx_add_dung_sai(
         self, doc: Document, q: dict, index: int, include_answers: bool
     ) -> None:
-        """Add a single THPT true/false question to the DOCX document."""
+        """Add a single THPT true/false question as a Đúng/Sai tick table."""
+        from docx.oxml.ns import qn as _qn  # noqa: F401
         stem = self._strip_latex(q.get("stem") or q.get("content") or "")
         propositions = self._normalize_propositions(q.get("propositions", []))
         explanation = q.get("explanation", "")
 
         p = doc.add_paragraph()
-        run = p.add_run(f"CÃ¢u {index}. {stem}")
+        run = p.add_run(f"Câu {index}. {stem}")
         run.bold = True
         run.font.size = Pt(12)
 
+        table = doc.add_table(rows=1, cols=3)
+        table.style = "Table Grid"
+        hdr = table.rows[0].cells
+        for cell, txt in zip(hdr, ["Mệnh đề", "Đúng", "Sai"]):
+            cell.text = txt
+            run_h = cell.paragraphs[0].runs[0]
+            run_h.bold = True
+            cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
         for label, text, is_correct in propositions:
-            opt_para = doc.add_paragraph(style="List Bullet")
-            opt_para.paragraph_format.left_indent = Inches(0.4)
-            marker = f" [{('ÄÃºng' if is_correct else 'Sai')}]" if include_answers else ""
-            run = opt_para.add_run(f"{label}) {self._strip_latex(str(text))}{marker}")
+            row = table.add_row().cells
+            row[0].text = f"{label}) {self._strip_latex(str(text))}"
             if include_answers:
-                run.font.color.rgb = RGBColor(0x1A, 0x7F, 0x1A) if is_correct else RGBColor(0xA3, 0x1D, 0x1D)
-                run.bold = True
+                row[1].text = "✓" if is_correct else "□"
+                row[2].text = "□" if is_correct else "✗"
+                tick_cell = row[1] if is_correct else row[2]
+                tick_run = tick_cell.paragraphs[0].runs[0]
+                tick_run.bold = True
+                tick_run.font.color.rgb = RGBColor(0x1A, 0x7F, 0x1A) if is_correct else RGBColor(0xA3, 0x1D, 0x1D)
+            else:
+                row[1].text = "□"
+                row[2].text = "□"
+            for cell in [row[1], row[2]]:
+                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
         if include_answers and explanation:
             p = doc.add_paragraph()
-            run = p.add_run(f"Giáº£i thÃ­ch: {self._strip_latex(explanation)}")
+            run = p.add_run(f"Giải thích: {self._strip_latex(explanation)}")
             run.font.size = Pt(11)
             run.italic = True
             run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
