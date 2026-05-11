@@ -37,6 +37,36 @@ def _norm_text(s: str) -> str:
     return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
 
 
+def _get_scope_chapters(exam_config: dict) -> list[str]:
+    """Return unique chapter names for comparison with slot['chapter'].
+
+    Priority:
+    1. scope_units[*].chapter_title — canonical titles the LLM uses
+    2. Fallback: split raw scope strings on ' > ' to strip section suffix
+    """
+    scope_units = exam_config.get("scope_units") or []
+    if scope_units:
+        seen: list[str] = []
+        seen_set: set[str] = set()
+        for u in scope_units:
+            ch = (u.get("chapter_title") or u.get("chapter") or "").strip()
+            if ch and ch not in seen_set:
+                seen.append(ch)
+                seen_set.add(ch)
+        if seen:
+            return seen
+
+    scope_raw = exam_config.get("scope", [])
+    chapters: list[str] = []
+    seen_fb: set[str] = set()
+    for s in (scope_raw if isinstance(scope_raw, list) else []):
+        ch = str(s).split(" > ")[0].strip()
+        if ch and ch not in seen_fb:
+            chapters.append(ch)
+            seen_fb.add(ch)
+    return chapters
+
+
 def _assign_blueprint_indices(blueprint: list[dict]) -> list[dict]:
     """Store the approved slot order explicitly for builder/retry/export."""
     for idx, slot in enumerate(blueprint, start=1):
@@ -598,7 +628,7 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
 
             # Modification mode needs higher token limit:
             # 28 slots × ~200 chars/slot ≈ 5600 chars + distribution_summary overhead
-            _max_tokens = 8192 if is_modification else 8000
+            _max_tokens = 20000 if is_modification else 20000
 
             # Call LLM
             response = await self.llm.chat(
@@ -660,7 +690,7 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
             essay_target  = int(exam_config.get("essay_count", 0) or 0)
             ds_target     = int(exam_config.get("dung_sai_count", 0) or 0)
             sa_target     = int(exam_config.get("short_answer_count", 0) or 0)
-            _scope_for_pad = [str(s) for s in (exam_config.get("scope", []) or [])]
+            _scope_for_pad = _get_scope_chapters(exam_config)
 
             # In modification mode, capture the chapter distribution from LLM output
             # BEFORE enforcement so we can use it when padding missing slots.
@@ -799,7 +829,7 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
                 and _total_after_enforce == expected_total
                 and all(
                     any(s.get("chapter") == ch for s in blueprint)
-                    for ch in [str(c) for c in (exam_config.get("scope", []) or [])]
+                    for ch in _get_scope_chapters(exam_config)
                 )
             )
             if _skip_chapter_enforce:
@@ -822,8 +852,7 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
             # Bug fix: distribution_summary was returned from LLM response (before
             # _enforce_chapter_coverage added missing chapters). Recompute now so
             # frontend sees all 9 scope chapters, not just the 6 LLM originally generated.
-            _scope_raw = exam_config.get("scope", [])
-            scope_chapters = [str(s) for s in (_scope_raw if isinstance(_scope_raw, list) else [])]
+            scope_chapters = _get_scope_chapters(exam_config)
             bloom_dist = exam_config.get("bloom_distribution", {})
             distribution_summary = {
                 "by_bloom": {level: sum(1 for s in blueprint if s.get("bloom_level") == level) for level in bloom_dist},
@@ -920,7 +949,7 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
                                     )},
                                 ],
                                 role="outline",
-                                max_tokens=8192,
+                                max_tokens=20000,
                                 temperature=0.1,
                             )
                             if not isinstance(_retry_resp, str):
@@ -951,7 +980,7 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
                             )
 
                     # Enforce type counts then proceed normally
-                    _scope_for_pad = [str(s) for s in (exam_config.get("scope", []) or [])]
+                    _scope_for_pad = _get_scope_chapters(exam_config)
                     blueprint = self._enforce_type_counts(
                         blueprint,
                         int(exam_config.get("mcq_count", 0) or 0),
@@ -965,8 +994,7 @@ Chỉ trả về JSON thuần. Không markdown. Không giải thích trước/sa
                         warnings.append(f"Partial recovery invalid: {reason_r} — using feedback-aware fallback")
                         return await self._deterministic_redistribute(exam_config, start_time, trace_id, warnings)
 
-                    _scope_raw = exam_config.get("scope", [])
-                    scope_chapters_r = [str(s) for s in (_scope_raw if isinstance(_scope_raw, list) else [])]
+                    scope_chapters_r = _get_scope_chapters(exam_config)
                     bloom_dist_r = exam_config.get("bloom_distribution", {})
                     distribution_summary = {
                         "by_bloom": {level: sum(1 for s in blueprint if s.get("bloom_level") == level) for level in bloom_dist_r},
@@ -1076,7 +1104,7 @@ KIỂM TRA LẠI trước khi output.
                     {"role": "user", "content": self._build_outline_prompt(retrieved_context, exam_config)},
                 ],
                 role="outline",
-                max_tokens=8192 if exam_config.get("current_blueprint") else 8000,
+                max_tokens=20000 if exam_config.get("current_blueprint") else 20000,
                 temperature=0.2,
             )
             print(f"[OutlineAgent] RAW ({len(response)} chars): {response[:400]!r}", flush=True)
@@ -1093,7 +1121,7 @@ KIỂM TRA LẠI trước khi output.
             distribution_summary = result.get("distribution_summary", {})
 
             # ── Hard type-count enforcement (retry path) ─────────────────────
-            _scope_retry = [str(s) for s in (exam_config.get("scope", []) or [])]
+            _scope_retry = _get_scope_chapters(exam_config)
             blueprint = self._enforce_type_counts(
                 blueprint,
                 int(exam_config.get("mcq_count", 0) or 0),
@@ -1144,8 +1172,7 @@ KIỂM TRA LẠI trước khi output.
         )
 
         # Recompute distribution_summary from actual blueprint (same fix as happy path)
-        _scope_raw = exam_config.get("scope", [])
-        scope_chapters = [str(s) for s in (_scope_raw if isinstance(_scope_raw, list) else [])]
+        scope_chapters = _get_scope_chapters(exam_config)
         bloom_dist = exam_config.get("bloom_distribution", {})
         distribution_summary = {
             "by_bloom": {level: sum(1 for s in blueprint if s.get("bloom_level") == level) for level in bloom_dist},
@@ -1201,8 +1228,7 @@ KIỂM TRA LẠI trước khi output.
         import re as _re
 
         current_blueprint = list(exam_config.get("current_blueprint", []))
-        scope = exam_config.get("scope", [])
-        scope_chapters = [str(s) for s in (scope if isinstance(scope, list) else [])]
+        scope_chapters = _get_scope_chapters(exam_config)
 
         if not current_blueprint or not scope_chapters:
             warnings.append("_deterministic_redistribute: missing blueprint or scope — using full fallback")
@@ -1455,8 +1481,7 @@ KIỂM TRA LẠI trước khi output.
         Called from both the happy path and the bloom-retry path so chapter
         coverage is enforced regardless of which LLM response path was taken.
         """
-        _scope_raw = exam_config.get("scope", [])
-        scope_chapters = [str(s) for s in (_scope_raw if isinstance(_scope_raw, list) else [])]
+        scope_chapters = _get_scope_chapters(exam_config)
 
         if scope_chapters:
             chapters_in_bp = {slot.get("chapter", "") for slot in blueprint}

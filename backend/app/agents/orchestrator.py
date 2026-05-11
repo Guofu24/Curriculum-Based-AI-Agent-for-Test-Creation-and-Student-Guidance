@@ -131,7 +131,7 @@ Xác định xem yêu cầu đã rõ ràng chưa."""
             response = await client.chat(
                 messages=messages,
                 role="planner",
-                max_tokens=1000,
+                max_tokens=10000,
                 temperature=0.3,
             )
             result = json.loads(response)
@@ -823,7 +823,7 @@ Trả về JSON:
                     {"role": "user", "content": edit_prompt},
                 ],
                 role="builder",
-                max_tokens=4000,
+                max_tokens=10000,
                 temperature=0.3,
             )
             edit_plan = json.loads(response)

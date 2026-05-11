@@ -2,6 +2,8 @@
 
 import time
 import json
+import re
+import unicodedata
 from typing import Any
 
 from app.agents.base import AgentStatus, AgentMetrics, TokenUsage, ValidatorOutput
@@ -99,6 +101,150 @@ def _parse_validator_response(response: str) -> dict:
         if not extracted:
             raise
         return json.loads(extracted)
+
+
+def _strip_diacritics(text: str) -> str:
+    """Lowercase and remove Vietnamese diacritics for stable comparisons."""
+    nfd = unicodedata.normalize("NFD", str(text).strip().lower())
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+
+def _chapter_text_key(text: str) -> str:
+    """Normalize punctuation/spacing while keeping letters and digits."""
+    stripped = _strip_diacritics(text)
+    return re.sub(r"[^a-z0-9]+", " ", stripped).strip()
+
+
+def _roman_to_int_quiet(roman: str) -> int | None:
+    """Convert a roman numeral without logging or raising."""
+    value = 0
+    rest = roman.upper()
+    table = (
+        ("CM", 900), ("D", 500), ("CD", 400), ("C", 100),
+        ("XC", 90), ("L", 50), ("XL", 40), ("X", 10),
+        ("IX", 9), ("V", 5), ("IV", 4), ("I", 1),
+    )
+    for symbol, number in table:
+        while rest.startswith(symbol):
+            value += number
+            rest = rest[len(symbol):]
+    return value if value and not rest else None
+
+
+def _quiet_chapter_id(text: str) -> str | None:
+    """Best-effort chapter id normalization without emitting warnings.
+
+    Validator receives both canonical ids (``ch1``) and display titles
+    (``A. QUANG HÌNH HỌC``). This mirrors the project normalizer's common
+    cases but stays silent for arbitrary titles.
+    """
+    s = _strip_diacritics(text)
+    if not s:
+        return None
+
+    m = re.match(r"^ch(\d+)(?:_sec\d+)?(?:_sub\d+)?$", s)
+    if m:
+        return f"ch{(m.group(1).lstrip('0') or '0')}"
+
+    m = re.match(r"^ch[_-]?([a-z])$", s)
+    if m:
+        return f"ch_{m.group(1)}"
+
+    m = re.search(r"(?:chuong|chapter|bai|phan)[_\s-]?(\d+)", s)
+    if m:
+        return f"ch{(m.group(1).lstrip('0') or '0')}"
+
+    m = re.match(r"^\s*([ivxlcdm]+)\.", s)
+    if m:
+        arabic = _roman_to_int_quiet(m.group(1))
+        if arabic:
+            return f"ch{arabic}"
+
+    m = re.match(r"^\s*([a-z])\.\s*[a-z0-9]", s)
+    if m:
+        return f"ch_{m.group(1)}"
+
+    m = re.match(r"^\s*(\d+)\.\s+\S", s)
+    if not m:
+        m = re.search(r"(?:^|_|\s)(\d+)(?:\s|:|$)", s)
+    if m:
+        return f"ch{(m.group(1).lstrip('0') or '0')}"
+
+    return None
+
+
+def _chapter_aliases(value: Any) -> set[str]:
+    """Return comparable aliases for a chapter id/title string."""
+    if isinstance(value, dict):
+        aliases: set[str] = set()
+        for key in ("chapter_id", "id", "chapter", "chapter_title", "title", "scope_type"):
+            aliases.update(_chapter_aliases(value.get(key)))
+        return aliases
+
+    text = str(value or "").strip()
+    if not text:
+        return set()
+
+    aliases: set[str] = set()
+    for candidate in (text, text.split(" > ", 1)[0].strip()):
+        key = _chapter_text_key(candidate)
+        if key:
+            aliases.add(key)
+        chapter_id = _quiet_chapter_id(candidate)
+        if chapter_id:
+            aliases.add(chapter_id)
+    return aliases
+
+
+def _build_allowed_chapter_aliases(
+    exam_config: dict,
+    primary_chunks: list[dict],
+) -> set[str]:
+    """Build aliases for the selected chapters.
+
+    Generation normalizes ``exam_config["scope"]`` to ids such as ``ch1``.
+    Outline then restores human titles such as ``A. QUANG HÌNH HỌC`` from
+    ``scope_units``. The validator must accept both representations.
+    """
+    scope_values = exam_config.get("scope", [])
+    if not isinstance(scope_values, list):
+        scope_values = []
+
+    scope_aliases: set[str] = set()
+    for scope in scope_values:
+        scope_aliases.update(_chapter_aliases(scope))
+
+    allowed = set(scope_aliases)
+
+    for unit in exam_config.get("scope_units") or []:
+        allowed.update(_chapter_aliases(unit.get("chapter_id")))
+        allowed.update(_chapter_aliases(unit.get("chapter_title") or unit.get("chapter")))
+
+    for unit in exam_config.get("section_registry") or []:
+        unit_aliases = (
+            _chapter_aliases(unit.get("chapter_id"))
+            | _chapter_aliases(unit.get("chapter_title") or unit.get("chapter"))
+        )
+        if not scope_aliases or unit_aliases & scope_aliases:
+            allowed.update(unit_aliases)
+
+    for chunk in primary_chunks:
+        meta = chunk.get("metadata") or {}
+        chunk_aliases = (
+            _chapter_aliases(chunk.get("chapter_id") or meta.get("chapter_id"))
+            | _chapter_aliases(chunk.get("chapter") or meta.get("chapter"))
+        )
+        if not scope_aliases or chunk_aliases & scope_aliases:
+            allowed.update(chunk_aliases)
+
+    return allowed
+
+
+def _chapter_in_scope(question_chapter: str, allowed_aliases: set[str]) -> bool:
+    """Return True when the question chapter matches selected scope aliases."""
+    if not allowed_aliases:
+        return True
+    return bool(_chapter_aliases(question_chapter) & allowed_aliases)
 
 
 def _is_grounding_only_scope_issue(issue: dict) -> bool:
@@ -400,6 +546,7 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
 
         # ── Local scope check + trigram copy check (deterministic, no LLM) ──────────
         primary_chunks = [c for c in (retrieved_context or []) if c.get("role") != "background"]
+        allowed_chapter_aliases = _build_allowed_chapter_aliases(exam_config, primary_chunks)
         for q in questions:
             q_id = q.get("question_id", "?")
             if q.get("is_demo_question"):
@@ -436,33 +583,7 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
             q_chapter = (q.get("chapter") or "").strip()
             scope_chapters_cfg: list[str] = exam_config.get("scope", [])
             if q_chapter and scope_chapters_cfg:
-                import re as _re
-                import unicodedata as _ud
-
-                def _norm_ch(s: str) -> str:
-                    nfd = _ud.normalize("NFD", s.strip().lower())
-                    return "".join(c for c in nfd if _ud.category(c) != "Mn")
-
-                def _extract_ch_num(s: str) -> str:
-                    """Extract the chapter identifier token (number/roman/letter).
-
-                    Uses word-boundary match to prevent '1' matching '10'.
-                    Examples: 'chuong 1' -> '1', 'chuong 10' -> '10', 'chapter iv' -> 'iv'
-                    """
-                    # Match standalone number or roman numeral or single letter after 'chuong'/'chapter'
-                    m = _re.search(r'(?:chuong|chapter|phan|part)\s+([\divxlcdm]+|[a-z])\b', _norm_ch(s))
-                    if m:
-                        return m.group(1)
-                    # Fallback: first standalone number
-                    m2 = _re.search(r'\b(\d+)\b', _norm_ch(s))
-                    return m2.group(1) if m2 else _norm_ch(s)
-
-                q_ch_num = _extract_ch_num(q_chapter)
-                chapter_in_scope = any(
-                    _extract_ch_num(sc) == q_ch_num
-                    for sc in scope_chapters_cfg
-                )
-                if not chapter_in_scope:
+                if not _chapter_in_scope(q_chapter, allowed_chapter_aliases):
                     all_issues.append({
                         "question_id": q_id,
                         "issue_type": "scope_violation",
@@ -554,7 +675,7 @@ Kiểm tra câu hỏi có dùng kiến thức ngoài phạm vi không. Chỉ vi 
                         {"role": "user", "content": prompt},
                     ],
                     role="validator",
-                    max_tokens=16000,
+                    max_tokens=20000,
                     temperature=0.1,
                 )
 

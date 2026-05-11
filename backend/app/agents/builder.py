@@ -44,7 +44,7 @@ async def _call_gemini_slot(api_key: str, messages: list[dict], model: str) -> s
         resp = await client.chat.completions.create(
             model=model,
             messages=messages,
-            max_tokens=8000,
+            max_tokens=20000,
             temperature=0.7,
         )
     return resp.choices[0].message.content or ""
@@ -1182,7 +1182,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         {"role": "user", "content": user_prompt + vdc_correction},
                     ],
                     role="builder",
-                    max_tokens=16000,
+                    max_tokens=20000,
                     temperature=0.7,
                 )
 

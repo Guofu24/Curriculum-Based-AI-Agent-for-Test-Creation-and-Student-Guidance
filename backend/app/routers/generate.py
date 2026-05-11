@@ -144,6 +144,8 @@ async def _resolve_scope_section_ids(
                 _ch_id_r, _ch_title_r, _secs_r = _ch_entry
                 if _secs_r:
                     for _sec in _secs_r:
+                        if _sec["section_id"] and _sec["section_id"] not in scope_section_ids:
+                            scope_section_ids.append(_sec["section_id"])
                         key = _make_key(_ch_title_r, _sec["title"], _sec["section_id"],
                                         existing_keys)
                         existing_keys.add(key)

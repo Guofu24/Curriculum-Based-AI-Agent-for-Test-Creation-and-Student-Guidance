@@ -104,3 +104,118 @@ class TestValidateQuestions:
             with patch("app.agents.graph.nodes.validate_questions._emit") as mock_emit:
                 result = await validate_questions(state)
                 assert mock_emit.called
+
+
+def test_chapter_aliases_accept_canonical_scope_with_display_title():
+    from app.agents.validator import (
+        _build_allowed_chapter_aliases,
+        _chapter_in_scope,
+    )
+
+    exam_config = {
+        "scope": ["ch1"],
+        "scope_units": [
+            {
+                "chapter_id": "ch1",
+                "chapter_title": "A. QUANG HÌNH HỌC",
+                "section_id": "ch1_sec1",
+                "section_title": "Bản mặt song song",
+                "scope_unit_key": "ch1_sec1",
+            }
+        ],
+    }
+
+    aliases = _build_allowed_chapter_aliases(exam_config, primary_chunks=[])
+
+    assert _chapter_in_scope("A. QUANG HÌNH HỌC", aliases)
+    assert not _chapter_in_scope("B. GIAO THOA ĐỊNH XỨ", aliases)
+
+
+def test_chapter_aliases_ignore_punctuation_spacing():
+    from app.agents.validator import (
+        _build_allowed_chapter_aliases,
+        _chapter_in_scope,
+    )
+
+    aliases = _build_allowed_chapter_aliases(
+        {"scope": ["A.QUANG HÌNH HỌC"]},
+        primary_chunks=[],
+    )
+
+    assert _chapter_in_scope("A. QUANG HÌNH HỌC", aliases)
+
+
+@pytest.mark.asyncio
+async def test_validator_does_not_scope_fail_title_for_selected_chapter():
+    from app.agents.validator import ValidatorAgent
+
+    class FakeLLM:
+        async def chat(self, **kwargs):
+            return """
+            {
+              "validation_passed": true,
+              "questions": [
+                {
+                  "question_id": "MCQ_001",
+                  "answer_correct": true,
+                  "model_answer": "C",
+                  "bloom_compliant": true,
+                  "bloom_actual": "nhan_biet",
+                  "bloom_confidence": 0.9,
+                  "scope_ok": true,
+                  "scope_violation_detail": null,
+                  "issues": []
+                }
+              ],
+              "bloom_compliance_summary": {},
+              "scope_violations": [],
+              "approved_for_publish": true
+            }
+            """
+
+    validator = ValidatorAgent(redis=None)
+    validator.llm = FakeLLM()
+
+    result = await validator.validate(
+        questions=[
+            {
+                "question_id": "MCQ_001",
+                "type": "mcq",
+                "chapter": "A. QUANG HÌNH HỌC",
+                "bloom_level": "nhan_biet",
+                "stem": "Theo định nghĩa trong quang hình học, bản mặt song song được giới hạn bởi điều kiện nào?",
+                "options": {
+                    "A": "Hai mặt phẳng cắt nhau.",
+                    "B": "Một mặt phẳng và một mặt cầu.",
+                    "C": "Hai mặt phẳng song song với nhau.",
+                    "D": "Hai mặt cầu đồng tâm.",
+                },
+                "correct_answer": "C",
+            }
+        ],
+        exam_config={
+            "scope": ["ch1"],
+            "scope_units": [
+                {
+                    "chapter_id": "ch1",
+                    "chapter_title": "A. QUANG HÌNH HỌC",
+                    "section_id": "ch1_sec1",
+                    "section_title": "Bản mặt song song",
+                    "scope_unit_key": "ch1_sec1",
+                }
+            ],
+        },
+        retrieved_context=[
+            {
+                "chunk_id": "chunk_ch1_0001",
+                "chapter_id": "ch1",
+                "chapter": "A. QUANG HÌNH HỌC",
+                "content": "Bản mặt song song là khối chất trong suốt giới hạn bởi hai mặt phẳng song song.",
+                "role": "primary",
+            }
+        ],
+        trace_id="test-validator-scope",
+    )
+
+    assert result.validation_passed
+    assert all(issue.get("issue_type") != "scope_violation" for issue in result.issues)
