@@ -20,6 +20,7 @@ from app.rag.cleaner import clean_markdown
 from app.rag.exercise_grouper import build_exercise_groups
 from app.rag.alignment import align_exercise_groups
 from app.rag.gemini_key_pool import GeminiKeyPool
+from app.core.config import get_settings
 
 
 class DocumentServiceError(Exception):
@@ -373,11 +374,14 @@ class DocumentService:
                 ]
                 groups = build_exercise_groups(unknown_chunks, doc_id_str)
                 if groups:
+                    settings = get_settings()
+                    alignment_keys = settings.GEMINI_ALIGNMENT_KEYS
                     chunks, align_report = await align_exercise_groups(
                         chunks=chunks,
                         groups=groups,
                         heading_tree=heading_tree,
-                        pool=GeminiKeyPool(redis),
+                        pool=GeminiKeyPool(redis, keys=alignment_keys) if alignment_keys else GeminiKeyPool(redis),
+                        fallback_pool=GeminiKeyPool(redis) if alignment_keys else None,
                         redis=redis,
                     )
                     _log.info(

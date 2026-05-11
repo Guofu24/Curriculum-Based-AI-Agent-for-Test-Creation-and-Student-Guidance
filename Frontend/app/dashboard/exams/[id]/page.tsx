@@ -64,6 +64,8 @@ import {
   BookOpen,
   TrendingUp,
   Database,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { 
@@ -173,6 +175,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
   const [blueprintAction, setBlueprintAction] = useState<'approve' | 'reject' | null>(null)
   const [blueprintFeedback, setBlueprintFeedback] = useState('')
   const [isBlueprintActing, setIsBlueprintActing] = useState(false)
+  const [showQuestionBlueprint, setShowQuestionBlueprint] = useState(true)
   // HITL pending state — set true when WebSocket receives hitl_checkpoint cp1
   const [hitlPending, setHitlPending] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
@@ -671,8 +674,43 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
 
             {/* Questions Tab */}
             <TabsContent value="questions" className="space-y-4">
+              {/* Filter */}
+              <div className="flex flex-wrap items-center gap-3">
+                <Select
+                  value={questionFilter}
+                  onValueChange={(v) => setQuestionFilter(v as 'all' | 'mcq' | 'essay')}
+                >
+                  <SelectTrigger className="w-[180px]">
+                    <SelectValue placeholder="Lọc câu hỏi" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Tất cả ({exam.questions?.length || 0})</SelectItem>
+                    <SelectItem value="mcq">Trắc nghiệm ({mcqCount})</SelectItem>
+                    <SelectItem value="essay">Tự luận ({essayCount})</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                {blueprint.length > 0 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                    onClick={() => setShowQuestionBlueprint((open) => !open)}
+                    aria-expanded={showQuestionBlueprint}
+                  >
+                    {showQuestionBlueprint ? (
+                      <ChevronUp className="h-4 w-4" />
+                    ) : (
+                      <ChevronDown className="h-4 w-4" />
+                    )}
+                    {showQuestionBlueprint ? 'Ẩn sườn đề' : 'Hiện sườn đề'}
+                  </Button>
+                )}
+              </div>
+
               {/* Blueprint summary inline */}
-              {blueprint.length > 0 && (
+              {blueprint.length > 0 && showQuestionBlueprint && (
                 <div className="rounded-lg border border-amber-200 bg-amber-50/30 p-3 space-y-2">
                   <div className="flex items-center gap-2">
                     <Database className="h-3.5 w-3.5 text-amber-600" />
@@ -724,23 +762,6 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
                   </div>
                 </div>
               )}
-
-              {/* Filter */}
-              <div className="flex items-center gap-4">
-                <Select
-                  value={questionFilter}
-                  onValueChange={(v) => setQuestionFilter(v as 'all' | 'mcq' | 'essay')}
-                >
-                  <SelectTrigger className="w-[180px]">
-                    <SelectValue placeholder="Lọc câu hỏi" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">Tất cả ({exam.questions?.length || 0})</SelectItem>
-                    <SelectItem value="mcq">Trắc nghiệm ({mcqCount})</SelectItem>
-                    <SelectItem value="essay">Tự luận ({essayCount})</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
 
               {/* Questions List */}
               <ScrollArea className="h-[600px]">

@@ -22,6 +22,7 @@ logger = logging.getLogger("app.rag.alignment")
 ALIGNMENT_PROMPT_VERSION = "v1.0"
 ALIGNMENT_BATCH_SIZE = 5
 _CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+ALIGNMENT_BLOCKED_COOLDOWNS = {"parser_recent_use", "429", "503"}
 
 
 class ExerciseAlignment(BaseModel):
@@ -337,6 +338,7 @@ async def align_exercise_groups(
     groups: list[ExerciseGroup],
     heading_tree: dict,
     pool: GeminiKeyPool,
+    fallback_pool: GeminiKeyPool | None = None,
     redis: RedisClient | None = None,
     model: str | None = None,
     batch_size: int = ALIGNMENT_BATCH_SIZE,
@@ -349,6 +351,9 @@ async def align_exercise_groups(
 
     settings = get_settings()
     resolved_model = model or settings.GEMINI_ALIGNMENT_MODEL or settings.GEMINI_MODEL
+    configured_parallel = max(1, int(settings.GEMINI_ALIGNMENT_MAX_CONCURRENCY or 1))
+    configured_attempts = max(1, int(settings.GEMINI_ALIGNMENT_MAX_ATTEMPTS or 1))
+    retry_base_delay = max(0.1, float(settings.GEMINI_ALIGNMENT_RETRY_BASE_DELAY or 0.8))
     tree_hash = heading_tree_hash(heading_tree)
     accepted_by_group: dict[str, ExerciseAlignment] = {}
     group_by_id = {group.group_id: group for group in groups}
@@ -366,39 +371,123 @@ async def align_exercise_groups(
         if validated and validated.confidence == "high" and validated.section_id:
             accepted_by_group[group.group_id] = validated
 
-    for i in range(0, len(uncached), batch_size):
-        batch_groups = uncached[i:i + batch_size]
-        batch_result: AlignmentBatch | None = None
-        last_error: Exception | None = None
+    batch_groups_list = [uncached[i:i + batch_size] for i in range(0, len(uncached), batch_size)]
+    leased_keys: set[str] = set()
+    lease_lock = asyncio.Lock()
+    primary_key_count = len(pool.keys)
+    fallback_key_count = len(fallback_pool.keys) if fallback_pool else 0
+    primary_keys = set(pool.keys)
+    concurrency_key_count = primary_key_count or fallback_key_count or 1
+    max_parallel = max(1, min(concurrency_key_count, len(batch_groups_list) or 1, configured_parallel))
+    semaphore = asyncio.Semaphore(max_parallel)
 
-        for _attempt in range(max(1, len(pool.keys))):
-            key = await pool.get_available_key()
+    async def _lease_key(
+        attempted: set[str],
+        *,
+        allow_fallback: bool,
+    ) -> tuple[GeminiKeyPool, str] | None:
+        async with lease_lock:
+            excluded = leased_keys | attempted
+            key = await pool.get_available_key(exclude=excluded)
             if key is None:
-                report.skipped_no_key += len(batch_groups)
-                break
-            try:
-                batch_result = await _call_gemini_json(
-                    key,
-                    resolved_model,
-                    _build_messages(batch_groups, heading_tree),
+                key = await pool.get_available_key(
+                    allow_cooldown=True,
+                    exclude=excluded,
+                    blocked_cooldown_reasons=ALIGNMENT_BLOCKED_COOLDOWNS,
                 )
-                await pool.mark_used(key)
-                report.batches_called += 1
-                break
-            except (ValidationError, json.JSONDecodeError) as exc:
-                last_error = exc
-                await pool.mark_used(key)
-                report.errors.append(f"parse_failed:{str(exc)[:120]}")
-                break
-            except Exception as exc:
-                last_error = exc
-                await pool.mark_error(key, exc)
-                report.errors.append(f"llm_failed:{str(exc)[:120]}")
-                await asyncio.sleep(0.2)
+            if key is not None:
+                leased_keys.add(key)
+                return pool, key
+            if fallback_pool is None or not allow_fallback:
+                return None
+            key = await fallback_pool.get_available_key(exclude=excluded)
+            if key is None:
+                key = await fallback_pool.get_available_key(
+                    allow_cooldown=True,
+                    exclude=excluded,
+                    blocked_cooldown_reasons=ALIGNMENT_BLOCKED_COOLDOWNS,
+                )
+            if key is not None:
+                leased_keys.add(key)
+                return fallback_pool, key
+            return None
 
-        if batch_result is None:
-            if last_error:
+    async def _release_key(key: str | None) -> None:
+        if not key:
+            return
+        async with lease_lock:
+            leased_keys.discard(key)
+
+    async def _align_batch(batch_groups: list[ExerciseGroup]) -> tuple[list[ExerciseGroup], AlignmentBatch | None]:
+        async with semaphore:
+            batch_result: AlignmentBatch | None = None
+            last_error: Exception | None = None
+            attempted_keys: set[str] = set()
+            total_key_count = len(pool.keys)
+            if fallback_pool is not None:
+                total_key_count += len(fallback_pool.keys)
+            max_attempts = max(1, min(total_key_count or 1, configured_attempts))
+
+            for _attempt in range(max_attempts):
+                primary_attempted = primary_keys.intersection(attempted_keys)
+                allow_fallback = primary_key_count == 0 or len(primary_attempted) >= primary_key_count
+                lease = await _lease_key(attempted_keys, allow_fallback=allow_fallback)
+                if lease is None:
+                    for _wait in range(10):
+                        await asyncio.sleep(0.2)
+                        primary_attempted = primary_keys.intersection(attempted_keys)
+                        allow_fallback = primary_key_count == 0 or len(primary_attempted) >= primary_key_count
+                        lease = await _lease_key(attempted_keys, allow_fallback=allow_fallback)
+                        if lease is not None:
+                            break
+                    if lease is None and fallback_pool is not None:
+                        lease = await _lease_key(attempted_keys, allow_fallback=True)
+                    if lease is None:
+                        report.skipped_no_key += len(batch_groups)
+                        break
+                key_pool, key = lease
+                attempted_keys.add(key)
+                try:
+                    batch_result = await _call_gemini_json(
+                        key,
+                        resolved_model,
+                        _build_messages(batch_groups, heading_tree),
+                    )
+                    await key_pool.mark_used(key, source="alignment")
+                    report.batches_called += 1
+                    break
+                except (ValidationError, json.JSONDecodeError) as exc:
+                    last_error = exc
+                    await key_pool.mark_used(key, source="alignment")
+                    report.errors.append(f"parse_failed:{str(exc)[:120]}")
+                    await asyncio.sleep(min(6.0, retry_base_delay * (2 ** _attempt)))
+                except Exception as exc:
+                    last_error = exc
+                    await key_pool.mark_error(key, exc)
+                    report.errors.append(f"llm_failed:{str(exc)[:120]}")
+                    await asyncio.sleep(min(6.0, retry_base_delay * (2 ** _attempt)))
+                finally:
+                    await _release_key(key)
+
+            if batch_result is None and last_error:
                 logger.warning("Alignment batch skipped after error: %s", last_error)
+            return batch_groups, batch_result
+
+    if batch_groups_list:
+        logger.info(
+            "Alignment parallel batches: %d batches x %d groups, primary_keys=%d fallback_keys=%d concurrency=%d max_attempts=%d",
+            len(batch_groups_list),
+            batch_size,
+            primary_key_count,
+            fallback_key_count,
+            max_parallel,
+            configured_attempts,
+        )
+
+    batch_results = await asyncio.gather(*(_align_batch(batch_groups) for batch_groups in batch_groups_list))
+
+    for batch_groups, batch_result in batch_results:
+        if batch_result is None:
             continue
 
         returned_ids = set()

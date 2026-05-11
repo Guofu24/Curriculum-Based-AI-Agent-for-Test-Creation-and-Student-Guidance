@@ -18,6 +18,8 @@ logger = logging.getLogger("app.rag.gemini_key_pool")
 
 COOLDOWN_TTL_SECONDS: dict[str, int] = {
     "recent_use": 30,
+    "parser_recent_use": 300,
+    "alignment_recent_use": 30,
     "503": 60,
     "429": 300,
 }
@@ -74,27 +76,46 @@ class GeminiKeyPool:
     def has_keys(self) -> bool:
         return bool(self.keys)
 
-    async def get_available_key(self) -> str | None:
-        """Return the next key not in cooldown/disabled state."""
+    async def get_available_key(
+        self,
+        *,
+        allow_cooldown: bool = False,
+        exclude: Iterable[str] | None = None,
+        blocked_cooldown_reasons: Iterable[str] | None = None,
+    ) -> str | None:
+        """Return the next usable key.
+
+        By default this avoids recently-used keys so parser/alignment bursts do
+        not immediately reuse the same project quota. Callers may opt into
+        cooldown keys as a fallback after fresh keys are exhausted.
+        """
         if not self.keys:
             return None
 
+        excluded = set(exclude or ())
+        blocked_reasons = set(blocked_cooldown_reasons or ())
         total = len(self.keys)
         for offset in range(total):
             idx = (self._cursor + offset) % total
             key = self.keys[idx]
+            if key in excluded:
+                continue
             disabled = await self.redis.get(_disabled_key(key))
             if disabled:
                 continue
             cooldown = await self.redis.get(_cooldown_key(key))
             if cooldown:
-                continue
+                if cooldown in blocked_reasons:
+                    continue
+                if not allow_cooldown:
+                    continue
             self._cursor = (idx + 1) % total
             return key
         return None
 
-    async def mark_used(self, api_key: str) -> None:
-        await self.mark_cooldown(api_key, "recent_use")
+    async def mark_used(self, api_key: str, source: str = "") -> None:
+        reason = f"{source}_recent_use" if source else "recent_use"
+        await self.mark_cooldown(api_key, reason)
 
     async def mark_cooldown(self, api_key: str, reason: str) -> None:
         if not api_key:
@@ -141,9 +162,10 @@ def _sync_set_key(name: str, value: str, ttl: int) -> None:
         logger.debug("Gemini cooldown sync write skipped: %s", exc)
 
 
-def mark_gemini_key_used_sync(api_key: str) -> None:
+def mark_gemini_key_used_sync(api_key: str, source: str = "parser") -> None:
     if api_key:
-        _sync_set_key(_cooldown_key(api_key), "recent_use", COOLDOWN_TTL_SECONDS["recent_use"])
+        reason = f"{source}_recent_use" if source else "recent_use"
+        _sync_set_key(_cooldown_key(api_key), reason, COOLDOWN_TTL_SECONDS.get(reason, COOLDOWN_TTL_SECONDS["recent_use"]))
 
 
 def mark_gemini_key_error_sync(api_key: str, error: BaseException | str) -> None:

@@ -87,30 +87,48 @@ class Settings(BaseSettings):
     GEMINI_API_KEYS: str = ""   # comma-separated, overrides GEMINI_API_KEY when set
     GEMINI_MODEL: str = "gemini-2.5-flash"
     GEMINI_ALIGNMENT_MODEL: str = ""  # exercise-group -> section router; blank falls back to GEMINI_MODEL
+    GEMINI_ALIGNMENT_API_KEY: str = ""
+    GEMINI_ALIGNMENT_API_KEYS: str = ""  # comma-separated alignment-only keys
+    GEMINI_ALIGNMENT_MAX_CONCURRENCY: int = 4
+    GEMINI_ALIGNMENT_MAX_ATTEMPTS: int = 3
+    GEMINI_ALIGNMENT_RETRY_BASE_DELAY: float = 0.8
 
     # Computed: load keys from .gemini_keys file (one key per line)
     # Falls back to GEMINI_API_KEYS / GEMINI_API_KEY env vars
-    def _load_gemini_keys(self) -> list[str]:
+    def _load_gemini_keys_from(self, file_name: str, multi_key_env: str, single_key_env: str) -> list[str]:
         import os
         keys: list[str] = []
-        # 1. Try .gemini_keys file next to this config module
         base = os.path.dirname(os.path.abspath(__file__))
-        key_file = os.path.join(base, "..", "..", ".gemini_keys")
+        key_file = os.path.join(base, "..", "..", file_name)
         if os.path.exists(key_file):
             with open(key_file, "r") as f:
                 keys = [line.strip() for line in f if line.strip()]
             if keys:
                 return keys
-        # 2. Fallback: parse from env vars
-        raw = self.GEMINI_API_KEYS or self.GEMINI_API_KEY
+        raw = multi_key_env or single_key_env
         if raw:
             keys = [k.strip() for k in raw.split(",") if k.strip()]
         return keys
+
+    def _load_gemini_keys(self) -> list[str]:
+        return self._load_gemini_keys_from(".gemini_keys", self.GEMINI_API_KEYS, self.GEMINI_API_KEY)
 
     @property
     def GEMINI_KEYS(self) -> list[str]:
         """Returns list of Gemini API keys, loaded from .gemini_keys file or env."""
         return self._load_gemini_keys()
+
+    @property
+    def GEMINI_ALIGNMENT_KEYS(self) -> list[str]:
+        """
+        Keys reserved for exercise alignment. Configure via .gemini_alignment_keys
+        or GEMINI_ALIGNMENT_API_KEYS/GEMINI_ALIGNMENT_API_KEY.
+        """
+        return self._load_gemini_keys_from(
+            ".gemini_alignment_keys",
+            self.GEMINI_ALIGNMENT_API_KEYS,
+            self.GEMINI_ALIGNMENT_API_KEY,
+        )
 
     @property
     def GEMINI_EMBED_KEYS(self) -> list[str]:

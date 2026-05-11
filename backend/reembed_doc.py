@@ -91,6 +91,7 @@ async def reembed_document(
     from app.rag.exercise_grouper import build_exercise_groups
     from app.rag.alignment import align_exercise_groups
     from app.rag.gemini_key_pool import GeminiKeyPool
+    from app.core.config import get_settings
     from app.utils.storage import get_storage
     from app.core.redis_client import get_redis_client
     from sqlalchemy import select, update
@@ -189,12 +190,15 @@ async def reembed_document(
             groups = build_exercise_groups(unknown_chunks, str(doc_id))
             print(f"\nExercise groups detected: {len(groups)}")
             try:
-                pool = GeminiKeyPool(redis)
+                settings = get_settings()
+                alignment_keys = settings.GEMINI_ALIGNMENT_KEYS
+                pool = GeminiKeyPool(redis, keys=alignment_keys) if alignment_keys else GeminiKeyPool(redis)
                 chunks, align_report = await align_exercise_groups(
                     chunks=chunks,
                     groups=groups,
                     heading_tree=tree,
                     pool=pool,
+                    fallback_pool=GeminiKeyPool(redis) if alignment_keys else None,
                     redis=redis,
                 )
                 print(
