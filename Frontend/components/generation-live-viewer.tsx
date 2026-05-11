@@ -74,6 +74,19 @@ interface QuestionGeneratedEvent {
   }
 }
 
+interface QuestionStartedEvent {
+  type: "question_started"
+  question_id: string
+  blueprint_index: number
+  slot: {
+    type: string
+    bloom_level: string
+    chapter: string
+    section: string
+    topic_hint: string
+  }
+}
+
 interface HitlCheckpointEvent {
   type: "hitl_checkpoint"
   checkpoint_id: number
@@ -120,6 +133,7 @@ interface ReasoningChunkEvent {
 type WsMessage =
   | PlanStepEvent
   | QuestionGeneratedEvent
+  | QuestionStartedEvent
   | HitlCheckpointEvent
   | ValidationResultEvent
   | CompletedEvent
@@ -241,6 +255,7 @@ type FeedItem =
   | { id: string; kind: 'reasoning'; stepLabel: string; message: string; chunks: string[] }
   | { id: string; kind: 'blueprint'; slots: BlueprintSlot[]; bloomDist: BloomDistribution }
   | { id: string; kind: 'question'; question: QuestionGeneratedEvent['question']; index: number }
+  | { id: string; kind: 'question_placeholder'; questionId: string; blueprintIndex: number; slot: QuestionStartedEvent['slot'] }
   | { id: string; kind: 'validation'; issues: ValidationIssue[] }
   | { id: string; kind: 'hitl_waiting'; checkpointId: number }
 
@@ -539,6 +554,22 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
           break
         }
 
+        case "question_started": {
+          const e = msg as QuestionStartedEvent
+          const qId = e.question_id
+          setFeedItems((prev) => {
+            if (prev.some(f => f.kind === 'question_placeholder' && f.questionId === qId)) return prev
+            return [...prev, {
+              id: `qp-${qId}`,
+              kind: 'question_placeholder' as const,
+              questionId: qId,
+              blueprintIndex: e.blueprint_index,
+              slot: e.slot,
+            }]
+          })
+          break
+        }
+
         case "question_generated": {
           const e = msg as QuestionGeneratedEvent
           const q = e.question
@@ -554,7 +585,12 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
               ? prev.map((ex, index) => (index === existingIdx ? q : ex))
               : [...prev, q]
             const next = sortQuestionsByBlueprint(rawNext)
-            setFeedItems((f) => replaceQuestionFeedItems(f, next))
+            setFeedItems((f) => {
+              const withoutPlaceholder = f.filter(item =>
+                !(item.kind === 'question_placeholder' && item.questionId === qId)
+              )
+              return replaceQuestionFeedItems(withoutPlaceholder, next)
+            })
             return next
           })
           break
@@ -1137,6 +1173,47 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
                       <span className="text-sm font-medium text-emerald-800">Đã xác nhận sườn đề — đang sinh câu hỏi...</span>
                     </div>
                   )}
+                </div>
+              )
+            }
+
+            // ─── Question placeholder (in-flight) ────────────────────────
+            if (item.kind === 'question_placeholder') {
+              const bl = item.slot.bloom_level as BloomLevel | undefined
+              const bc = bl && BLOOM_CONFIG[bl] ? BLOOM_CONFIG[bl] : null
+              return (
+                <div key={item.id} className="mb-3 animate-in fade-in slide-in-from-bottom-2 duration-300 opacity-60">
+                  <div className="rounded-xl border border-border/50 bg-muted/10 overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-border/30 flex items-center gap-2">
+                      <Loader2 className="h-3.5 w-3.5 text-muted-foreground/50 animate-spin shrink-0" />
+                      <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                        <span className="text-[10px] font-medium text-muted-foreground/50 uppercase tabular-nums shrink-0">
+                          #{item.blueprintIndex}
+                        </span>
+                        {item.slot.type && (
+                          <Badge variant="secondary" className="text-[10px] px-1.5 opacity-60">
+                            {item.slot.type.toUpperCase()}
+                          </Badge>
+                        )}
+                        {bc && (
+                          <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-medium opacity-60", bc.bg, bc.color)}>
+                            {bc.short}
+                          </span>
+                        )}
+                        {item.slot.chapter && (
+                          <span className="text-[11px] text-muted-foreground/50 truncate">{item.slot.chapter}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="px-4 py-3 space-y-2">
+                      {item.slot.topic_hint ? (
+                        <p className="text-[11px] text-muted-foreground/50 italic">{item.slot.topic_hint}</p>
+                      ) : null}
+                      <Skeleton className="h-3 w-full opacity-40" />
+                      <Skeleton className="h-3 w-5/6 opacity-30" />
+                      <Skeleton className="h-3 w-4/6 opacity-20" />
+                    </div>
+                  </div>
                 </div>
               )
             }

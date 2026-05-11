@@ -655,6 +655,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         scope_chapters: list[str] | None = None,
         trace_id: str = "",
         correction_strategies: dict[str, str] | None = None,
+        emit_fn=None,
     ) -> BuilderOutput:
 
         """Build questions from blueprint."""
@@ -729,6 +730,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         correction_strategies=correction_strategies,
                         gemini_key_pool=_gemini_pool,
                         semaphore=_global_sem,
+                        emit_fn=emit_fn,
                     )
                     for i, bp_chunk in enumerate(blueprint_chunks)
                 ]
@@ -897,6 +899,7 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         correction_strategies: dict[str, str] | None = None,
         gemini_key_pool: GeminiKeyPool | None = None,
         semaphore: asyncio.Semaphore | None = None,
+        emit_fn=None,
     ) -> tuple[list[dict], list[str]]:
         """Generate questions for a blueprint chunk IN PARALLEL using semaphore.
 
@@ -934,6 +937,22 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
         ) -> tuple[int, dict | None, list[str]]:
             """Generate one question with semaphore limiting concurrency."""
             async with semaphore:
+                if emit_fn:
+                    try:
+                        emit_fn({
+                            "type": "question_started",
+                            "question_id": slot.get("question_id", ""),
+                            "blueprint_index": slot.get("blueprint_index", slot_number),
+                            "slot": {
+                                "type": slot.get("type", "mcq"),
+                                "bloom_level": slot.get("bloom_level", ""),
+                                "chapter": slot.get("chapter", ""),
+                                "section": slot.get("primary_section_title") or slot.get("section", ""),
+                                "topic_hint": slot.get("topic_hint", ""),
+                            },
+                        })
+                    except Exception:
+                        pass
                 # ── Section-aware chunk selection ─────────────────────────────────
                 import unicodedata as _ud
                 def _norm_sec(s: str) -> str:
@@ -1049,6 +1068,16 @@ Ví dụ distractor tốt cho "Lực ma sát luôn ngược chiều chuyển đ�
                         _val = slot.get(_field)
                         if _val is not None:
                             question[_field] = _val
+
+                if emit_fn and question:
+                    try:
+                        emit_fn({
+                            "type": "question_generated",
+                            "question_id": question.get("question_id", ""),
+                            "question": question,
+                        })
+                    except Exception:
+                        pass
 
                 return slot_number, question, q_warnings
 

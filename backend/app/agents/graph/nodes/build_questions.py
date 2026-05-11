@@ -110,6 +110,14 @@ async def build_questions(state: ExamGraphState) -> ExamGraphState:
             existing = correction_strategies.get(qid, "")
             correction_strategies[qid] = (existing + "\n" + strategy).strip() if existing else strategy
 
+    # Streaming emit callback — fires question_started / question_generated as each slot completes
+    _emitted_question_ids: set[str] = set()
+
+    def _builder_emit(event: dict) -> None:
+        _emit(state, event)
+        if event.get("type") == "question_generated":
+            _emitted_question_ids.add(event.get("question_id", ""))
+
     builder_result = await builder_agent.build(
         blueprint=filtered_blueprint,
         retrieved_context=retrieved_context,
@@ -118,6 +126,7 @@ async def build_questions(state: ExamGraphState) -> ExamGraphState:
         scope_chapters=scope,
         trace_id=exam_id,
         correction_strategies=correction_strategies or None,
+        emit_fn=_builder_emit,
     )
 
     new_questions = list(getattr(builder_result, "questions", []))
@@ -157,18 +166,19 @@ async def build_questions(state: ExamGraphState) -> ExamGraphState:
     new_topics = [q.get("topic_hint", "") for q in questions if q.get("topic_hint")]
     topics_used = list(set(topics_used + new_topics))
 
-    # Emit question_generated events with progress
+    # Emit reasoning_chunk summaries; skip question_generated for already-streamed questions
     for qi, q in enumerate(questions):
         _emit(state, {
             "type": "reasoning_chunk",
             "step_id": "step-3",
             "chunk": f"[✓] Câu {qi+1}/{len(questions)}: {(q.get('stem') or q.get('content', ''))[:80]}...\n",
         })
-        _emit(state, {
-            "type": "question_generated",
-            "question_id": q.get("question_id", ""),
-            "question": q,
-        })
+        if q.get("question_id") not in _emitted_question_ids:
+            _emit(state, {
+                "type": "question_generated",
+                "question_id": q.get("question_id", ""),
+                "question": q,
+            })
 
     cost_report["builder"] = builder_result.token_usage.model_dump()
 
