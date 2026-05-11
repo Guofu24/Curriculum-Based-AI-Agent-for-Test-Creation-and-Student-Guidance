@@ -163,6 +163,8 @@ interface RequirementsData {
   total_questions?: number
   mcq_count?: number
   essay_count?: number
+  dung_sai_count?: number
+  short_answer_count?: number
   bloom_distribution_summary?: string
   user_prompt?: string
   extra_instructions?: string
@@ -274,6 +276,88 @@ const BLOOM_CONFIG: Record<
 }
 
 const BLOOM_ORDER: BloomLevel[] = ["nhan_biet", "thong_hieu", "van_dung", "van_dung_cao"]
+
+type QuestionKind = "mcq" | "essay" | "dung_sai" | "short_answer"
+
+const QUESTION_TYPE_LABELS: Record<QuestionKind, { short: string; label: string }> = {
+  mcq: { short: "MCQ", label: "Trắc nghiệm" },
+  essay: { short: "Essay", label: "Tự luận" },
+  dung_sai: { short: "Đúng-Sai", label: "Đúng-Sai" },
+  short_answer: { short: "Trả lời ngắn", label: "Trả lời ngắn" },
+}
+
+function normalizeQuestionType(type: unknown): QuestionKind {
+  const raw = String(type || "mcq").trim().toLowerCase().replace(/[-\s]+/g, "_")
+  if (raw === "essay" || raw === "tu_luan" || raw === "tự_luận") return "essay"
+  if (raw === "dung_sai" || raw === "đúng_sai" || raw === "true_false" || raw === "tf") return "dung_sai"
+  if (raw === "short_answer" || raw === "tra_loi_ngan" || raw === "trả_lời_ngắn" || raw === "sa") return "short_answer"
+  return "mcq"
+}
+
+function countQuestionTypes(questions: Array<{ type?: unknown }>) {
+  return questions.reduce<Record<QuestionKind, number>>(
+    (acc, q) => {
+      acc[normalizeQuestionType(q.type)] += 1
+      return acc
+    },
+    { mcq: 0, essay: 0, dung_sai: 0, short_answer: 0 },
+  )
+}
+
+function formatQuestionTypeCounts(counts: Record<QuestionKind, number>): string {
+  return (Object.keys(QUESTION_TYPE_LABELS) as QuestionKind[])
+    .filter((kind) => counts[kind] > 0)
+    .map((kind) => `${counts[kind]} ${QUESTION_TYPE_LABELS[kind].short}`)
+    .join(" · ")
+}
+
+function formatRequirementCounts(data: RequirementsData): string {
+  const counts: Record<QuestionKind, number> = {
+    mcq: data.mcq_count || 0,
+    essay: data.essay_count || 0,
+    dung_sai: data.dung_sai_count || 0,
+    short_answer: data.short_answer_count || 0,
+  }
+  const detailed = formatQuestionTypeCounts(counts)
+  if (detailed) return detailed
+  return data.total_questions ? `${data.total_questions} câu` : ""
+}
+
+function questionOrder(question: QuestionGeneratedEvent["question"], fallbackIndex: number): number {
+  const blueprintIndex = Number(question.blueprint_index)
+  if (Number.isFinite(blueprintIndex) && blueprintIndex > 0) return blueprintIndex
+
+  const orderIndex = Number(question.order_index ?? question.index)
+  if (Number.isFinite(orderIndex) && orderIndex > 0) return orderIndex
+
+  return fallbackIndex + 1
+}
+
+function sortQuestionsByBlueprint<T extends QuestionGeneratedEvent["question"]>(items: T[]): T[] {
+  return [...items]
+    .map((item, index) => ({ item, index, order: questionOrder(item, index) }))
+    .sort((a, b) => a.order - b.order || a.index - b.index)
+    .map(({ item }) => item)
+}
+
+function buildQuestionFeedItems(questions: QuestionGeneratedEvent["question"][]): FeedItem[] {
+  return questions.map((question, index) => ({
+    id: `q-${question.question_id || index + 1}`,
+    kind: "question" as const,
+    question,
+    index,
+  }))
+}
+
+function replaceQuestionFeedItems(prev: FeedItem[], questions: QuestionGeneratedEvent["question"][]): FeedItem[] {
+  const questionItems = buildQuestionFeedItems(questions)
+  const firstQuestionIndex = prev.findIndex((item) => item.kind === "question")
+  if (firstQuestionIndex < 0) return [...prev, ...questionItems]
+
+  const before = prev.slice(0, firstQuestionIndex).filter((item) => item.kind !== "question")
+  const after = prev.slice(firstQuestionIndex).filter((item) => item.kind !== "question")
+  return [...before, ...questionItems, ...after]
+}
 
 // ─── Props ─────────────────────────────────────────────────────────────────────
 
@@ -446,33 +530,18 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
           const e = msg as QuestionGeneratedEvent
           const q = e.question
           if (examType && examType !== "mixed") {
-            const qType = q.type || "mcq"
-            if (qType !== examType) return
+            const qType = normalizeQuestionType(q.type)
+            if (qType !== normalizeQuestionType(examType)) return
           }
           setQuestions((prev) => {
             const qId = q.question_id
-            // If this question already exists (e.g. validator retry rebuild), replace it in-place
+            // If this question already exists (e.g. validator retry rebuild), replace it.
             const existingIdx = qId ? prev.findIndex((ex) => ex.question_id === qId) : -1
-            if (existingIdx !== -1) {
-              const next = [...prev]
-              next[existingIdx] = q
-              // Also update feedItems in-place
-              setFeedItems((f) =>
-                f.map((fi) =>
-                  fi.kind === 'question' &&
-                  (fi as Extract<FeedItem, { kind: 'question' }>).question.question_id === qId
-                    ? { ...fi, question: q }
-                    : fi
-                )
-              )
-              return next
-            }
-            // New question — append
-            const next = [...prev, q]
-            setFeedItems((f) => {
-              if (qId && f.some((fi) => fi.kind === 'question' && (fi as {id:string;kind:'question';question:QuestionGeneratedEvent['question'];index:number}).question.question_id === qId)) return f
-              return [...f, { id: `q-${qId || next.length}`, kind: 'question' as const, question: q, index: next.length - 1 }]
-            })
+            const rawNext = existingIdx !== -1
+              ? prev.map((ex, index) => (index === existingIdx ? q : ex))
+              : [...prev, q]
+            const next = sortQuestionsByBlueprint(rawNext)
+            setFeedItems((f) => replaceQuestionFeedItems(f, next))
             return next
           })
           break
@@ -522,6 +591,11 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
           if (e.checkpoint_id === 2) {
             const d = e.data as HitlCheckpointEvent["data"]
             setValidationIssues(d.issues || [])
+            if (Array.isArray(d.questions) && d.questions.length > 0) {
+              const next = sortQuestionsByBlueprint(d.questions)
+              setQuestions(next)
+              setFeedItems((prev) => replaceQuestionFeedItems(prev, next))
+            }
           }
           if (e.checkpoint_id === 3) {
             const d = e.data as HitlCheckpointEvent["data"]
@@ -627,17 +701,13 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
           const updatedQ = (msg as { type: string; question_id: string; question: QuestionGeneratedEvent["question"] }).question
           const updatedId = (msg as { type: string; question_id: string }).question_id
           if (!updatedQ || !updatedId) break
-          setQuestions((prev) =>
-            prev.map((q) => (q.question_id === updatedId ? updatedQ : q))
-          )
-          setFeedItems((prev) =>
-            prev.map((fi) =>
-              fi.kind === "question" &&
-              (fi as Extract<FeedItem, { kind: "question" }>).question.question_id === updatedId
-                ? { ...fi, question: updatedQ }
-                : fi
+          setQuestions((prev) => {
+            const next = sortQuestionsByBlueprint(
+              prev.map((q) => (q.question_id === updatedId ? updatedQ : q)),
             )
-          )
+            setFeedItems((items) => replaceQuestionFeedItems(items, next))
+            return next
+          })
           setQuestionRegenerating(null)
           break
         }
@@ -780,8 +850,8 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
 
   // ─── Count questions by type ─────────────────────────────────────────────────
 
-  const mcqCount = questions.filter(q => (q.type || "mcq") === "mcq").length
-  const essayCount = questions.filter(q => q.type === "essay").length
+  const questionTypeCounts = countQuestionTypes(questions)
+  const questionTypeSummary = formatQuestionTypeCounts(questionTypeCounts)
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
@@ -894,14 +964,10 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
                 {requirementsData.scope && (
                   <p><span className="font-medium text-foreground">Phạm vi: </span><span className="text-muted-foreground">{requirementsData.scope.join(", ")}</span></p>
                 )}
-                {(requirementsData.mcq_count || requirementsData.total_questions) && (
+                {(formatRequirementCounts(requirementsData) || requirementsData.total_questions) && (
                   <p>
                     <span className="font-medium text-foreground">Số câu: </span>
-                    <span className="text-muted-foreground">
-                      {requirementsData.mcq_count ? `${requirementsData.mcq_count} MCQ` : ""}
-                      {requirementsData.essay_count ? ` + ${requirementsData.essay_count} Essay` : ""}
-                      {!requirementsData.mcq_count && requirementsData.total_questions ? `${requirementsData.total_questions} câu` : ""}
-                    </span>
+                    <span className="text-muted-foreground">{formatRequirementCounts(requirementsData)}</span>
                   </p>
                 )}
                 {requirementsData.bloom_distribution_summary && (
@@ -1244,7 +1310,7 @@ const [bloomDist, setBloomDist] = useState<BloomDistribution | null>(null)
                 <div>
                   <p className="font-semibold text-emerald-900 text-base">Đề thi đã hoàn tất!</p>
                   <p className="text-sm text-emerald-700 mt-1">
-                    {questions.length} câu hỏi · {mcqCount} MCQ · {essayCount} Essay
+                    {questions.length} câu hỏi{questionTypeSummary ? ` · ${questionTypeSummary}` : ""}
                   </p>
                   {costReport?.total_cost_usd != null && (
                     <p className="text-xs text-muted-foreground mt-1">Chi phí: ${costReport.total_cost_usd.toFixed(4)}</p>
@@ -1413,18 +1479,21 @@ function ThinkingBlock({
 
 // ─── QuestionCard sub-component ───────────────────────────────────────────────
 
-/** Returns true only if text likely contains LaTeX math delimiters */
-function hasMath(text: string): boolean {
-  return text.includes('$') || text.includes('\\(') || text.includes('\\[')
-}
-
-/** Render text: use LatexRenderer only when math is detected, else plain span */
+/** Render mixed plain text and LaTeX consistently in the live review cards. */
 function MathText({ children, className }: { children: string; className?: string }) {
   if (!children) return null
-  if (hasMath(children)) {
-    return <LatexRenderer className={className}>{children}</LatexRenderer>
-  }
-  return <span className={className}>{children}</span>
+  return <LatexRenderer className={className}>{children}</LatexRenderer>
+}
+
+function normalizeMathValue(value: unknown): string {
+  const text = String(value)
+  if (text.includes("$") || text.includes("\\(") || text.includes("\\[")) return text
+  return /\\[a-zA-Z]+|[_^]\{?/.test(text) ? `$${text}$` : text
+}
+
+function MathValue({ value, className }: { value: unknown; className?: string }) {
+  if (value === null || value === undefined || value === "") return null
+  return <MathText className={className}>{normalizeMathValue(value)}</MathText>
 }
 
 function QuestionCard({
@@ -1436,7 +1505,7 @@ function QuestionCard({
 }) {
   const bloom = question.bloom_level as BloomLevel | undefined
   const bloomInfo = bloom && BLOOM_CONFIG[bloom] ? BLOOM_CONFIG[bloom] : null
-  const qType = question.type || "mcq"
+  const qType = normalizeQuestionType(question.type)
   const stem = question.stem || question.content || ""
   const rawOptions = question.options as Record<string, string> | undefined
   const optionsArray = question.optionsArray || []
@@ -1468,7 +1537,7 @@ function QuestionCard({
               qType === "short_answer" && "bg-teal-100 text-teal-700 border-teal-200",
             )}
           >
-            {qType === "mcq" ? "MCQ" : qType === "essay" ? "Essay" : qType === "dung_sai" ? "Đúng-Sai" : qType === "short_answer" ? "Trả lời ngắn" : qType.toUpperCase()}
+            {QUESTION_TYPE_LABELS[qType].short}
           </Badge>
           {bloomInfo && (
             <span className={cn("text-xs px-2 py-0.5 rounded-full border font-medium", bloomInfo.bg, bloomInfo.color)}>
@@ -1523,7 +1592,9 @@ function QuestionCard({
               }`}
             >
               <span className="font-semibold text-xs w-4 shrink-0 mt-0.5">{prop.label})</span>
-              <span className="flex-1">{prop.text}</span>
+              <span className="flex-1">
+                <MathText>{prop.text}</MathText>
+              </span>
               <span className={`text-xs font-medium shrink-0 ${prop.is_correct ? "text-emerald-400" : "text-red-400"}`}>
                 {prop.is_correct ? "Đúng" : "Sai"}
               </span>
@@ -1536,12 +1607,27 @@ function QuestionCard({
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 space-y-1">
           <p className="text-sm">
             <span className="font-medium text-amber-300 text-xs">Đáp án: </span>
-            <span className="font-mono text-sm">{question.correct_answer ?? "—"}</span>
-            {question.unit && <span className="ml-1 text-xs text-muted-foreground">{question.unit}</span>}
+            {question.correct_answer !== undefined && question.correct_answer !== null && question.correct_answer !== "" ? (
+              <MathValue value={question.correct_answer} className="font-mono text-sm" />
+            ) : (
+              <span className="font-mono text-sm">—</span>
+            )}
+            {question.unit && (
+              <span className="ml-1 text-xs text-muted-foreground">
+                <MathValue value={question.unit} />
+              </span>
+            )}
           </p>
           {question.solution && (
-            <p className="text-xs text-muted-foreground whitespace-pre-line">{question.solution}</p>
+            <MathText className="text-xs text-muted-foreground leading-relaxed">{question.solution}</MathText>
           )}
+        </div>
+      )}
+
+      {qType === "mcq" && question.explanation && (
+        <div className="mt-3 rounded-lg border bg-muted/30 p-3">
+          <p className="text-xs font-semibold text-muted-foreground mb-1">Giải thích</p>
+          <MathText className="text-xs text-muted-foreground leading-relaxed">{question.explanation}</MathText>
         </div>
       )}
 

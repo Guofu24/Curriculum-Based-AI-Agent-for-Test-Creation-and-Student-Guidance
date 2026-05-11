@@ -146,18 +146,45 @@ async def create_outline(state: ExamGraphState) -> ExamGraphState:
 
     cost_report["outline"] = outline_result.token_usage.model_dump()
 
+    def _slot_type(slot: dict) -> str:
+        raw = str(slot.get("type") or "mcq").strip().lower().replace("-", "_").replace(" ", "_")
+        if raw in {"essay", "tu_luan", "tự_luận"}:
+            return "essay"
+        if raw in {"dung_sai", "đúng_sai", "true_false", "tf"}:
+            return "dung_sai"
+        if raw in {"short_answer", "tra_loi_ngan", "trả_lời_ngắn", "sa"}:
+            return "short_answer"
+        return "mcq"
+
+    type_counts = {"mcq": 0, "essay": 0, "dung_sai": 0, "short_answer": 0}
+    for slot in blueprint:
+        type_counts[_slot_type(slot)] += 1
+
+    type_summary = " + ".join(
+        label
+        for label in (
+            f"{type_counts['mcq']} MCQ" if type_counts["mcq"] else "",
+            f"{type_counts['essay']} Essay" if type_counts["essay"] else "",
+            f"{type_counts['dung_sai']} Đúng-Sai" if type_counts["dung_sai"] else "",
+            f"{type_counts['short_answer']} Trả lời ngắn" if type_counts["short_answer"] else "",
+        )
+        if label
+    ) or "0 câu"
+
     # Emit event via WebSocket
     _emit(state, {
         "type": "outline_created",
         "blueprint_slots": len(blueprint),
-        "mcq_count": sum(1 for s in blueprint if s.get("type") != "essay"),
-        "essay_count": sum(1 for s in blueprint if s.get("type") == "essay"),
+        "mcq_count": type_counts["mcq"],
+        "essay_count": type_counts["essay"],
+        "dung_sai_count": type_counts["dung_sai"],
+        "short_answer_count": type_counts["short_answer"],
     })
     # Stream blueprint summary to reasoning feed
     _emit(state, {
         "type": "reasoning_chunk",
         "step_id": "step-2",
-        "chunk": f"Hoàn tất! Tạo {len(blueprint)} câu ({sum(1 for s in blueprint if s.get('type') != 'essay')} MCQ + {sum(1 for s in blueprint if s.get('type') == 'essay')} Essay).\n",
+        "chunk": f"Hoàn tất! Tạo {len(blueprint)} câu ({type_summary}).\n",
     })
 
     return {
