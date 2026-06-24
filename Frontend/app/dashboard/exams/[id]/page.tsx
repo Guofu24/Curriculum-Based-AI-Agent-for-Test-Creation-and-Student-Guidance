@@ -162,7 +162,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
   const [blueprint, setBlueprint] = useState<BlueprintSlot[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('questions')
-  const [questionFilter, setQuestionFilter] = useState<'all' | 'mcq' | 'essay'>('all')
+  const [questionFilter, setQuestionFilter] = useState<'all' | 'mcq' | 'essay' | 'dung_sai' | 'short_answer'>('all')
   const [editingQuestion, setEditingQuestion] = useState<string | null>(null)
   const [editForm, setEditForm] = useState<McqEditForm>({ options: {} })
   const [isSaving, setIsSaving] = useState(false)
@@ -420,6 +420,8 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
           optionsRecord[opt.label] = opt.text || ''
         }
       }
+    } else if (question.options && typeof question.options === 'object') {
+      Object.assign(optionsRecord, question.options)
     }
     setEditForm({
       content: question.content,
@@ -563,6 +565,8 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
 
   const mcqCount = exam.questions?.filter(q => getQType(q) === 'mcq').length || 0
   const essayCount = exam.questions?.filter(q => getQType(q) === 'essay').length || 0
+  const dungSaiCount = exam.questions?.filter(q => getQType(q) === 'dung_sai').length || 0
+  const shortAnswerCount = exam.questions?.filter(q => getQType(q) === 'short_answer').length || 0
 
   return (
     <>
@@ -584,7 +588,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
                 <div className="flex flex-wrap items-center gap-2 mt-1">
                   <StatusBadge status={exam.status} />
                   <Badge variant="outline">
-                    {mcqCount} trắc nghiệm, {essayCount} tự luận
+                    {mcqCount} trắc nghiệm{dungSaiCount > 0 ? `, ${dungSaiCount} đúng/sai` : ''}{shortAnswerCount > 0 ? `, ${shortAnswerCount} trả lời ngắn` : ''}{essayCount > 0 ? `, ${essayCount} tự luận` : ''}
                   </Badge>
                 </div>
               </div>
@@ -678,7 +682,7 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
               <div className="flex flex-wrap items-center gap-3">
                 <Select
                   value={questionFilter}
-                  onValueChange={(v) => setQuestionFilter(v as 'all' | 'mcq' | 'essay')}
+                  onValueChange={(v) => setQuestionFilter(v as 'all' | 'mcq' | 'essay' | 'dung_sai' | 'short_answer')}
                 >
                   <SelectTrigger className="w-[180px]">
                     <SelectValue placeholder="Lọc câu hỏi" />
@@ -686,7 +690,9 @@ export default function ExamDetailPage({ params }: { params: Promise<PageParams>
                   <SelectContent>
                     <SelectItem value="all">Tất cả ({exam.questions?.length || 0})</SelectItem>
                     <SelectItem value="mcq">Trắc nghiệm ({mcqCount})</SelectItem>
-                    <SelectItem value="essay">Tự luận ({essayCount})</SelectItem>
+                    {dungSaiCount > 0 && <SelectItem value="dung_sai">Đúng/Sai ({dungSaiCount})</SelectItem>}
+                    {shortAnswerCount > 0 && <SelectItem value="short_answer">Trả lời ngắn ({shortAnswerCount})</SelectItem>}
+                    {essayCount > 0 && <SelectItem value="essay">Tự luận ({essayCount})</SelectItem>}
                   </SelectContent>
                 </Select>
 

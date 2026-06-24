@@ -123,6 +123,9 @@ def _exam_to_detail(exam, versions=None, feedback_events=None) -> dict:
             # Normalize correct → correct_answer (fallback)
             if "correct" in q and "correct_answer" not in q:
                 q["correct_answer"] = q.pop("correct")
+            # Normalize question_id → id for frontend compatibility
+            if "question_id" in q and not q.get("id"):
+                q["id"] = q["question_id"]
             # Normalize warnings → validation_warnings
             if "warnings" in q and "validation_warnings" not in q:
                 q["validation_warnings"] = q.get("warnings", [])
